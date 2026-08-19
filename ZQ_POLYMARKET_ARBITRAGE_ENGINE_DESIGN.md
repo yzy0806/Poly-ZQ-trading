@@ -1,15 +1,15 @@
 # ZQ–Polymarket Arbitrage Engine
 
-Version: 0.1 Draft for Review  
-Date: 2026-08-18  
-Status: Documentation only; implementation and live trading are not authorized  
+Version: 0.2 Draft for Final Review<br>
+Date: 2026-08-19<br>
+Status: Documentation only; implementation and live trading are not authorized
 Primary reference strategy: September 16, 2026 FOMC decision, September 2026 30-Day Federal Funds futures (`ZQU6`)
 
 ## 1. Executive Decision
 
 The recommended system is a local, event-driven trading service with a browser dashboard. It will consume executable IBKR ZQ quotes and Polymarket order books, calculate CME-style rate probabilities and conservative cross-venue hedge P&L, and submit orders only when every pricing, liquidity, margin, compliance, and operational control passes.
 
-The trading sequence is fixed by mandate: each child order submits exactly 10 ZQ contracts first. Every incremental ZQ execution creates a hedge obligation. The engine then submits only the Polymarket quantity corresponding to the newly filled ZQ quantity. It does not wait for all 10 ZQ contracts to fill, and it never opens the Polymarket leg before a ZQ execution is confirmed.
+The trading sequence is fixed by mandate: each child order submits exactly 10 ZQ contracts first. Only one child batch may be active at a time, while fully reconciled sequential batches may accumulate to a maximum aggregate ZQ position of 100 contracts. Every incremental ZQ execution creates a hedge obligation. The engine then submits only the Polymarket quantity corresponding to the newly filled ZQ quantity. It does not wait for all 10 ZQ contracts to fill, and it never opens the Polymarket leg before a ZQ execution is confirmed.
 
 The correct trigger is not a headline probability difference. The trigger is the minimum modeled terminal P&L after walking executable order-book depth, applying commissions and current Polymarket fees, including quantity rounding, and deducting configurable slippage and model-risk reserves. A trade is eligible only if this conservative P&L exceeds both an absolute dollar threshold and a return-on-capital threshold.
 
@@ -25,25 +25,27 @@ The future implementation must launch in `READ_ONLY` mode. Progression to `PAPER
 
 ### 3.1 In Scope for Version 1
 
-1. Stream live bid, ask, size, timestamp, and market-data type for the required ZQ contracts through IBKR TWS or IB Gateway.
+1. Trade only the September 16, 2026 Polymarket decision event against the approved September 2026 ZQ strategy. Automatic discovery and trading of later FOMC meetings is deferred to version 2.
 
-2. Stream Polymarket level-2 order books for the configured Yes and No outcome tokens.
+2. Stream live bid, ask, size, timestamp, and market-data type for the required ZQ contracts through IBKR TWS or IB Gateway.
 
-3. Calculate the CME-style FOMC probability tree, the executable ZQ-implied price of risk, Polymarket probabilities, probability differences, full intermediate calculations, and conservative hedge P&L.
+3. Stream Polymarket level-2 order books for the configured Yes and No outcome tokens.
 
-4. Display signals, inputs, calculations, payoff scenarios, liquidity, order state, positions, margin, P&L, data health, and alerts on a local dashboard.
+4. Calculate the CME-style FOMC probability tree, the executable ZQ-implied price of risk, Polymarket probabilities, probability differences, full intermediate calculations, and conservative hedge P&L.
 
-5. Submit one ZQ child order of exactly 10 contracts when the configured net-profit and risk thresholds pass.
+5. Display signals, inputs, calculations, payoff scenarios, liquidity, order state, positions, margin, P&L, data health, and alerts on a local dashboard.
 
-6. On every incremental ZQ fill, immediately submit the corresponding Polymarket hedge amount, monitor its lifecycle, and track any residual exposure.
+6. Submit one ZQ child order of exactly 10 contracts when the configured net-profit and risk thresholds pass. Permit no more than one active batch and no more than 100 aggregate ZQ contracts.
 
-7. Persist every quote snapshot used for a signal, calculation version, order request, venue response, execution, fee, position, state transition, manual action, and reconciliation result.
+7. On every incremental ZQ fill, immediately submit the corresponding Polymarket hedge amount, monitor its lifecycle, and track any residual exposure.
 
-8. Recover deterministically after a process or network restart without duplicating orders.
+8. Persist every quote snapshot used for a signal, calculation version, order request, venue response, execution, fee, position, state transition, manual action, and reconciliation result.
+
+9. Recover deterministically after a process or network restart without duplicating orders.
 
 ### 3.2 Explicitly Out of Scope for Version 1
 
-1. Cross-account allocation, multiple IBKR accounts, multiple Polymarket wallets, portfolio optimization across unrelated events, and autonomous market discovery.
+1. Cross-account allocation, multiple IBKR accounts, multiple Polymarket wallets, portfolio optimization across unrelated events, autonomous market discovery, and generic trading of future FOMC meetings.
 
 2. Market making, passive two-sided quoting, leverage optimization, or hidden assumptions about Polymarket market rules.
 
@@ -324,7 +326,7 @@ A signal is `TRADEABLE` only when all of the following are true:
 
 8. The minimum covered-scenario P&L after all costs and reserves exceeds both `min_net_profit_usd` and `min_return_on_capital_bps`.
 
-9. The maximum residual P&L loss in every tail scenario is inside its limit, and no unmodeled scenario has been silently excluded.
+9. The minimum P&L across the explicitly approved version-1 scenario set remains above the configured thresholds. Outcomes beyond the approved scenario set are disclosed as excluded and do not gate version-1 trading.
 
 10. There is no active batch, unresolved hedge deficit, unmatched Polymarket trade, reconciliation difference, kill switch, manual pause, or critical alert.
 
@@ -347,7 +349,19 @@ A signal is `TRADEABLE` only when all of the following are true:
 | `RECOVERY` | Restart or uncertain venue state | Query both venues; no new orders |
 | `HALTED` | Kill switch or critical failure | Cancel safe-to-cancel orders; manual review |
 
-### 8.2 ZQ-First Partial-Fill Logic
+### 8.2 ZQ Resting Order Policy
+
+Every ZQ child order is a `LMT` order with `DAY` time in force and an original quantity of exactly 10 contracts. For a buy, the initial limit is no higher than the current executable ask and the configured one-tick slippage boundary. For a sell, it is no lower than the current executable bid and the corresponding one-tick boundary. An uncapped market order is prohibited.
+
+The order is not immediate-or-cancel. Any unfilled remainder stays posted at its original limit and may continue filling during the trading day. Version 1 does not automatically chase or reprice a resting ZQ order. A later version may add a separately approved replacement policy.
+
+While any remainder is working, the engine recalculates the complete cross-venue trade at least every 500 milliseconds and on every relevant ZQ or Polymarket book update. The calculation assumes any remaining ZQ may fill at the resting limit and requires sufficient current Polymarket depth for the entire resulting hedge obligation. The order may remain posted only while minimum modeled net profit is at least `$250`, return on committed capital is at least `300` basis points, all data are fresh, projected margin gates pass, the cumulative position would remain at or below 100 ZQ, and no other hard stop is active.
+
+If either profit threshold fails, hedge depth becomes insufficient, data become stale, eligibility changes, margin gates fail, or any hard stop activates, the engine immediately requests cancellation of the unfilled ZQ remainder. It treats the order as live until IBKR confirms cancellation and continues processing every late execution by `execId`. The DAY expiry is an additional backstop, not a substitute for active monitoring and cancellation.
+
+The engine may start the next 10-contract batch only after the prior ZQ order is terminal, every resulting Polymarket obligation is fully reconciled, and the batch is `COMPLETE`. Sequential completed batches may accumulate to the approved aggregate limit of 100 ZQ contracts.
+
+### 8.3 ZQ-First Partial-Fill Logic
 
 The submitted ZQ order quantity is always exactly 10 contracts. An IBKR execution is identified by `execId`, not only by cumulative `orderStatus`, because every partial fill has a separate execution identifier.
 
@@ -365,7 +379,7 @@ or the corresponding quantities from the active payoff-matrix strategy.
 
 The engine subtracts confirmed Polymarket fills from the due ledger and submits only the remaining deficit. Duplicate IBKR callbacks or reconnect replays cannot create a duplicate hedge because `execId`, batch ID, strategy version, and obligation ID are persisted with uniqueness constraints.
 
-### 8.3 Polymarket Order Policy
+### 8.4 Polymarket Order Policy
 
 The default hedge order is a `BUY` limit order submitted as good-till-cancelled with `post_only=True`. It must add liquidity and must never accept the current ask. If the order would match immediately because the book moved between observation and submission, Polymarket must reject it rather than execute it as a taker.
 
@@ -381,13 +395,13 @@ Only one live default hedge order may exist for each token and hedge obligation.
 
 If the order is unfilled or partially filled after `polymarket_post_only_reprice_seconds`, the engine cancels the remaining quantity, confirms the cancellation, refreshes the book, and reposts the residual at the new highest permissible maker price. It may do this only up to `polymarket_post_only_max_reprices` and never beyond `max_unhedged_seconds`. Cancel/replace operations retain the same obligation ID and use a new idempotency sequence so that a late fill cannot create an overhedge.
 
-Signal qualification and the dashboard show both passive-post expected P&L and emergency-cap P&L. A marketable Polymarket order is not part of the default path. Crossing the book is permitted only under the separately approved emergency hierarchy in Section 8.4, after the passive timeout or another critical hedge condition. `CONFIRMED` is the final successful lifecycle state; `FAILED` is a critical hedge incident.
+Signal qualification and the dashboard show both passive-post expected P&L and emergency-cap P&L. A marketable Polymarket order is not part of the default path. Crossing the book is permitted only under the separately approved emergency hierarchy in Section 8.5, after the passive timeout or another critical hedge condition. `CONFIRMED` is the final successful lifecycle state; `FAILED` is a critical hedge incident.
 
-### 8.4 Failure and Emergency Policy
+### 8.5 Failure and Emergency Policy
 
-If the Polymarket hedge cannot be filled inside the price and time limits, the engine cancels the unfilled portion of the ZQ order immediately. It then follows one pre-approved emergency policy for the already filled ZQ contracts: cross the Polymarket book up to an emergency cap, unwind the uncovered ZQ quantity, or halt for manual action.
+If the Polymarket hedge cannot be filled inside the price and time limits, the engine cancels the unfilled portion of the ZQ order immediately and attempts the remaining Polymarket obligation with a marketable limit bounded by the lower of the obligation-specific economic cap and an absolute emergency ceiling of `0.99`.
 
-The engine must never invent this choice during an incident. Section 18 requires the operator to select the emergency hierarchy and price caps before live mode is available.
+An already filled ZQ contract is never flattened, reversed, or otherwise liquidated automatically, even when its Polymarket hedge is incomplete. If the emergency Polymarket attempt remains incomplete after `15` seconds, the engine enters `HALTED_MANUAL`, blocks every new order, preserves the uncovered ZQ position, and requires manual operator action. The only automatic ZQ action permitted during the incident is cancellation of an unfilled remainder.
 
 ## 9. Risk Management
 
@@ -401,21 +415,58 @@ The engine must never invent this choice during an incident. Section 18 requires
 | Polymarket market rule or token mapping changed | Halt and require manual re-approval |
 | Margin preview missing or warning returned | No trade |
 | Polymarket balance or allowance insufficient | No trade |
-| Unhedged ZQ fill exceeds limit or timeout | Cancel remaining ZQ and execute emergency policy |
+| Unhedged ZQ fill exceeds limit or 15-second timeout | Cancel unfilled ZQ remainder, attempt Polymarket hedge within the emergency cap, then halt for manual action; never flatten filled ZQ automatically |
 | Venue state uncertain after restart | Recovery mode; reconcile before any new order |
-| Daily loss limit breached | Halt for the day |
+| Daily loss limit breached | Halt for the day, cancel unfilled orders, and preserve filled positions for manual liquidation |
+| Strategy drawdown reaches `$2,000` | Halt, cancel unfilled orders, preserve every filled position, and require manual review and re-arming |
+| Any model, operational, or EFFR-basis reserve is zero in `LIMITED_LIVE` or `LIVE_ARMED` | Configuration validation fails; live arming and order submission remain impossible |
+| New-batch cutoff has begun | Do not start another batch; an already active batch remains governed by its existing profit, liquidity, margin, and cancellation gates |
+| September decision timestamp has arrived | Permanently disable new batches for this event; permit only reconciliation, cancellation, hedging within approved caps, and manual controls |
 | Position, order, or cash reconciliation mismatch | Halt and alert |
-| Outcome outside approved payoff coverage | No trade unless explicitly covered and within tail-risk limit |
+| Scenario outside the approved version-1 payoff set | Disclose as excluded; do not calculate, display, or gate on +75 bp or +100 bp scenarios |
 
 ### 9.2 Configurable Limits
 
-The initial configuration will expose `min_net_profit_usd`, `min_return_on_capital_bps`, `max_zq_position`, `max_open_batches`, `max_unhedged_zq_contracts`, `max_unhedged_seconds`, `max_zq_slippage_ticks`, `max_polymarket_price_slippage`, `polymarket_post_only_reprice_seconds`, `polymarket_post_only_max_reprices`, `polymarket_hard_price_cap`, `min_full_excess_liquidity_usd`, `min_margin_cushion_ratio`, `max_daily_loss_usd`, `max_strategy_drawdown_usd`, `max_tail_loss_usd`, `max_quote_age_ms`, and event-time trading cutoffs.
+Version 1 uses an assumed IBKR account Net Liquidation value of `$100,000` and an approved strategy-capital allocation of `$100,000`. The approved initial limits are:
+
+| Control | Version-1 value |
+|---|---:|
+| ZQ child-order quantity | `10` contracts |
+| Maximum active batches | `1` |
+| Maximum aggregate ZQ position | `100` contracts |
+| Minimum modeled net profit | `$250` per 10-contract batch |
+| Minimum return on committed capital | `300` basis points |
+| Maximum daily loss | `$500`, equal to 0.5% of assumed Net Liquidation |
+| Maximum strategy drawdown | `$2,000`, equal to 2.0% of assumed Net Liquidation |
+| Minimum projected full excess liquidity | Greater of `$10,000` or ten times the IBKR what-if incremental initial margin for the next batch |
+| Minimum projected margin cushion | `0.50` |
+| Maximum ZQ price slippage | `1` current valid ZQ tick |
+| Maximum normal Polymarket price slippage | `0.01` per share |
+| Maximum quote age | `500` milliseconds |
+| Maximum unhedged duration before manual halt | `15` seconds |
+| Normal Polymarket absolute price ceiling | `0.95`, further restricted by the opportunity-specific profit cap |
+| Emergency Polymarket absolute price ceiling | `0.99`, further restricted by the obligation-specific economic cap |
+| Tail-loss gate | Disabled in version 1 |
+| Model-risk reserve | `$0` in development only; positive owner-approved value required before `LIMITED_LIVE` |
+| Operational-risk reserve | `$0` in development only; positive owner-approved value required before `LIMITED_LIVE` |
+| EFFR-basis reserve | `$0` in development only; positive owner-approved value required before `LIMITED_LIVE` |
+| New-batch cutoff | `60` minutes before the scheduled FOMC statement |
+| September 16, 2026 cutoff | `13:00 America/New_York` / `17:00 UTC`, based on the Federal Reserve's scheduled `14:00 America/New_York` statement |
+| Post-decision resumption | Disabled permanently for the September 16, 2026 event |
+
+Strategy drawdown is measured as the decline from the highest reconciled combined strategy equity reached since version-1 activation to the current reconciled combined strategy equity. Combined strategy equity includes realized and executable-mark unrealized P&L from both venues after recorded fees. Reaching, not merely exceeding, `$2,000` triggers the halt. Acknowledging the alert does not reset the high-water mark; any reset requires a separately authenticated manual review, audit reason, and re-arming action.
+
+The new-batch cutoff is derived from the separately controlled FOMC statement timestamp and must be revalidated against the official Federal Reserve calendar before live arming. At or after the cutoff, the engine cannot create a new batch. The cutoff does not automatically abandon an already active batch: its unfilled ZQ remainder continues only while every existing profitability and hard-risk gate passes. Once the scheduled statement timestamp arrives, no post-decision re-arming or new batch is permitted for this event.
+
+No risk limit may silently expand because a target position is larger than the current remaining capacity.
+
+The three zero reserve values are an explicit development exception permitted only in `READ_ONLY`, `PAPER`, and `SHADOW`. They allow calculation and state-machine development without implying that the modeled net P&L is live-ready. Configuration loading must reject `LIMITED_LIVE` or `LIVE_ARMED` whenever any of the three reserves is zero, missing, stale, or lacks an approved configuration version.
 
 Risk limits are read from a versioned configuration. Changes require an authenticated manual action, an audit entry, and re-arming. The dashboard cannot silently change a limit while an order is live.
 
-### 9.3 Basis and Tail Risk
+### 9.3 Basis Risk and Approved Scenario Scope
 
-The 50-plus token payout is capped at one dollar per share, while the ZQ loss continues to grow if the Fed moves more than +50 bp. A long-ZQ bundle sized to +50 bp is short the +75 bp and larger tail. The dashboard must show explicit +75 bp and +100 bp stress P&L even if those scenarios are assigned zero FedWatch probability.
+The approved version-1 payoff matrix contains only `-50`, `-25`, `0`, `+25`, and `+50` basis-point scenarios. The Polymarket `50+` outcome is represented as exactly 50 basis points for version-1 calculations. Moves of `+75` or `+100` basis points are deliberately excluded: the engine does not calculate them, display them, or use them as a trading gate. Minimum profit is therefore a covered-scenario minimum rather than a claim of risk-free profit across every possible settlement.
 
 ZQ settles from actual EFFR observations, not the target-range upper bound. The model therefore carries EFFR-to-target basis risk, calendar carry-forward risk, settlement rounding, and potential technical deviations. These receive an explicit reserve and stress panel.
 
@@ -471,19 +522,25 @@ The panel shows all intermediate values rather than only the final probability:
 
 ### 11.3 Profit Waterfall
 
-For each candidate direction, the dashboard shows ZQ side and executable price, number of contracts, each Polymarket token and shares, current best bid and ask, proposed post-only price, hard cap, passive-post expected P&L, emergency-cap P&L, gross terminal P&L by scenario, IBKR costs, Polymarket fees, slippage reserves, model reserve, net scenario P&L, minimum net P&L, committed capital, margin, return, threshold, and pass/fail reason.
+For each candidate direction, the dashboard shows ZQ side and executable price, number of contracts, each Polymarket token and shares, current best bid and ask, proposed post-only price, hard cap, passive-post expected P&L, emergency-cap P&L, gross terminal P&L by approved scenario, IBKR costs, Polymarket fees, slippage reserves, model reserve, net scenario P&L, covered-scenario minimum net P&L, committed capital, margin, return, threshold, and pass/fail reason.
 
 ### 11.4 Execution and Hedge Monitor
 
-The execution monitor shows batch ID, strategy version, ZQ order ID and permanent ID, original quantity 10, filled quantity, remaining quantity, average fill, each `execId`, required hedge shares by token, Polymarket order ID, post-only flag, posted price, current best bid and ask, submitted shares, matched shares, confirmed shares, deficit, order age, time to next reprice, reprice count, time to emergency threshold, and emergency state.
+The execution monitor shows batch ID, strategy version, ZQ order ID and permanent ID, `LMT/DAY` status, original quantity 10, filled quantity, remaining resting quantity, limit price, current expected profit if the remainder fills, cancellation-threshold distance, average fill, each `execId`, required hedge shares by token, Polymarket order ID, post-only flag, posted price, current best bid and ask, submitted shares, matched shares, confirmed shares, deficit, order age, time to emergency threshold, and emergency state.
 
 ### 11.5 Margin and P&L Panel
 
-The panel shows account net liquidation, cash, initial and maintenance margin, excess liquidity, projected post-order values, margin cushion, IBKR P&L, Polymarket P&L, combined P&L, locked terminal P&L, tail stress P&L, daily loss limit utilization, and strategy drawdown.
+The panel shows account net liquidation, approved strategy capital, cash, initial and maintenance margin, excess liquidity, projected post-order values, margin cushion, IBKR P&L, Polymarket P&L, combined P&L, covered-scenario minimum terminal P&L, daily loss limit utilization, and strategy drawdown.
 
 ### 11.6 Audit and Health Panel
 
 The panel shows last data messages, reconnects, dropped or out-of-order messages, stale feeds, API warnings, rejected orders, reconciliation status, rule hash, configuration version, software version, and the last manual control action.
+
+### 11.7 Version-1 Emergency Notification
+
+Version 1 uses the dashboard as its only emergency-notification destination. An uncovered filled ZQ contract, failed Polymarket hedge, uncertain venue state, or critical reconciliation error produces a full-width, bold, flashing red-and-black banner reading `UNHEDGED ZQ — MANUAL ACTION REQUIRED`. The banner shows the batch ID, uncovered contract count, outstanding Polymarket shares, elapsed time, last confirmed venue states, and the required manual action.
+
+The alert continues flashing until the operator selects `Acknowledge`. Acknowledgment stops the flashing but leaves a solid red critical banner visible. It does not resolve the incident, close any position, or resume trading. The engine remains `HALTED_MANUAL` until the operator has manually resolved the exposure, reconciliation passes, and the system is explicitly re-armed. External email, SMS, webhook, and pager escalation are deferred to version 2.
 
 ## 12. Recommended Technical Architecture
 
@@ -638,13 +695,21 @@ The dashboard binds to localhost by default. Remote access is out of scope until
 
 Polymarket requires L1 wallet signing and L2 API authentication for trading. The private key must remain local. The engine will use the official SDK for signing and will redact signatures and headers from logs.
 
-The workspace timezone is Asia/Taipei, and Polymarket's current geographic-restrictions documentation lists Taiwan as close-only. This does not prove the deployment IP location, but it is a critical go-live constraint. The engine must call the official geoblock endpoint at startup, before arming, and periodically. A blocked or close-only result prevents opening orders. No VPN, proxy, routing, or circumvention feature will be designed or implemented.
+`POLYMARKET_SIGNATURE_TYPE` is `AUTO` in version 1. At startup, the engine derives the signer address from the protected signing key, reads the configured funder address, uses the pinned official SDK's wallet-classification logic, and maps the verified relationship to `0` EOA, `1` POLY_PROXY, `2` GNOSIS_SAFE, or `3` POLY_1271/deposit wallet. The dashboard displays the signer, funder, detected wallet class, resulting signature type, and verification state. An unknown relationship, address mismatch, or disagreement with any explicit override fails startup and makes order submission impossible. The engine does not guess a numeric signature type.
+
+CLOB L2 credentials are provisioned once and then loaded from protected secret storage. Normal startup must not create a new API key. The one-time provisioning tool may call the official create-or-derive operation only under explicit operator authorization, must store the returned API key, secret, and passphrase outside Git and OneDrive, and may perform authenticated read-only queries without enabling order submission.
+
+A custom Polygon RPC endpoint is not required for version-1 pricing, market data, wallet classification, L2 authentication, CLOB order submission or cancellation, or CLOB balance-and-allowance checks. It becomes required only if the engine is later authorized to perform independent on-chain reconciliation or wallet transactions such as approvals, redemption, split, or merge. Version 1 blocks trading and requests manual setup when the authenticated CLOB balance-or-allowance preflight fails; it does not require an RPC endpoint merely to start the off-chain trading engine.
+
+Development occurs in the Asia/Taipei workspace timezone, but the approved production deployment jurisdiction is Hong Kong. Polymarket's current geographic-restrictions documentation does not list Hong Kong as blocked or close-only; this is not a substitute for checking the actual production IP or for the operator's legal and account-eligibility confirmation. The engine must call the official geoblock endpoint at startup, before arming, before every batch, and periodically. Live opening orders require `blocked=false` and `country=HK`. Any blocked, close-only, unexpected-country, or unavailable result prevents opening orders. No VPN, proxy, routing, or circumvention feature will be designed or implemented.
 
 ## 15. Data Freshness and Time
 
 Every message stores the venue timestamp, local monotonic receipt time, UTC wall-clock time, and calculated age. Signal calculations require all legs to fall within a configurable synchronization window.
 
 The engine uses UTC internally. It displays America/New_York for FOMC timing, America/Chicago for CME trading context, and Asia/Taipei for the operator. Clock drift beyond the configured tolerance blocks trading.
+
+For the September 16, 2026 event, the controlled statement timestamp is `2026-09-16T18:00:00Z`, corresponding to `14:00` in America/New_York. New batches are disabled beginning at `2026-09-16T17:00:00Z`, exactly 60 minutes earlier. At the statement timestamp the event remains permanently closed to new version-1 batches; there is no configured post-decision resume time.
 
 IBKR market data must be explicitly identified as live. A delayed or frozen callback disables signals. Polymarket books are seeded from a REST snapshot and maintained through the market WebSocket; sequence or hash inconsistencies force a fresh snapshot before the book is trusted again.
 
@@ -658,7 +723,7 @@ IBKR market data must be explicitly identified as live. A delayed or frozen call
 
 3. Prove equal payoff across every covered outcome for each bundle before costs, then reconcile net payoff after all costs.
 
-4. Test cuts, +75 bp, +100 bp, non-25 bp EFFR movement, settlement rounding, negative probability outputs, empty books, crossed books, and fee changes.
+4. Test the approved `-50`, `-25`, `0`, `+25`, and `+50` basis-point scenarios, non-25 bp EFFR movement inside the approved resolution mapping, settlement rounding, negative probability outputs, empty books, crossed books, and fee changes. Do not add +75 bp or +100 bp version-1 scenarios.
 
 ### 16.2 Execution Tests
 
@@ -671,6 +736,18 @@ IBKR market data must be explicitly identified as live. A delayed or frozen call
 4. Terminate the process at every state transition, restart it, and prove that no duplicate order is created.
 
 5. Verify that a 10-ZQ order is never sent when full 10-contract hedge depth, margin, eligibility, or data freshness is inadequate.
+
+6. Verify that an unfilled `LMT/DAY` remainder stays posted while both profit thresholds and every hard gate pass, is cancelled immediately when any gate fails, and is never automatically chased or repriced.
+
+7. Verify that late ZQ fills received during cancellation create exactly one hedge obligation and are never automatically flattened.
+
+8. Verify that no second batch starts before the prior batch is complete and reconciled, and that aggregate ZQ exposure never exceeds 100 contracts.
+
+9. Verify that no new batch starts at or after `2026-09-16T17:00:00Z`, an active pre-cutoff batch remains subject to all ordinary cancellation gates, and no post-decision re-arm can enable a new batch for this event.
+
+10. Verify that a reconciled `$2,000` peak-to-trough strategy drawdown halts trading, cancels only unfilled orders, preserves filled positions, and cannot be cleared by alert acknowledgment alone.
+
+11. Verify automatic signer-funder wallet classification for all supported signature types and prove that an unknown or mismatched relationship fails closed before any order method is enabled.
 
 ### 16.3 Release Gates
 
@@ -692,15 +769,15 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 2. The payoff engine matches the workbook hedge ratios and independently reconciles all scenario P&L.
 
-3. A qualified batch submits exactly 10 ZQ contracts, never another initial child size.
+3. A qualified batch submits exactly 10 ZQ contracts as `LMT/DAY`, never another initial child size, and never automatically reprices the resting order.
 
 4. Every new ZQ fill creates exactly one incremental hedge obligation and exactly the correct corresponding Polymarket amount.
 
 5. No Polymarket opening order is submitted before a confirmed ZQ execution.
 
-6. No new ZQ order is submitted while a prior hedge deficit or uncertain order state exists.
+6. No new ZQ order is submitted while a prior hedge deficit or uncertain order state exists; aggregate ZQ exposure never exceeds 100 contracts.
 
-7. Margin, available funds, excess liquidity, venue P&L, combined P&L, locked terminal P&L, and tail stress P&L are visible and timestamped.
+7. Margin, available funds, excess liquidity, venue P&L, combined P&L, and covered-scenario minimum terminal P&L are visible and timestamped.
 
 8. Restart recovery reconciles both venues and creates no duplicate orders.
 
@@ -708,29 +785,69 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 10. Credentials never appear in logs, database records, browser payloads, or screenshots.
 
-11. Live opening orders remain impossible when the geoblock check is blocked or close-only.
+11. Filled ZQ is never flattened automatically. An incomplete Polymarket hedge produces the persistent version-1 flashing dashboard alert and leaves the engine halted until manual resolution and re-arming.
 
-12. `LIVE_ARMED` remains impossible until a separate operator approval is recorded after shadow and limited-live review.
+12. Live opening orders remain impossible when the geoblock check is blocked or close-only.
 
-## 18. Decisions Required Before Implementation
+13. The strategy drawdown halt fires at `$2,000`, the new-batch cutoff fires at `2026-09-16T17:00:00Z`, and no post-decision resume can be configured for this event without a new approved strategy version.
 
-1. Confirm whether version 1 trades only the September 16, 2026 event or must support a generic sequence of future FOMC meetings from the first release. The recommendation is to make the calculation engine generic but enable only the September strategy initially.
+14. Automatic wallet classification must pass and the protected L2 credential set must pass authenticated read-only verification before any order-signing test.
 
-2. Provide and approve the exact Polymarket event slugs, condition IDs, outcome token IDs, and resolution rules. Market titles are insufficient.
+15. `LIVE_ARMED` remains impossible until a separate operator approval is recorded after shadow and limited-live review.
 
-3. Confirm the deployment jurisdiction and whether the live Polymarket geoblock endpoint permits opening orders. If the deployment remains in a close-only location, version 1 can be built as analytics and position monitoring only, not as an opening-order engine.
+## 18. Resolved Decisions and Remaining Inputs
 
-4. Define `min_net_profit_usd`, `min_return_on_capital_bps`, daily loss limit, maximum total ZQ position, minimum excess liquidity, margin cushion, maximum tail loss, price slippage, and data-age limits.
+### 18.1 Resolved Version-1 Decisions
 
-5. Select the ZQ order type and chase policy. The recommendation is a marketable limit with a maximum number of price revisions and a short time-in-force, never an uncapped market order.
+1. **Event scope:** Version 1 trades only the September 16, 2026 event and `ZQU6` strategy. Generic future-FOMC support is deferred to version 2.
 
-6. Select the emergency hierarchy for an unhedged ZQ fill. The recommendation is: attempt the Polymarket hedge to an emergency cap, cancel remaining ZQ, then immediately flatten the uncovered ZQ if the hedge remains incomplete beyond the timeout.
+2. **Controlled Polymarket mapping:** The event ID, event slug, five market slugs, five condition IDs, ten outcome token IDs, tick sizes, minimum order sizes, negative-risk status, and resolution-rule hash in `.env` were verified against the official Gamma and live CLOB APIs on August 19, 2026. The engine must repeat the verification before trading.
 
-7. Confirm whether only one 10-contract batch may be active at a time. The recommendation for version 1 is one active batch and a maximum net new position of 10 ZQ until the first batch is fully reconciled.
+3. **Deployment jurisdiction:** Production is targeted for Hong Kong. Live opening orders require the production geoblock response to report `blocked=false` and `country=HK` immediately before every batch.
 
-8. Confirm the Polymarket rounding policy. The recommendation is to calculate the exact obligation, submit supported precision under the current market rules, and conservatively round the hedge up where that reduces the defined tail risk while displaying the overhedge.
+4. **Capital base:** Version 1 assumes `$100,000` IBKR Net Liquidation and `$100,000` allocated strategy capital.
 
-9. Confirm whether the system may close existing positions automatically when a risk limit is breached. Opening authority does not automatically imply liquidation authority; this requires a separate rule.
+5. **Risk thresholds:** Minimum modeled net profit is `$250` per 10-contract batch, minimum return on committed capital is `300` basis points, maximum daily loss is `$500`, maximum peak-to-trough strategy drawdown is `$2,000`, minimum margin cushion is `0.50`, minimum projected full excess liquidity is the greater of `$10,000` or ten times the next batch's incremental initial margin, maximum ZQ slippage is one valid tick, maximum normal Polymarket slippage is `0.01` per share, and maximum quote age is `500` milliseconds. The version-1 tail-loss gate is disabled. The drawdown halt preserves filled positions and requires manual review and re-arming.
+
+6. **Scenario scope:** The payoff matrix contains only `-50`, `-25`, `0`, `+25`, and `+50` basis-point scenarios. The `50+` outcome is represented as exactly 50 basis points. Version 1 does not calculate, display, test, or gate on +75 bp or +100 bp scenarios.
+
+7. **ZQ order policy:** Every child order is exactly 10 ZQ using `LMT/DAY`. An unfilled remainder remains posted at the original price while both profit thresholds and all hard gates continue to pass. Version 1 performs no automatic ZQ price chase or reprice. If expected profit falls below either threshold or another gate fails, the engine cancels the unfilled remainder and continues processing any late fills.
+
+8. **Batching and aggregate exposure:** Only one 10-contract batch may be active at a time. After a batch is terminal and fully reconciled, another 10-contract batch may start. Sequential batches may accumulate to a maximum aggregate ZQ position of 100 contracts.
+
+9. **Polymarket rounding:** The engine calculates the exact obligation using decimal arithmetic, submits supported precision, rounds the hedge upward where that reduces the approved-scenario residual, and displays every overhedge and its cost.
+
+10. **Manual-only liquidation:** Filled ZQ is never flattened, reversed, or liquidated automatically, including when the corresponding Polymarket hedge is incomplete. Existing completed positions are also never liquidated automatically after a risk breach. The engine may cancel unfilled orders and attempt an outstanding Polymarket hedge within approved caps, then it must halt for manual action.
+
+11. **Emergency notification:** Version 1 uses only the bold flashing dashboard alert. Acknowledgment stops flashing but does not clear the critical banner, resolve the incident, or resume trading. External notifications are deferred to version 2.
+
+12. **FOMC cutoff:** The Federal Reserve schedules the September 16, 2026 statement for `14:00 America/New_York` (`18:00 UTC`). Version 1 prohibits new batches beginning 60 minutes earlier, at `13:00 America/New_York` (`17:00 UTC`). No new batch may begin after the statement and this event has no post-decision resumption.
+
+13. **Wallet identity and signature type:** The owner is not required to guess `1`, `2`, or `3`. Version 1 uses the pinned official Python SDK to classify the configured signer-funder relationship at startup, derives the numeric signature type, displays the result, and fails closed on an unknown or mismatched relationship. `POLYMARKET_SIGNATURE_TYPE=AUTO` is the approved configuration policy.
+
+14. **Secret storage:** The current development key must be replaced by a protected secret-store reference before live deployment. Private keys and L2 secrets are prohibited from Git, OneDrive, application logs, browser payloads, and persistent database records.
+
+15. **Polygon RPC scope:** A custom Polygon RPC URL is not a core version-1 requirement. CLOB balance-and-allowance preflight is sufficient for the approved off-chain order path. RPC becomes mandatory only if a later approved scope adds independent on-chain reconciliation or approval, redemption, split, or merge transactions.
+
+16. **Development reserves:** `MODEL_RISK_RESERVE_USD`, `OPERATIONAL_RISK_RESERVE_USD`, and `EFFR_BASIS_RESERVE_USD` are each `$0` for development. Zero is valid only in `READ_ONLY`, `PAPER`, and `SHADOW`; all three must be replaced by positive owner-approved values before `LIMITED_LIVE` or `LIVE_ARMED`.
+
+17. **CLOB credential authorization:** The owner authorized one one-time `create_or_derive_api_key` call for credential provisioning and authenticated read-only testing only. The authorization excludes order submission, order cancellation, token approval, fund movement, and every Polygon transaction.
+
+### 18.2 Inputs Still Required Before Live Mode
+
+1. Provide renewed explicit authorization for a second CLOB create attempt over the verified HTTP/1.1 path, or provide an existing CLOB API key, secret, and passphrase through protected secret storage. The first authorized create-or-derive attempt did not return credentials, so authenticated open-order and trade-history checks remain pending. The Builder and Relayer credentials are separate and do not satisfy CLOB L2 authentication.
+
+2. Replace all three zero development reserves with positive owner-approved values before `LIMITED_LIVE`. This does not block implementation, `READ_ONLY`, `PAPER`, or `SHADOW`.
+
+3. Complete the protected secret-store migration before live deployment and verify that the runtime receives only secret references or process-injected values.
+
+4. Optionally provide the CLOB V2 `builderCode` if order attribution is required. It is not a live-trading prerequisite and is not a substitute for user L2 credentials.
+
+### 18.3 Credential Provisioning Test Record
+
+On August 19, 2026, the owner authorized one `create_or_derive_api_key` operation limited to credential provisioning and authenticated read-only testing. The create request timed out without returning credentials. The SDK's immediate derive fallback returned HTTP 400 `Could not derive api key`. A later derive-only attempt over HTTP/1.1 also reached Polymarket and returned HTTP 400. Public CLOB `/time` and `/ok` checks both returned HTTP 200, isolating the failure from general endpoint reachability.
+
+No CLOB L2 credential was stored, no authenticated open-order or trade-history query could be run, and no order submission, cancellation, token approval, fund movement, or Polygon transaction was attempted. Because the approved create operation has been consumed without a confirmed result, any second create attempt requires renewed explicit owner authorization.
 
 ## 19. Authoritative Interface References
 
@@ -738,16 +855,16 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 2. CME's [30-Day Federal Funds contract page](https://www.cmegroup.com/markets/interest-rates/stirs/30-day-federal-fund.contractSpecs.html) provides the product and settlement resources.
 
-3. The Federal Reserve's [2026 FOMC calendar](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm) lists the September 15–16 and October 27–28 meetings.
+3. The Federal Reserve's [2026 FOMC calendar](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm) lists the September 15–16 and October 27–28 meetings, and its [September 2026 release calendar](https://www.federalreserve.gov/newsevents/2026-september.htm) schedules the September 16 FOMC statement for 2:00 p.m. Eastern Time.
 
 4. The New York Fed's [EFFR methodology](https://www.newyorkfed.org/markets/reference-rates/additional-information-about-reference-rates) defines the transaction data and volume-weighted-median calculation.
 
 5. IBKR's [TWS API introduction](https://www.interactivebrokers.com/docs/tws-api/doc/introduction), [order placement](https://www.interactivebrokers.com/docs/tws-api/doc/orders/place-order/introduction), [order-placement considerations](https://www.interactivebrokers.com/docs/tws-api/doc/orders/place-order/order-placement-considerations), [account values](https://www.interactivebrokers.com/docs/tws-api/doc/account-portfolio-data/account-updates/account-value-keys), and [account P&L](https://www.interactivebrokers.com/docs/tws-api/doc/account-portfolio-data/profit-loss-pn-l/receive-p-l-for-accounts) define the required broker callbacks and metrics.
 
-6. Polymarket's [authentication](https://docs.polymarket.com/api-reference/authentication), [market WebSocket](https://docs.polymarket.com/market-data/websocket/market-channel), [order placement](https://docs.polymarket.com/trading/place-orders), [fee model](https://docs.polymarket.com/trading/fees), [positions API](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user), [CLOB V2 migration](https://docs.polymarket.com/v2-migration), and [geographic restrictions](https://docs.polymarket.com/api-reference/geoblock) define the required order, fill, balance, fee, and eligibility behavior.
+6. Polymarket's [authentication](https://docs.polymarket.com/api-reference/authentication), [market WebSocket](https://docs.polymarket.com/market-data/websocket/market-channel), [order placement](https://docs.polymarket.com/trading/place-orders), [fee model](https://docs.polymarket.com/trading/fees), [positions API](https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user), [CLOB V2 migration](https://docs.polymarket.com/v2-migration), [geographic restrictions](https://docs.polymarket.com/api-reference/geoblock), and official Python SDK [wallet-classification implementation](https://github.com/Polymarket/py-sdk/blob/main/src/polymarket/_internal/wallet.py) define the required authentication, wallet identity, order, fill, balance, fee, and eligibility behavior.
 
 ## 20. Recommended Approval Statement
 
-Approval should be explicit and narrow: “I approve Version 0.1 of `ZQ_POLYMARKET_ARBITRAGE_ENGINE_DESIGN.md` for implementation through the `READ_ONLY` and `PAPER` stages only. Live order placement remains unapproved.”
+Approval should be explicit and narrow: “I approve Version 0.2 of `ZQ_POLYMARKET_ARBITRAGE_ENGINE_DESIGN.md` for implementation through the `READ_ONLY` and `PAPER` stages only. Live order placement remains unapproved.”
 
-Any approval that does not resolve the jurisdiction gate and the decisions in Section 18 will authorize only the analytics dashboard and simulated execution engine.
+Any approval that does not resolve the remaining live prerequisites in Section 18 will authorize only the analytics dashboard and simulated execution engine.
