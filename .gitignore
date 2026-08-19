@@ -1,0 +1,39 @@
+# Local environment files may contain credentials and must never be committed.
+.env
+.env.*
+!.env.example
+
+# Common private-key and certificate formats.
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+
+# Python runtime artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local runtime state and logs.
+runtime/
+logs/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Frontend dependencies and build output.
+node_modules/
+dist/
+coverage/
+
+# Editor and operating-system metadata.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
