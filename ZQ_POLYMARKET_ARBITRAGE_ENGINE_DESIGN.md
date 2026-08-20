@@ -1,8 +1,8 @@
 # ZQ–Polymarket Arbitrage Engine
 
-Version: 0.2 Draft for Final Review<br>
-Date: 2026-08-19<br>
-Status: Documentation only; implementation and live trading are not authorized
+Version: 0.2 Approved for READ_ONLY and PAPER Implementation<br>
+Date: 2026-08-20<br>
+Status: READ_ONLY and PAPER implementation authorized; live trading remains unauthorized
 Primary reference strategy: September 16, 2026 FOMC decision, September 2026 30-Day Federal Funds futures (`ZQU6`)
 
 ## 1. Executive Decision
@@ -17,7 +17,7 @@ This is not risk-free arbitrage in the legal or economic sense. ZQ settles to th
 
 ## 2. Approval Boundary
 
-This document authorizes no code implementation, API login, credential access, order submission, cancellation, wallet action, or broker action. Implementation begins only after explicit approval of this specification and resolution of the open decisions in Section 18.
+On August 20, 2026, the owner authorized implementation through `READ_ONLY` and `PAPER`, including connection to the running paper TWS endpoint configured in `.env`. Live Polymarket orders, live IBKR orders, credential creation, token approvals, fund movement, and Polygon transactions remain unauthorized.
 
 The future implementation must launch in `READ_ONLY` mode. Progression to `PAPER`, `SHADOW`, and `LIVE_ARMED` requires separate acceptance gates. Restarting the service must always return it to `READ_ONLY`; live trading must require a fresh manual arm action.
 

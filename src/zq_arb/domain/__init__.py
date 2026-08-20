@@ -1,0 +1,1 @@
+"""Venue-neutral domain types."""
