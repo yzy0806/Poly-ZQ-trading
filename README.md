@@ -71,6 +71,16 @@ The coverage gate applies to deterministic pricing, risk, state, security, persi
 
 Before starting the operator terminal, fill the still-required local values for `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, `SESSION_SIGNING_KEY`, `CONTROL_CONFIRMATION_SECRET`, and `IBKR_ACCOUNT_ID`. Authenticated CLOB values remain unnecessary for the current `READ_ONLY` stage.
 
+## Market Data and Signal Authority
+
+1. Polymarket REST seeds and periodically reconciles each configured book. The public market WebSocket is the authoritative intraday path and applies complete books, price-level changes, level deletions, and tick-size changes directly to immutable backend state.
+
+2. A WebSocket disconnect or book-integrity failure marks every affected book unsynchronized. REST data may remain visible for diagnosis, but a new ZQ order remains prohibited until a valid WebSocket update restores synchronization.
+
+3. The primary rate signal uses the current `ZQU6` bid, ask, and midpoint against the August pre-meeting EFFR anchor. October and November are optional inputs for the secondary FedWatch diagnostic and are not required for the direct signal.
+
+4. The adjacent-state ZQ probabilities and normalized Polymarket expected move explain the cross-venue difference. Only conservative terminal scenario P&L and the full risk-gate result can qualify an opportunity.
+
 ## Safety Invariants
 
 1. Process startup always begins in `READ_ONLY`, regardless of the previous database state.
@@ -83,6 +93,6 @@ Before starting the operator terminal, fill the still-required local values for 
 
 5. Filled ZQ is never automatically flattened.
 
-6. `LIMITED_LIVE` and `LIVE_ARMED` reject zero reserves, absent L2 credentials, failed wallet classification, non-Hong-Kong geoblock results, delayed IBKR data, stale books, unresolved obligations, and missing operator approval.
+6. `LIMITED_LIVE` and `LIVE_ARMED` reject zero reserves, absent L2 credentials, failed wallet classification, non-Hong-Kong geoblock results, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
 
 7. Credentials and account identifiers are redacted before logging and are never serialized into browser state or persistence payloads.

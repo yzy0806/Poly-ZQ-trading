@@ -37,6 +37,7 @@ button.danger { color: #ff8b9e; border-color: #733142; background: #27121a; }
 .panel h2 { font-size: 14px; margin: 0; font-weight: 600; }
 .quote-strip { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); }
 .quote-card { padding: 12px 15px; border-right: 1px solid var(--line); }
+.quote-card.primary-quote { background: linear-gradient(180deg, #0e2a40, #0a1724); box-shadow: inset 0 -2px #268dd5; }
 .quote-card:last-child { border: 0; }
 .quote-card > div { display: flex; justify-content: space-between; }
 .quote-card > div b { font: 600 12px 'IBM Plex Mono'; }
@@ -54,6 +55,7 @@ button.danger { color: #ff8b9e; border-color: #733142; background: #27121a; }
 .flow-arrow { display: grid; place-items: center; color: #396281; background: #07121e; }
 .prob-summary { display: grid; grid-template-columns: 1.5fr 1fr 1fr; padding: 14px; gap: 13px; }
 .comparison-table { padding: 0 14px 14px; }
+.comparison-table { overflow-x: auto; }
 .comparison-table .subhead { display: flex; justify-content: space-between; padding: 10px 0 7px; color: #7091ad; font: 600 8px 'IBM Plex Mono'; letter-spacing: .08em; }
 .comparison-table .subhead small { color: #60788e; font-weight: 400; letter-spacing: 0; }
 .distribution { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
@@ -61,6 +63,9 @@ button.danger { color: #ff8b9e; border-color: #733142; background: #27121a; }
 .distribution span, .distribution b { position: relative; z-index: 1; font: 500 10px 'IBM Plex Mono'; }
 .distribution b { float: right; }
 .distribution i { position: absolute; left: 0; bottom: 0; top: 0; background: #123d5c; opacity: .6; }
+.diagnostic { border-top: 1px solid var(--line); background: #07121e; }
+.diagnostic summary { cursor: pointer; padding: 11px 14px; color: #68849e; font: 600 9px 'IBM Plex Mono'; letter-spacing: .06em; }
+.diagnostic-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; padding: 0 14px 14px; }
 .metric { display: flex; flex-direction: column; padding: 10px; background: #081421; border: 1px solid #16283a; border-radius: 4px; min-width: 0; }
 .metric span { color: var(--muted); font-size: 9px; margin-bottom: 6px; }
 .metric strong { font: 600 15px 'IBM Plex Mono'; color: #e8f2fc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

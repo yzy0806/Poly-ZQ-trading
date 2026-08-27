@@ -126,15 +126,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reasons.append("IBKR is not connected")
         if snapshot.polymarket.status.value != "CONNECTED":
             reasons.append("Polymarket is not connected")
-        expected_months = set(configured.reference_contract_months)
+        expected_months = {
+            configured.reference_contract_months[0],
+            configured.ibkr_zq_contract_month,
+        }
         if not expected_months.issubset(snapshot.quotes):
-            reasons.append("four ZQ reference quotes are unavailable")
+            reasons.append("target ZQ or pre-meeting anchor quote is unavailable")
         elif any(
             quote.quality.value != "LIVE" or quote.age_ms() > configured.max_quote_age_ms
             for quote in snapshot.quotes.values()
             if quote.instrument in expected_months
         ):
-            reasons.append("ZQ reference quotes are not live and fresh")
+            reasons.append("target ZQ or pre-meeting anchor quote is not live and fresh")
         expected_tokens = {
             token_id
             for leg in configured.market_legs
@@ -142,6 +145,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         if not expected_tokens.issubset(snapshot.books):
             reasons.append("all ten Polymarket books are unavailable")
+        elif any(not snapshot.books[token_id].stream_synchronized for token_id in expected_tokens):
+            reasons.append("Polymarket books are not synchronized to the market WebSocket")
         if not snapshot.mapping.verified:
             reasons.append("Polymarket market mapping is unverified")
         if snapshot.eligibility.blocked is not False:

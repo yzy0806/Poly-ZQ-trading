@@ -29,10 +29,13 @@ export interface OrderBook {
   best_bid: DecimalValue
   best_ask: DecimalValue
   midpoint: DecimalValue
+  source: string
+  stream_synchronized: boolean
+  last_reconciled_at: string | null
   received_at: string
 }
 
-export interface ProbabilitySnapshot {
+export interface FedWatchDiagnostic {
   rates: Record<string, DecimalValue>
   september_start_effr: DecimalValue
   september_end_effr: DecimalValue
@@ -45,8 +48,34 @@ export interface ProbabilitySnapshot {
   upper_probability: DecimalValue
   bucket_probabilities: Record<string, DecimalValue>
   september_residual_bps: DecimalValue
+  valid: boolean
+  reason: string
+}
+
+export interface ProbabilitySnapshot {
+  target_contract_month: string | null
+  target_bid: DecimalValue
+  target_ask: DecimalValue
+  target_mid: DecimalValue
+  pre_meeting_effr: DecimalValue
+  post_decision_weight: DecimalValue
+  implied_average_effr_bid: DecimalValue
+  implied_average_effr_ask: DecimalValue
+  implied_average_effr_mid: DecimalValue
+  expected_move_bps: DecimalValue
+  executable_long_expected_move_bps: DecimalValue
+  executable_short_expected_move_bps: DecimalValue
+  lower_step_bps: number | null
+  lower_probability: DecimalValue
+  upper_step_bps: number | null
+  upper_probability: DecimalValue
+  bucket_probabilities: Record<string, DecimalValue>
   executable_long_probability: DecimalValue
   executable_short_probability: DecimalValue
+  polymarket_probability_sum: DecimalValue
+  polymarket_expected_move_bps: DecimalValue
+  expected_move_gap_bps: DecimalValue
+  fedwatch: FedWatchDiagnostic
   valid: boolean
   reason: string
   calculated_at: string
@@ -90,6 +119,7 @@ export interface MarketProbabilityComparison {
   polymarket_mid: DecimalValue
   midpoint_gap: DecimalValue
   book_age_ms: number | null
+  stream_synchronized: boolean
   mapping_verified: boolean
 }
 

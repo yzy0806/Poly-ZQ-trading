@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from zq_arb.adapters.events import VenueEvent
+from zq_arb.adapters.polymarket import update_books_from_stream_event
 from zq_arb.config import Settings
 from zq_arb.domain.enums import (
     AlertSeverity,
@@ -170,6 +171,55 @@ class StateStore:
             return snapshot.model_copy(update={"books": updated})
 
         await self.update(apply)
+
+    async def mark_polymarket_books_unsynchronized(self) -> None:
+        def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
+            books = {
+                token_id: book.model_copy(update={"stream_synchronized": False})
+                for token_id, book in snapshot.books.items()
+            }
+            return snapshot.model_copy(update={"books": books})
+
+        await self.update(apply)
+
+    async def reconcile_polymarket_books(
+        self, rest_books: tuple[OrderBook, ...]
+    ) -> tuple[str, ...]:
+        mismatches: list[str] = []
+
+        def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
+            updated = dict(snapshot.books)
+            for rest_book in rest_books:
+                current = updated.get(rest_book.token_id)
+                if current is None or not current.stream_synchronized:
+                    updated[rest_book.token_id] = rest_book
+                    continue
+                same_hash = bool(
+                    current.book_hash
+                    and rest_book.book_hash
+                    and current.book_hash == rest_book.book_hash
+                )
+                same_content = (
+                    current.bids == rest_book.bids
+                    and current.asks == rest_book.asks
+                    and current.tick_size == rest_book.tick_size
+                )
+                rest_is_older = bool(
+                    current.source_timestamp
+                    and rest_book.source_timestamp
+                    and rest_book.source_timestamp < current.source_timestamp
+                )
+                if same_hash or same_content or rest_is_older:
+                    updated[rest_book.token_id] = current.model_copy(
+                        update={"last_reconciled_at": rest_book.last_reconciled_at}
+                    )
+                    continue
+                mismatches.append(rest_book.token_id)
+                updated[rest_book.token_id] = rest_book
+            return snapshot.model_copy(update={"books": updated})
+
+        await self.update(apply)
+        return tuple(mismatches)
 
     async def add_alert(
         self,
@@ -367,9 +417,20 @@ class StateStore:
             await self.set_ibkr_health(ConnectionStatus.DEGRADED, message)
 
     async def apply_polymarket_event(self, event: VenueEvent) -> None:
+        if event.kind.lower() == "stream_connected":
+            await self.set_polymarket_health(
+                ConnectionStatus.CONNECTED,
+                "market WebSocket connected; synchronizing books",
+                authenticated=False,
+            )
+            return
+        current = await self.get()
+        updated_books = update_books_from_stream_event(current.books, event)
+        if updated_books:
+            await self.set_books(updated_books)
         await self.set_polymarket_health(
             ConnectionStatus.CONNECTED,
-            f"market stream: {event.kind}",
+            f"market WebSocket: {event.kind}",
             authenticated=False,
         )
 

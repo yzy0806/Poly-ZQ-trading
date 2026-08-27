@@ -56,7 +56,10 @@ class OrderBook(StrictModel):
     min_order_size: Decimal | None = None
     negative_risk: bool | None = None
     book_hash: str | None = None
+    source: str = "REST"
+    stream_synchronized: bool = False
     source_timestamp: datetime | None = None
+    last_reconciled_at: datetime | None = None
     received_at: datetime = Field(default_factory=utc_now)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -101,7 +104,7 @@ class AccountMetrics(StrictModel):
     received_at: datetime | None = None
 
 
-class ProbabilitySnapshot(StrictModel):
+class FedWatchDiagnostic(StrictModel):
     rates: dict[str, Decimal] = Field(default_factory=dict)
     september_start_effr: Decimal | None = None
     september_end_effr: Decimal | None = None
@@ -114,10 +117,36 @@ class ProbabilitySnapshot(StrictModel):
     upper_probability: Decimal | None = None
     bucket_probabilities: dict[str, Decimal] = Field(default_factory=dict)
     september_residual_bps: Decimal | None = None
+    valid: bool = False
+    reason: str = "awaiting four reference quotes"
+
+
+class ProbabilitySnapshot(StrictModel):
+    target_contract_month: str | None = None
+    target_bid: Decimal | None = None
+    target_ask: Decimal | None = None
+    target_mid: Decimal | None = None
+    pre_meeting_effr: Decimal | None = None
+    post_decision_weight: Decimal | None = None
+    implied_average_effr_bid: Decimal | None = None
+    implied_average_effr_ask: Decimal | None = None
+    implied_average_effr_mid: Decimal | None = None
+    expected_move_bps: Decimal | None = None
+    executable_long_expected_move_bps: Decimal | None = None
+    executable_short_expected_move_bps: Decimal | None = None
+    lower_step_bps: int | None = None
+    lower_probability: Decimal | None = None
+    upper_step_bps: int | None = None
+    upper_probability: Decimal | None = None
+    bucket_probabilities: dict[str, Decimal] = Field(default_factory=dict)
     executable_long_probability: Decimal | None = None
     executable_short_probability: Decimal | None = None
+    polymarket_probability_sum: Decimal | None = None
+    polymarket_expected_move_bps: Decimal | None = None
+    expected_move_gap_bps: Decimal | None = None
+    fedwatch: FedWatchDiagnostic = Field(default_factory=FedWatchDiagnostic)
     valid: bool = False
-    reason: str = "awaiting reference quotes"
+    reason: str = "awaiting target and pre-meeting anchor quotes"
     calculated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -159,6 +188,7 @@ class MarketProbabilityComparison(StrictModel):
     polymarket_mid: Decimal | None = None
     midpoint_gap: Decimal | None = None
     book_age_ms: int | None = None
+    stream_synchronized: bool = False
     mapping_verified: bool = False
 
 

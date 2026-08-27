@@ -9,15 +9,23 @@ import structlog
 
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.adapters.ibkr import IbkrAdapter
-from zq_arb.adapters.polymarket import PolymarketAdapter
+from zq_arb.adapters.polymarket import PolymarketAdapter, PolymarketProtocolError
 from zq_arb.analytics.payoff import CostInputs, build_three_state_opportunity
-from zq_arb.analytics.probability import ReferencePrices, fedwatch_reference
+from zq_arb.analytics.probability import (
+    ReferencePrices,
+    direct_zq_probability,
+    fedwatch_reference,
+    implied_average_effr,
+    with_polymarket_expectation,
+)
 from zq_arb.config import Settings
 from zq_arb.domain.enums import AlertSeverity, ConnectionStatus, DataQuality
 from zq_arb.domain.models import (
     EngineSnapshot,
+    FedWatchDiagnostic,
     MarketProbabilityComparison,
     Opportunity,
+    ProbabilitySnapshot,
     Quote,
     utc_now,
 )
@@ -49,6 +57,7 @@ class EngineRuntime:
         self.risk = RiskEngine(settings)
         self._tasks: list[asyncio.Task[None]] = []
         self._stopping = asyncio.Event()
+        self._polymarket_resync_requested = asyncio.Event()
 
     async def start(self) -> None:
         await self.database.initialize()
@@ -94,6 +103,14 @@ class EngineRuntime:
                     await self.state.apply_ibkr_event(event)
                 else:
                     await self.state.apply_polymarket_event(event)
+            except PolymarketProtocolError as exc:
+                LOGGER.warning("polymarket_book_resync_required", kind=event.kind, error=str(exc))
+                await self.state.mark_polymarket_books_unsynchronized()
+                await self.state.set_polymarket_health(
+                    ConnectionStatus.DEGRADED,
+                    "market WebSocket book integrity failed; REST recovery requested",
+                )
+                self._polymarket_resync_requested.set()
             except Exception:
                 LOGGER.exception(
                     "venue_event_processing_failed", venue=event.venue, kind=event.kind
@@ -150,6 +167,7 @@ class EngineRuntime:
         last_mapping: datetime | None = None
         last_eligibility: datetime | None = None
         while not self._stopping.is_set():
+            self._polymarket_resync_requested.clear()
             now = utc_now()
             try:
                 if (
@@ -172,21 +190,23 @@ class EngineRuntime:
                     last_eligibility = now
                     eligibility_due = False
                 books = await self.polymarket.snapshot_all_books()
-                await self.state.set_books(books)
-                await self.state.set_polymarket_health(
-                    ConnectionStatus.CONNECTED,
-                    "public CLOB snapshots current",
-                    authenticated=False,
-                )
+                mismatches = await self.state.reconcile_polymarket_books(books)
+                if mismatches:
+                    LOGGER.warning(
+                        "polymarket_book_reconciliation_mismatch",
+                        mismatch_count=len(mismatches),
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                LOGGER.warning("polymarket_reference_failed", error=str(exc))
-                await self.state.set_polymarket_health(
-                    ConnectionStatus.DEGRADED,
-                    f"public CLOB snapshot failed: {type(exc).__name__}",
+                LOGGER.warning("polymarket_rest_reconciliation_failed", error=str(exc))
+            try:
+                await asyncio.wait_for(
+                    self._polymarket_resync_requested.wait(),
+                    timeout=self.settings.polymarket_book_snapshot_interval_seconds,
                 )
-            await asyncio.sleep(self.settings.polymarket_book_snapshot_interval_seconds)
+            except TimeoutError:
+                pass
 
     async def _polymarket_stream_loop(self) -> None:
         token_ids = [
@@ -197,34 +217,33 @@ class EngineRuntime:
         attempts = 0
         while not self._stopping.is_set():
             try:
+                await self.state.mark_polymarket_books_unsynchronized()
+                await self.state.set_polymarket_health(
+                    ConnectionStatus.CONNECTING,
+                    "connecting to Polymarket market WebSocket",
+                )
                 async for event in self.polymarket.public_market_stream(token_ids):
-                    attempts = 0
+                    if event.kind.lower() != "stream_connected":
+                        attempts = 0
                     await self.events.put(event)
-                    token_id = str(
-                        event.payload.get("asset_id")
-                        or event.payload.get("token_id")
-                        or event.payload.get("assetId")
-                        or ""
-                    )
-                    if token_id in token_ids and event.kind.lower() in {
-                        "book",
-                        "price_change",
-                        "tick_size_change",
-                    }:
-                        book = await self.polymarket.fetch_book(token_id)
-                        await self.state.set_books((book,))
                 raise ConnectionError("Polymarket market stream ended")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 attempts += 1
                 LOGGER.warning("polymarket_stream_failed", attempt=attempts, error=str(exc))
-                if attempts >= self.settings.polymarket_reconnect_max_attempts:
-                    await self.state.set_polymarket_health(
-                        ConnectionStatus.DEGRADED,
-                        "market stream unavailable; REST snapshots remain active",
+                await self.state.mark_polymarket_books_unsynchronized()
+                await self.state.set_polymarket_health(
+                    ConnectionStatus.DEGRADED,
+                    "market WebSocket unavailable; REST display remains fail-closed",
+                )
+                self._polymarket_resync_requested.set()
+                if attempts == self.settings.polymarket_reconnect_max_attempts:
+                    await self.state.add_alert(
+                        AlertSeverity.WARNING,
+                        "POLYMARKET_STREAM_RECONNECTING",
+                        "Polymarket market WebSocket reconnect threshold reached; retrying",
                     )
-                    return
                 await asyncio.sleep(self.settings.polymarket_reconnect_backoff_seconds)
 
     async def _analytics_loop(self) -> None:
@@ -250,38 +269,72 @@ class EngineRuntime:
     def _calculate(self, snapshot: EngineSnapshot) -> EngineSnapshot:
         now = utc_now()
         months = self.settings.reference_contract_months
-        quotes = [snapshot.quotes.get(month) for month in months]
-        if any(quote is None or _mid(quote) is None for quote in quotes):
+        anchor_month = months[0]
+        target_month = self.settings.ibkr_zq_contract_month
+        anchor_quote = snapshot.quotes.get(anchor_month)
+        target_quote = snapshot.quotes.get(target_month)
+        anchor_mid = _mid(anchor_quote) if anchor_quote is not None else None
+        if (
+            anchor_quote is None
+            or target_quote is None
+            or anchor_mid is None
+            or target_quote.bid is None
+            or target_quote.ask is None
+        ):
+            probabilities = ProbabilitySnapshot(
+                target_contract_month=target_month,
+                reason=f"awaiting {anchor_month} anchor and {target_month} bid/ask",
+            )
             return snapshot.model_copy(
                 update={
+                    "probabilities": probabilities,
                     "probability_comparisons": self._probability_comparisons(
                         snapshot,
                         {},
                         now,
                     ),
-                    "health_messages": ("Awaiting all four ZQ reference quotes",),
+                    "health_messages": (
+                        f"Awaiting {anchor_month} pre-meeting anchor and {target_month} bid/ask",
+                    ),
                 }
             )
-        complete_quotes = [quote for quote in quotes if quote is not None]
-        mids = [_mid(quote) for quote in complete_quotes]
-        if any(value is None for value in mids):
-            return snapshot
-        prices = [value for value in mids if value is not None]
-        probabilities = fedwatch_reference(ReferencePrices(*prices))
-
-        quotes_fresh = all(
-            quote.age_ms(now) <= self.settings.max_quote_age_ms for quote in complete_quotes
+        diagnostic = FedWatchDiagnostic()
+        reference_quotes = [snapshot.quotes.get(month) for month in months]
+        reference_mids = [_mid(quote) if quote is not None else None for quote in reference_quotes]
+        if all(value is not None for value in reference_mids):
+            diagnostic = fedwatch_reference(
+                ReferencePrices(*(value for value in reference_mids if value is not None))
+            )
+        probabilities = direct_zq_probability(
+            target_contract_month=target_month,
+            target_bid=target_quote.bid,
+            target_ask=target_quote.ask,
+            pre_meeting_effr=implied_average_effr(anchor_mid),
+            fedwatch=diagnostic,
         )
-        target_quote = snapshot.quotes[self.settings.ibkr_zq_contract_month]
+        polymarket_midpoints = {
+            leg.code: book.midpoint
+            for leg in self.settings.market_legs
+            if (book := snapshot.books.get(leg.yes_token_id)) is not None
+            and book.midpoint is not None
+        }
+        probabilities = with_polymarket_expectation(probabilities, polymarket_midpoints)
+        required_quotes = (anchor_quote, target_quote)
+        quotes_fresh = all(
+            quote.quality is DataQuality.LIVE
+            and quote.age_ms(now) <= self.settings.max_quote_age_ms
+            for quote in required_quotes
+        )
         long_book_25 = self._book(snapshot, "INC25", yes=True)
         long_book_50 = self._book(snapshot, "INC50PLUS", yes=True)
         short_book_25 = self._book(snapshot, "INC25", yes=False)
         short_book_50 = self._book(snapshot, "INC50PLUS", yes=False)
         relevant_books = (long_book_25, long_book_50, short_book_25, short_book_50)
         books_available = all(book is not None for book in relevant_books)
-        books_fresh = books_available and all(
-            book is not None and book.age_ms(now) <= self.settings.max_quote_age_ms
-            for book in relevant_books
+        books_fresh = (
+            books_available
+            and all(book is not None and book.stream_synchronized for book in relevant_books)
+            and snapshot.polymarket.status is ConnectionStatus.CONNECTED
         )
         opportunities: list[Opportunity] = []
         incremental_margin = self._metadata_decimal(
@@ -293,7 +346,7 @@ class EngineRuntime:
             operational_reserve=self.settings.operational_risk_reserve_usd,
             effr_basis_reserve=self.settings.effr_basis_reserve_usd,
         )
-        if probabilities.september_start_effr is not None and books_available:
+        if probabilities.pre_meeting_effr is not None and books_available:
             candidates = (
                 ("LONG", target_quote.ask, long_book_25, long_book_50),
                 ("SHORT", target_quote.bid, short_book_25, short_book_50),
@@ -305,7 +358,7 @@ class EngineRuntime:
                     direction=direction,
                     contracts=self.settings.ibkr_zq_child_order_quantity,
                     zq_price=price,
-                    pre_meeting_effr=probabilities.september_start_effr,
+                    pre_meeting_effr=probabilities.pre_meeting_effr,
                     inc25_book=book25,
                     inc50_book=book50,
                     cost_inputs=costs,
@@ -332,9 +385,11 @@ class EngineRuntime:
                 )
         health: list[str] = []
         if not quotes_fresh:
-            health.append("ZQ quotes are incomplete or stale")
+            health.append("Target ZQ and pre-meeting anchor quotes are not live and fresh")
         if not books_fresh:
-            health.append("Polymarket hedge books are incomplete or stale")
+            health.append("Polymarket hedge books are unavailable or WebSocket-unsynchronized")
+        if not probabilities.valid:
+            health.append(probabilities.reason)
         if snapshot.mapping.errors:
             health.extend(snapshot.mapping.errors)
         return snapshot.model_copy(
@@ -375,6 +430,7 @@ class EngineRuntime:
                         else None
                     ),
                     book_age_ms=book.age_ms(now) if book else None,
+                    stream_synchronized=book.stream_synchronized if book else False,
                     mapping_verified=snapshot.mapping.verified,
                 )
             )
@@ -393,18 +449,17 @@ class EngineRuntime:
         contract_verified = bool(
             verification.get(self.settings.ibkr_zq_contract_month, {}).get("verified")
         )
-        timestamps = [quote.received_at for quote in snapshot.quotes.values()]
-        timestamps.extend(book.received_at for book in snapshot.books.values())
-        skew_ms = (
-            int((max(timestamps) - min(timestamps)).total_seconds() * 1_000)
-            if timestamps
-            else self.settings.max_cross_venue_timestamp_skew_ms + 1
-        )
+        required_months = {
+            self.settings.reference_contract_months[0],
+            self.settings.ibkr_zq_contract_month,
+        }
         return GateContext(
             now=now,
             ibkr_connected=snapshot.ibkr.status is ConnectionStatus.CONNECTED,
             ibkr_data_live=all(
-                quote.quality is DataQuality.LIVE for quote in snapshot.quotes.values()
+                quote.quality is DataQuality.LIVE
+                for month, quote in snapshot.quotes.items()
+                if month in required_months
             ),
             polymarket_connected=snapshot.polymarket.status is ConnectionStatus.CONNECTED,
             mapping_verified=snapshot.mapping.verified,
@@ -413,7 +468,7 @@ class EngineRuntime:
             eligibility_country=snapshot.eligibility.country,
             books_fresh=books_fresh,
             quotes_fresh=quotes_fresh,
-            cross_venue_synchronized=skew_ms <= self.settings.max_cross_venue_timestamp_skew_ms,
+            cross_venue_synchronized=quotes_fresh and books_fresh,
             contract_verified=contract_verified,
             full_hedge_depth_available=not opportunity.gate_reasons,
             margin_preview_available=bool(snapshot.metadata.get("margin_preview_available")),

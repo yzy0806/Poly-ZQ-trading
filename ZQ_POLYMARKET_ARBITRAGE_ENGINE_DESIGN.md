@@ -1,13 +1,13 @@
 # ZQ–Polymarket Arbitrage Engine
 
-Version: 0.2 Approved for READ_ONLY and PAPER Implementation<br>
-Date: 2026-08-20<br>
+Version: 0.3 Approved for READ_ONLY and PAPER Implementation<br>
+Date: 2026-08-26<br>
 Status: READ_ONLY and PAPER implementation authorized; live trading remains unauthorized
 Primary reference strategy: September 16, 2026 FOMC decision, September 2026 30-Day Federal Funds futures (`ZQU6`)
 
 ## 1. Executive Decision
 
-The recommended system is a local, event-driven trading service with a browser dashboard. It will consume executable IBKR ZQ quotes and Polymarket order books, calculate CME-style rate probabilities and conservative cross-venue hedge P&L, and submit orders only when every pricing, liquidity, margin, compliance, and operational control passes.
+The recommended system is a local, event-driven trading service with a browser dashboard. It will consume executable IBKR ZQ quotes and WebSocket-maintained Polymarket order books, calculate a direct `ZQU6`-implied September move, a clearly labeled adjacent-outcome probability model, normalized Polymarket expected move, secondary CME-style diagnostics, and conservative cross-venue hedge P&L. It may submit orders only when every pricing, liquidity, margin, compliance, and operational control passes.
 
 The trading sequence is fixed by mandate: each child order submits exactly 10 ZQ contracts first. Only one child batch may be active at a time, while fully reconciled sequential batches may accumulate to a maximum aggregate ZQ position of 100 contracts. Every incremental ZQ execution creates a hedge obligation. The engine then submits only the Polymarket quantity corresponding to the newly filled ZQ quantity. It does not wait for all 10 ZQ contracts to fill, and it never opens the Polymarket leg before a ZQ execution is confirmed.
 
@@ -31,7 +31,7 @@ The future implementation must launch in `READ_ONLY` mode. Progression to `PAPER
 
 3. Stream Polymarket level-2 order books for the configured Yes and No outcome tokens.
 
-4. Calculate the CME-style FOMC probability tree, the executable ZQ-implied price of risk, Polymarket probabilities, probability differences, full intermediate calculations, and conservative hedge P&L.
+4. Use `ZQU6` as the primary implied-rate signal, with `ZQQ6` as the pre-meeting EFFR anchor; calculate the direct expected September decision move, adjacent-outcome probabilities, normalized Polymarket expected move, full intermediate calculations, conservative hedge P&L, and a secondary August-through-November FedWatch diagnostic.
 
 5. Display signals, inputs, calculations, payoff scenarios, liquidity, order state, positions, margin, P&L, data health, and alerts on a local dashboard.
 
@@ -125,11 +125,63 @@ Trading stops if any identifier, rule text, token mapping, fee schedule, order-a
 
 ## 5. Probability Calculations
 
-### 5.1 CME-Style Reference Probability Tree
+### 5.1 Direct `ZQU6` Implied Move — Primary Model
 
-The dashboard will reproduce the CME anchor-month method for reference and audit. CME assumes 25 bp increments, a proportional EFFR response, and propagation from full months without FOMC meetings.
+Version 1 uses the current September contract as the primary signal. August `ZQQ6` supplies the pre-meeting EFFR anchor because it is the configured non-meeting contract immediately before September. October and November are not required for the primary signal, readiness, opportunity calculation, or order qualification.
 
-For the September and October 2026 sequence, the required inputs are August (`ZQQ6`), September (`ZQU6`), October (`ZQV6`), and November (`ZQX6`). November is the first complete non-meeting month after the October 28 meeting.
+For midpoint display:
+
+$$
+F_{Sep,mid}=\frac{F_{Sep,bid}+F_{Sep,ask}}{2}
+$$
+
+$$
+R_{Sep,mid}=100-F_{Sep,mid}
+$$
+
+$$
+R_{pre}=100-F_{Aug,mid}
+$$
+
+With 16 calendar days at the pre-decision EFFR and 14 days at the post-decision EFFR, the post-decision weight is:
+
+$$
+w=\frac{14}{30}
+$$
+
+The direct ZQ-implied expected decision move is:
+
+$$
+\Delta_{ZQ,mid,bps}=\frac{R_{Sep,mid}-R_{pre}}{w}\times100
+$$
+
+The side-specific executable measures use the actual ZQ entry side:
+
+$$
+\Delta_{ZQ,long,bps}=\frac{(100-F_{Sep,ask})-R_{pre}}{w}\times100
+$$
+
+$$
+\Delta_{ZQ,short,bps}=\frac{(100-F_{Sep,bid})-R_{pre}}{w}\times100
+$$
+
+The midpoint expected move is bracketed by its two adjacent approved 25 bp outcomes. If the lower outcome is `L`, the upper outcome is `U=L+25`, and `L <= Delta <= U`, the display-only adjacent-state probabilities are:
+
+$$
+p(U)=\frac{\Delta_{ZQ,mid,bps}-L}{25}
+$$
+
+$$
+p(L)=1-p(U)
+$$
+
+The long-at-ask and short-at-bid versions use the same `L` and `U` to produce an executable probability band. Values outside `[0,1]`, crossed ZQ quotes, or an expected move outside the approved `-50` through `+50` bp scenario range remain visible but invalidate the probability interpretation and block qualification.
+
+One ZQ price identifies one expected rate move; it does not uniquely determine five independent outcome probabilities. The adjacent-state allocation is therefore labeled as a model assumption. It must never be presented as an observed five-bucket probability distribution or as a sufficient trading trigger.
+
+### 5.2 CME-Style Probability Tree — Secondary Diagnostic
+
+The dashboard retains the August-through-November CME anchor-month method only for reference, model-health monitoring, and audit. CME assumes 25 bp increments, a proportional EFFR response, and propagation from full months without FOMC meetings. Missing October or November data makes this diagnostic unavailable but does not invalidate the direct `ZQU6` primary model.
 
 For October, with 28 calendar days through the meeting and three post-meeting days:
 
@@ -141,53 +193,27 @@ $$
 EFFR_{start,Oct}=\frac{31R_{Oct}-3R_{Nov}}{28}
 $$
 
-The September end rate equals the October start rate:
+The September end rate equals the October start rate, while August supplies the September start anchor:
 
 $$
 EFFR_{end,Sep}=EFFR_{start,Oct}
 $$
 
-With August as the September start anchor:
-
 $$
 \Delta EFFR_{Sep}=EFFR_{end,Sep}-R_{Aug}
 $$
 
-The expected number of 25 bp steps is:
+The expected number of 25 bp steps is `x = Delta EFFR / 0.25`. If `k = floor(x)` and `u = x-k`, the adjacent diagnostic outcomes are `25k` bp with probability `1-u` and `25(k+1)` bp with probability `u`.
 
-$$
-x=\frac{\Delta EFFR_{Sep}}{0.25}
-$$
-
-If `k = floor(x)` and `u = x-k`, the adjacent meeting outcomes are `25k` bp with probability `1-u` and `25(k+1)` bp with probability `u`. The same process is applied to October and multiplied through the tree to generate cumulative target-range probabilities.
-
-The observed September contract is retained as a cross-check:
+The diagnostic September residual is:
 
 $$
 Residual_{Sep}=R_{Sep}-\frac{16\,EFFR_{start,Sep}+14\,EFFR_{end,Sep}}{30}
 $$
 
-A residual outside the configured tolerance is a model-health warning or stop condition, not a number to conceal.
+A residual outside the configured tolerance is displayed as a model-health warning. The FedWatch diagnostic never overrides direct ZQ executable prices or the scenario P&L engine.
 
-### 5.2 Executable ZQ Probability
-
-The CME-style probability tree is a reference calculation using contract prices. Trading decisions require side-specific executable prices.
-
-For a strictly binary outcome set of hold versus +25 bp:
-
-$$
-p_{ZQ,long}=\frac{S(0)-F_{ask}}{S(0)-S(25)}
-$$
-
-$$
-p_{ZQ,short}=\frac{S(0)-F_{bid}}{S(0)-S(25)}
-$$
-
-The long formula is used when the strategy buys ZQ; the short formula is used when the strategy sells ZQ. Values outside `[0,1]` are displayed but invalidate the binary-probability interpretation.
-
-When three or more outcomes are possible, one ZQ price identifies only an expected rate move, not a unique probability for every outcome. The dashboard must never fabricate independent exact-25 and 50-plus probabilities from one futures price. Bucket probabilities come from the explicit FedWatch-style tree; trade profitability comes from the scenario payoff matrix in Section 6.
-
-### 5.3 Polymarket Probability
+### 5.3 Polymarket Probability and Expected Move
 
 The dashboard will show four distinct Polymarket measures for each token:
 
@@ -198,7 +224,13 @@ The dashboard will show four distinct Polymarket measures for each token:
 | Mid | `(best bid + best ask) / 2` | Display only; never an execution input |
 | Depth VWAP | Total cost divided by shares across required ask levels | Signal and order sizing |
 
-The probability comparison panel will show `FedWatch probability − Polymarket mid` for intuition and `ZQ executable edge − Polymarket depth VWAP` for actionability. Only the second can contribute to a trade signal.
+For the approved display model, each 50-plus bucket is represented as exactly 50 bp and the five midpoint probabilities are normalized by their raw sum:
+
+$$
+E_{PM}[\Delta]=\frac{\sum_i p_{i,mid}\Delta_i}{\sum_i p_{i,mid}}
+$$
+
+The dashboard shows the raw midpoint sum, normalized Polymarket expected move, direct ZQ expected move, and `Delta_ZQ - E_PM[Delta]`. It also shows the adjacent-state ZQ allocation beside each Polymarket midpoint, explicitly labeled as informational. Only the executable terminal scenario P&L after depth, fees, reserves, and risk gates may contribute to a trade signal.
 
 ## 6. Arbitrage and Profit Engine
 
@@ -442,7 +474,7 @@ Version 1 uses an assumed IBKR account Net Liquidation value of `$100,000` and a
 | Minimum projected margin cushion | `0.50` |
 | Maximum ZQ price slippage | `1` current valid ZQ tick |
 | Maximum normal Polymarket price slippage | `0.01` per share |
-| Maximum quote age | `500` milliseconds |
+| Maximum live IBKR quote age | `500` milliseconds; Polymarket uses WebSocket synchronization state |
 | Maximum unhedged duration before manual halt | `15` seconds |
 | Normal Polymarket absolute price ceiling | `0.95`, further restricted by the opportunity-specific profit cap |
 | Emergency Polymarket absolute price ceiling | `0.99`, further restricted by the obligation-specific economic cap |
@@ -513,12 +545,14 @@ The panel shows all intermediate values rather than only the final probability:
 | Block | Required fields |
 |---|---|
 | ZQ quotes | Contract, bid, ask, sizes, last, IBKR timestamp, local receipt time, live/delayed type |
-| Monthly EFFR | `100 − price` for August through November |
-| Calendar decomposition | Days before/after each meeting, start EFFR, average EFFR, end EFFR, residual |
-| Meeting steps | Expected bp move, expected 25 bp steps, floor, remainder |
-| FedWatch distribution | Per-meeting and cumulative target-range probabilities |
-| Polymarket | Bid, ask, mid, depth VWAP, fee schedule, size available, token and rule status |
-| Comparison | Mid probability gap, executable edge, timestamp mismatch, residual warning |
+| Direct `ZQU6` signal | September bid, ask, midpoint, `100 − price` implied average EFFR, and primary-signal label |
+| Calendar weighting | August pre-meeting EFFR anchor, `14/30` post-decision weight, and direct expected move |
+| Executable move | Buy-at-ask expected move, sell-at-bid expected move, adjacent 25 bp states, and executable probability band |
+| Polymarket | Bid, ask, mid, normalized five-market expected move, raw midpoint sum, depth VWAP, fee schedule, size available, token and rule status |
+| Comparison | Adjacent-state ZQ model versus each Polymarket midpoint, direct ZQ expected move minus normalized Polymarket expected move, WebSocket synchronization state, book-change age, and mapping status |
+| Secondary diagnostic | Collapsible August-through-November FedWatch expected move, adjacent states, probabilities, and September residual |
+
+The displayed order-book age is the time since the last economic book change, not the transport-freshness decision. A quiet book remains eligible while its market WebSocket is connected and the local book is synchronized. The panel shows a separate `SYNC` or `BLOCKED` status for every token.
 
 ### 11.3 Profit Waterfall
 
@@ -561,7 +595,7 @@ flowchart LR
 
         subgraph ADAPTERS[Async Venue and Reference Adapters]
             IBA["IBKR Adapter<br/>Python + official TWS API client"]
-            PMA["Polymarket Adapter<br/>Python + official async SDK"]
+            PMA["Polymarket Adapter<br/>Python + official async SDK<br/>WS books; REST seed/reconcile"]
             TMA["Clock, Calendar and Health Adapter<br/>Python"]
         end
 
@@ -569,7 +603,7 @@ flowchart LR
         STATE["Normalized Market-State Store<br/>Python immutable snapshots"]
 
         subgraph ANALYTICS[Deterministic Analytics]
-            PROB["Probability Engine<br/>Python + Decimal"]
+            PROB["Direct ZQU6 Signal Engine<br/>Python + Decimal<br/>FedWatch diagnostic secondary"]
             PAYOFF["Payoff and Profit Engine<br/>Python + Decimal"]
             RISK["Risk and Qualification Engine<br/>Python"]
         end
@@ -587,7 +621,7 @@ flowchart LR
     end
 
     IBKR <-->|"socket callbacks and commands"| IBA
-    POLY <-->|"books, orders and private updates"| PMA
+    POLY <-->|"market WS books and deltas<br/>user WS private updates<br/>REST seed/reconcile"| PMA
     META <-->|"rules, positions and eligibility"| PMA
 
     IBA --> BUS
@@ -625,9 +659,9 @@ flowchart LR
 |---|---|---|---|
 | Backend application shell | Python 3.12 | `asyncio`, typed dataclasses or Pydantic models | One supervised process; fail closed if any critical task exits |
 | IBKR adapter | Python | Official TWS API Python client over TWS/IB Gateway socket | Callback thread is bridged into the asyncio event loop; order IDs, permanent IDs, and `execId` values are preserved |
-| Polymarket adapter | Python | Current official asynchronous Python SDK, pinned to an audited version | Separate public-market and authenticated-user streams; `post_only=True` for the default hedge path |
+| Polymarket adapter | Python | Current official asynchronous Python SDK, pinned to an audited version | Public market WebSocket directly maintains L2 books; REST is limited to seed, reconciliation, and recovery; authenticated user stream is separate; `post_only=True` for the default hedge path |
 | Market-data normalization | Python | `asyncio.Queue`, immutable typed events, `Decimal` | Venue payloads are validated before entering trusted market state |
-| Probability engine | Python | Pure typed Python with `Decimal`; NumPy only if vectorization is later justified | No network access and no side effects; deterministic unit-test surface |
+| Probability engine | Python | Pure typed Python with `Decimal`; NumPy only if vectorization is later justified | Direct `ZQU6` move and adjacent-state model are primary; normalized Polymarket expected move is comparative; FedWatch is diagnostic; no network access or side effects |
 | Payoff and profit engine | Python | Pure typed Python with `Decimal` | Scenario matrix, fees, reserves, hedge rounding, and minimum P&L are independently reproducible |
 | Risk engine | Python | Pure typed Python and versioned configuration | Sole authority that can qualify a trade; default deny on missing or stale inputs |
 | Execution coordinator | Python | Explicit finite-state machine on `asyncio` | Sole authority that can request orders; one serialized command lane per venue |
@@ -643,7 +677,7 @@ flowchart LR
 
 ### 12.3 Runtime Execution Model
 
-1. The IBKR and Polymarket adapters translate external callbacks into typed Python events and publish them onto bounded `asyncio.Queue` channels. Backpressure or a queue overflow is a trading halt, not a dropped-message condition.
+1. The IBKR and Polymarket adapters translate external callbacks into typed Python events and publish them onto bounded `asyncio.Queue` channels. The Polymarket market WebSocket is the authoritative intraday book path: full `book` events seed or replace local depth, while `price_change` and `tick_size_change` events update the immutable in-memory books without a REST round trip. Backpressure or a queue overflow is a trading halt, not a dropped-message condition.
 
 2. A single market-state reducer creates immutable, timestamped snapshots. Probability, payoff, profit, and risk calculations consume the same snapshot ID so the dashboard and order decision cannot use different market states.
 
@@ -653,7 +687,7 @@ flowchart LR
 
 5. The FastAPI layer exposes read models and a narrow authenticated command surface. The React dashboard never computes authoritative probabilities, profit, risk approval, hedge size, or execution state.
 
-6. On startup or reconnect, the backend enters `RECOVERY`, reads the local ledger, queries both venues, rebuilds obligations, and remains unable to trade until reconciliation succeeds.
+6. On startup or reconnect, the backend enters `RECOVERY`, reads the local ledger, queries both venues, rebuilds obligations, seeds Polymarket books from REST, and remains unable to trade until reconciliation succeeds and every required token receives a valid WebSocket snapshot or subsequent synchronized update.
 
 ### 12.4 Deployment Topology
 
@@ -705,25 +739,25 @@ Development occurs in the Asia/Taipei workspace timezone, but the approved produ
 
 ## 15. Data Freshness and Time
 
-Every message stores the venue timestamp, local monotonic receipt time, UTC wall-clock time, and calculated age. Signal calculations require all legs to fall within a configurable synchronization window.
+Every message stores the venue timestamp, local receipt time, UTC wall-clock time, and calculated age. IBKR quote freshness is measured from the most recent live quote callback. Polymarket transport freshness is measured separately from economic book-change age: a quiet order book does not become stale merely because its price and size have not changed.
 
 The engine uses UTC internally. It displays America/New_York for FOMC timing, America/Chicago for CME trading context, and Asia/Taipei for the operator. Clock drift beyond the configured tolerance blocks trading.
 
 For the September 16, 2026 event, the controlled statement timestamp is `2026-09-16T18:00:00Z`, corresponding to `14:00` in America/New_York. New batches are disabled beginning at `2026-09-16T17:00:00Z`, exactly 60 minutes earlier. At the statement timestamp the event remains permanently closed to new version-1 batches; there is no configured post-decision resume time.
 
-IBKR market data must be explicitly identified as live. A delayed or frozen callback disables signals. Polymarket books are seeded from a REST snapshot and maintained through the market WebSocket; sequence or hash inconsistencies force a fresh snapshot before the book is trusted again.
+IBKR market data must be explicitly identified as live. A delayed or frozen callback disables signals. Polymarket books are seeded and periodically reconciled through REST but maintained authoritatively through the market WebSocket. A WebSocket disconnect immediately marks every book unsynchronized and prevents new ZQ orders. Missing seed depth, malformed or crossed updates, or REST/WebSocket hash or content disagreement replaces the affected local book with a fail-closed REST snapshot; the book remains ineligible until a subsequent valid WebSocket update restores synchronization. The authenticated user WebSocket remains the separate authority for private order and fill lifecycle events.
 
 ## 16. Testing and Release Plan
 
 ### 16.1 Calculation Tests
 
-1. Reproduce the workbook's `14/30` weight, `486.15` exact-25 shares, and `972.30` 50-plus shares per ZQU6.
+1. Reproduce `100 − ZQU6`, the August pre-meeting anchor, the `14/30` post-decision weight, the direct midpoint move, the bid/ask executable move band, adjacent-state probabilities, `486.15` exact-25 shares, and `972.30` 50-plus shares per ZQU6.
 
-2. Reproduce the August-through-November FedWatch probability tree and the September cross-contract residual.
+2. Prove that the primary model and opportunity engine require only the August anchor and September bid/ask, then independently reproduce the optional August-through-November FedWatch diagnostic and September cross-contract residual.
 
 3. Prove equal payoff across every covered outcome for each bundle before costs, then reconcile net payoff after all costs.
 
-4. Test the approved `-50`, `-25`, `0`, `+25`, and `+50` basis-point scenarios, non-25 bp EFFR movement inside the approved resolution mapping, settlement rounding, negative probability outputs, empty books, crossed books, and fee changes. Do not add +75 bp or +100 bp version-1 scenarios.
+4. Test adjacent-state boundaries, negative expected moves, expected moves outside the approved range, normalized Polymarket midpoint sums above and below one, the approved `-50`, `-25`, `0`, `+25`, and `+50` basis-point scenarios, non-25 bp EFFR movement, settlement rounding, empty books, crossed books, and fee changes. Do not add +75 bp or +100 bp version-1 scenarios.
 
 ### 16.2 Execution Tests
 
@@ -731,7 +765,7 @@ IBKR market data must be explicitly identified as live. A delayed or frozen call
 
 2. Simulate duplicate, delayed, reordered, corrected, and missing IBKR execution callbacks.
 
-3. Simulate Polymarket full fill, partial fill, delayed match, rejection, permanent failure, WebSocket disconnect, and REST/WebSocket disagreement.
+3. Simulate Polymarket full fill, partial fill, delayed match, rejection, permanent failure, full WebSocket book snapshots, incremental price-level updates, level deletion at zero size, tick-size change, quiet but connected books, WebSocket disconnect, reconnect, malformed update, crossed update, and REST/WebSocket disagreement.
 
 4. Terminate the process at every state transition, restart it, and prove that no duplicate order is created.
 
@@ -765,7 +799,7 @@ There is no reliable Polymarket paper venue assumed. Before live use, the execut
 
 Version 1 is complete only when the following criteria are demonstrated:
 
-1. The dashboard reproduces every probability and hedge intermediate calculation and identifies the exact source and age of each input.
+1. The dashboard makes the direct `ZQU6` expected move and adjacent-state assumption primary, keeps FedWatch secondary, reproduces every probability and hedge intermediate calculation, and identifies the exact source and age of each input.
 
 2. The payoff engine matches the workbook hedge ratios and independently reconciles all scenario P&L.
 
@@ -795,6 +829,8 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 15. `LIVE_ARMED` remains impossible until a separate operator approval is recorded after shadow and limited-live review.
 
+16. Polymarket books are updated directly from market WebSocket snapshots and deltas without a per-event REST request; any disconnect or integrity uncertainty marks the books unsynchronized and prevents a new ZQ order until recovery.
+
 ## 18. Resolved Decisions and Remaining Inputs
 
 ### 18.1 Resolved Version-1 Decisions
@@ -807,7 +843,7 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 4. **Capital base:** Version 1 assumes `$100,000` IBKR Net Liquidation and `$100,000` allocated strategy capital.
 
-5. **Risk thresholds:** Minimum modeled net profit is `$250` per 10-contract batch, minimum return on committed capital is `300` basis points, maximum daily loss is `$500`, maximum peak-to-trough strategy drawdown is `$2,000`, minimum margin cushion is `0.50`, minimum projected full excess liquidity is the greater of `$10,000` or ten times the next batch's incremental initial margin, maximum ZQ slippage is one valid tick, maximum normal Polymarket slippage is `0.01` per share, and maximum quote age is `500` milliseconds. The version-1 tail-loss gate is disabled. The drawdown halt preserves filled positions and requires manual review and re-arming.
+5. **Risk thresholds:** Minimum modeled net profit is `$250` per 10-contract batch, minimum return on committed capital is `300` basis points, maximum daily loss is `$500`, maximum peak-to-trough strategy drawdown is `$2,000`, minimum margin cushion is `0.50`, minimum projected full excess liquidity is the greater of `$10,000` or ten times the next batch's incremental initial margin, maximum ZQ slippage is one valid tick, maximum normal Polymarket slippage is `0.01` per share, and maximum IBKR quote age is `500` milliseconds. Polymarket eligibility depends on WebSocket connection and book synchronization rather than time since the last economic book change. The version-1 tail-loss gate is disabled. The drawdown halt preserves filled positions and requires manual review and re-arming.
 
 6. **Scenario scope:** The payoff matrix contains only `-50`, `-25`, `0`, `+25`, and `+50` basis-point scenarios. The `50+` outcome is represented as exactly 50 basis points. Version 1 does not calculate, display, test, or gate on +75 bp or +100 bp scenarios.
 
@@ -831,11 +867,15 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 16. **Development reserves:** `MODEL_RISK_RESERVE_USD`, `OPERATIONAL_RISK_RESERVE_USD`, and `EFFR_BASIS_RESERVE_USD` are each `$0` for development. Zero is valid only in `READ_ONLY`, `PAPER`, and `SHADOW`; all three must be replaced by positive owner-approved values before `LIMITED_LIVE` or `LIVE_ARMED`.
 
-17. **CLOB credential authorization:** The owner authorized one one-time `create_or_derive_api_key` call for credential provisioning and authenticated read-only testing only. The authorization excludes order submission, order cancellation, token approval, fund movement, and every Polygon transaction.
+17. **CLOB credential authorization:** The owner authorized one one-time `create_or_derive_api_key` call for credential provisioning and authenticated read-only testing only. That call was consumed without a confirmed credential result. The owner subsequently instructed the project not to retry because the CLOB works; no further credential-creation call is authorized. The prohibition includes any implicit retry during startup or testing.
+
+18. **Primary probability model:** The direct `ZQU6` implied September move is the primary dashboard and comparison model. `ZQQ6` is the configured pre-meeting EFFR anchor. The August-through-November FedWatch tree remains a collapsible diagnostic and does not control opportunity qualification.
+
+19. **Polymarket market-data path:** The public market WebSocket is authoritative for intraday books. REST is limited to startup seeding, periodic reconciliation, and recovery. A quiet synchronized book remains valid; a disconnected or uncertain book is immediately ineligible regardless of the most recent displayed price.
 
 ### 18.2 Inputs Still Required Before Live Mode
 
-1. Provide renewed explicit authorization for a second CLOB create attempt over the verified HTTP/1.1 path, or provide an existing CLOB API key, secret, and passphrase through protected secret storage. The first authorized create-or-derive attempt did not return credentials, so authenticated open-order and trade-history checks remain pending. The Builder and Relayer credentials are separate and do not satisfy CLOB L2 authentication.
+1. Load the existing working CLOB API key, secret, and passphrase through protected secret storage before authenticated order, open-order, or trade-history integration testing. Do not call `create_or_derive_api_key` again unless the owner supplies a new explicit authorization. Builder and Relayer credentials are separate and do not satisfy CLOB L2 authentication.
 
 2. Replace all three zero development reserves with positive owner-approved values before `LIMITED_LIVE`. This does not block implementation, `READ_ONLY`, `PAPER`, or `SHADOW`.
 
@@ -847,7 +887,7 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 On August 19, 2026, the owner authorized one `create_or_derive_api_key` operation limited to credential provisioning and authenticated read-only testing. The create request timed out without returning credentials. The SDK's immediate derive fallback returned HTTP 400 `Could not derive api key`. A later derive-only attempt over HTTP/1.1 also reached Polymarket and returned HTTP 400. Public CLOB `/time` and `/ok` checks both returned HTTP 200, isolating the failure from general endpoint reachability.
 
-No CLOB L2 credential was stored, no authenticated open-order or trade-history query could be run, and no order submission, cancellation, token approval, fund movement, or Polygon transaction was attempted. Because the approved create operation has been consumed without a confirmed result, any second create attempt requires renewed explicit owner authorization.
+No credential from that provisioning attempt was stored, no authenticated open-order or trade-history query could be run during that test, and no order submission, cancellation, token approval, fund movement, or Polygon transaction was attempted. The owner later confirmed that the CLOB works and directed the project not to retry provisioning. Any future create attempt therefore requires new explicit owner authorization.
 
 ## 19. Authoritative Interface References
 

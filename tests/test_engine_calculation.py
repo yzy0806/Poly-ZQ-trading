@@ -37,6 +37,8 @@ def book(token_id: str, bid: str, ask: str, market: str) -> OrderBook:
         asks=(BookLevel(price=Decimal(ask), size=Decimal("20000")),),
         tick_size=Decimal("0.001") if Decimal(ask) < Decimal("0.01") else Decimal("0.01"),
         min_order_size=Decimal("5"),
+        source="WEBSOCKET",
+        stream_synchronized=True,
     )
 
 
@@ -113,10 +115,34 @@ async def test_engine_builds_comparisons_and_both_profit_paths(settings: Setting
 
 
 @pytest.mark.asyncio
-async def test_engine_waits_when_any_reference_quote_is_missing(settings: Settings) -> None:
+async def test_engine_waits_for_target_and_anchor_quotes(settings: Settings) -> None:
     runtime = EngineRuntime(settings)
     snapshot = await runtime.state.get()
     calculated = runtime._calculate(snapshot)
     await runtime.polymarket.close()
     await runtime.database.close()
-    assert calculated.health_messages == ("Awaiting all four ZQ reference quotes",)
+    assert "pre-meeting anchor" in calculated.health_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_direct_signal_does_not_require_october_or_november(settings: Settings) -> None:
+    runtime = EngineRuntime(settings)
+    snapshot = await runtime.state.get()
+    anchor_month = settings.reference_contract_months[0]
+    calculated = runtime._calculate(
+        snapshot.model_copy(
+            update={
+                "quotes": {
+                    anchor_month: quote(anchor_month, "96.375"),
+                    settings.ibkr_zq_contract_month: quote(
+                        settings.ibkr_zq_contract_month, "96.325"
+                    ),
+                }
+            }
+        )
+    )
+    await runtime.polymarket.close()
+    await runtime.database.close()
+    assert calculated.probabilities.valid
+    assert not calculated.probabilities.fedwatch.valid
+    assert calculated.probabilities.expected_move_bps is not None

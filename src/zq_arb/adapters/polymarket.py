@@ -69,7 +69,7 @@ def _timestamp(value: Any) -> datetime | None:
 
 def _levels(values: Any, *, reverse: bool) -> tuple[BookLevel, ...]:
     result: list[BookLevel] = []
-    for item in values if isinstance(values, list) else []:
+    for item in values if isinstance(values, Sequence) and not isinstance(values, str) else []:
         if not isinstance(item, Mapping):
             continue
         price = _decimal(item.get("price"))
@@ -79,6 +79,134 @@ def _levels(values: Any, *, reverse: bool) -> tuple[BookLevel, ...]:
         result.append(BookLevel(price=price, size=size))
     result.sort(key=lambda level: level.price, reverse=reverse)
     return tuple(result)
+
+
+def _payload_value(payload: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in payload:
+            return payload[name]
+    return None
+
+
+def _stream_token_id(payload: Mapping[str, Any]) -> str:
+    return str(_payload_value(payload, "token_id", "tokenId", "asset_id", "assetId") or "")
+
+
+def _validate_book(book: OrderBook) -> OrderBook:
+    if any(
+        level.price <= 0 or level.price >= 1 or level.size <= 0
+        for level in (*book.bids, *book.asks)
+    ):
+        raise PolymarketProtocolError("market stream contains an invalid price or size")
+    if book.best_bid is not None and book.best_ask is not None and book.best_bid >= book.best_ask:
+        raise PolymarketProtocolError("market stream produced a crossed order book")
+    return book
+
+
+def update_books_from_stream_event(
+    books: Mapping[str, OrderBook],
+    event: VenueEvent,
+) -> tuple[OrderBook, ...]:
+    """Apply official market-stream snapshots and deltas without a REST round trip."""
+
+    kind = event.kind.lower()
+    payload = event.payload
+    source_timestamp = event.source_timestamp or _timestamp(payload.get("timestamp"))
+    if kind == "book":
+        token_id = _stream_token_id(payload)
+        if not token_id:
+            raise PolymarketProtocolError("market book event has no token id")
+        existing = books.get(token_id)
+        market = (
+            existing.market if existing is not None else str(payload.get("market") or "") or None
+        )
+        book = OrderBook(
+            token_id=token_id,
+            market=market,
+            bids=_levels(payload.get("bids"), reverse=True),
+            asks=_levels(payload.get("asks"), reverse=False),
+            tick_size=_decimal(_payload_value(payload, "tick_size", "tickSize")),
+            min_order_size=_decimal(_payload_value(payload, "min_order_size", "minOrderSize")),
+            negative_risk=(
+                bool(_payload_value(payload, "neg_risk", "negRisk"))
+                if _payload_value(payload, "neg_risk", "negRisk") is not None
+                else None
+            ),
+            book_hash=str(payload.get("hash") or "") or None,
+            source="WEBSOCKET",
+            stream_synchronized=True,
+            source_timestamp=source_timestamp,
+            last_reconciled_at=existing.last_reconciled_at if existing is not None else None,
+            received_at=event.received_at,
+        )
+        return (_validate_book(book),)
+
+    if kind == "price_change":
+        raw_changes = _payload_value(payload, "price_changes", "priceChanges")
+        if not isinstance(raw_changes, Sequence) or isinstance(raw_changes, str):
+            raise PolymarketProtocolError("price-change event has no changes")
+        updated: dict[str, OrderBook] = {}
+        for raw_change in raw_changes:
+            if not isinstance(raw_change, Mapping):
+                continue
+            token_id = _stream_token_id(raw_change)
+            current = updated.get(token_id) or books.get(token_id)
+            if not token_id or current is None:
+                raise PolymarketProtocolError(
+                    "price change arrived before a complete book snapshot"
+                )
+            price = _decimal(raw_change.get("price"))
+            size = _decimal(raw_change.get("size"))
+            side = str(raw_change.get("side") or "").upper()
+            if price is None or size is None or price <= 0 or price >= 1 or size < 0:
+                raise PolymarketProtocolError("price change contains an invalid price or size")
+            if side not in {"BUY", "SELL"}:
+                raise PolymarketProtocolError("price change contains an invalid side")
+            levels = {
+                level.price: level.size
+                for level in (current.bids if side == "BUY" else current.asks)
+            }
+            if size == 0:
+                levels.pop(price, None)
+            else:
+                levels[price] = size
+            rebuilt = tuple(
+                BookLevel(price=level_price, size=level_size)
+                for level_price, level_size in sorted(
+                    levels.items(), key=lambda item: item[0], reverse=side == "BUY"
+                )
+            )
+            change_hash = str(raw_change.get("hash") or "") or current.book_hash
+            book_update = {
+                "bids" if side == "BUY" else "asks": rebuilt,
+                "book_hash": change_hash,
+                "source": "WEBSOCKET",
+                "stream_synchronized": True,
+                "source_timestamp": source_timestamp,
+                "received_at": event.received_at,
+            }
+            updated[token_id] = _validate_book(current.model_copy(update=book_update))
+        return tuple(updated.values())
+
+    if kind == "tick_size_change":
+        token_id = _stream_token_id(payload)
+        current = books.get(token_id)
+        tick_size = _decimal(_payload_value(payload, "new_tick_size", "newTickSize"))
+        if current is None or tick_size is None or tick_size <= 0:
+            raise PolymarketProtocolError("tick-size change cannot be applied to the current book")
+        return (
+            current.model_copy(
+                update={
+                    "tick_size": tick_size,
+                    "source": "WEBSOCKET",
+                    "stream_synchronized": True,
+                    "source_timestamp": source_timestamp,
+                    "received_at": event.received_at,
+                }
+            ),
+        )
+
+    return ()
 
 
 class PolymarketAdapter:
@@ -232,7 +360,10 @@ class PolymarketAdapter:
             min_order_size=_decimal(payload.get("min_order_size")),
             negative_risk=bool(payload.get("neg_risk")) if "neg_risk" in payload else None,
             book_hash=str(payload.get("hash") or "") or None,
+            source="REST",
+            stream_synchronized=False,
             source_timestamp=_timestamp(payload.get("timestamp")),
+            last_reconciled_at=utc_now(),
         )
 
     async def snapshot_all_books(self) -> tuple[OrderBook, ...]:
@@ -268,7 +399,14 @@ class PolymarketAdapter:
             raise PolymarketProtocolError("official Polymarket stream SDK is unavailable") from exc
 
         client = AsyncPublicClient()
-        async with await client.subscribe(MarketSpec(token_ids=list(token_ids))) as stream:
+        async with await client.subscribe(
+            MarketSpec(token_ids=list(token_ids), custom_feature_enabled=True)
+        ) as stream:
+            yield VenueEvent(
+                venue="POLYMARKET",
+                kind="stream_connected",
+                payload={"token_count": len(token_ids)},
+            )
             async for event in stream:
                 payload = getattr(event, "payload", event)
                 if hasattr(payload, "model_dump"):

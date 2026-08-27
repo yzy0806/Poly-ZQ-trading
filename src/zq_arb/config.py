@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    env_file_version: int = 2
+    env_file_version: int = 3
     app_env: str = "development"
     run_mode: RunMode = RunMode.READ_ONLY
     live_trading_enabled: bool = False
@@ -239,8 +239,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def enforce_safety_invariants(self) -> Self:
         errors: list[str] = []
-        if self.env_file_version != 2:
-            errors.append("ENV_FILE_VERSION must be 2")
+        if self.env_file_version != 3:
+            errors.append("ENV_FILE_VERSION must be 3")
         if self.api_workers != 1:
             errors.append("API_WORKERS must be 1 for deterministic state ownership")
         if self.ibkr_zq_child_order_quantity != 10:

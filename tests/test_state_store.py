@@ -8,7 +8,7 @@ import pytest
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.config import Settings
 from zq_arb.domain.enums import AlertSeverity
-from zq_arb.domain.models import EligibilityStatus, MarketMappingStatus, OrderBook
+from zq_arb.domain.models import BookLevel, EligibilityStatus, MarketMappingStatus, OrderBook
 from zq_arb.services.state import StateStore
 
 
@@ -157,3 +157,62 @@ async def test_read_only_operating_state_never_arms(settings: Settings) -> None:
     assert snapshot.paused and snapshot.kill_switch
     assert not snapshot.armed
     assert not await store.acknowledge_alert("unknown")
+
+
+@pytest.mark.asyncio
+async def test_polymarket_stream_events_synchronize_then_disconnect_blocks_books(
+    settings: Settings,
+) -> None:
+    store = StateStore(settings)
+    token_id = settings.market_legs[0].yes_token_id
+    await store.set_books((OrderBook(token_id=token_id, market="DEC50PLUS_YES"),))
+    await store.apply_polymarket_event(
+        VenueEvent(venue="POLYMARKET", kind="stream_connected", payload={"token_count": 10})
+    )
+    await store.apply_polymarket_event(
+        VenueEvent(
+            venue="POLYMARKET",
+            kind="book",
+            payload={
+                "token_id": token_id,
+                "bids": [{"price": "0.10", "size": "100"}],
+                "asks": [{"price": "0.12", "size": "100"}],
+                "tick_size": "0.01",
+            },
+        )
+    )
+    synchronized = await store.get()
+    assert synchronized.polymarket.status.value == "CONNECTED"
+    assert synchronized.books[token_id].stream_synchronized
+    assert synchronized.books[token_id].market == "DEC50PLUS_YES"
+
+    await store.mark_polymarket_books_unsynchronized()
+    disconnected = await store.get()
+    assert not disconnected.books[token_id].stream_synchronized
+
+
+@pytest.mark.asyncio
+async def test_rest_reconciliation_preserves_match_and_blocks_mismatch(settings: Settings) -> None:
+    store = StateStore(settings)
+    token_id = settings.market_legs[0].yes_token_id
+    live_book = OrderBook(
+        token_id=token_id,
+        bids=(BookLevel(price=Decimal("0.10"), size=Decimal("100")),),
+        asks=(BookLevel(price=Decimal("0.12"), size=Decimal("100")),),
+        book_hash="same",
+        source="WEBSOCKET",
+        stream_synchronized=True,
+    )
+    await store.set_books((live_book,))
+    matching_rest = live_book.model_copy(update={"source": "REST", "stream_synchronized": False})
+    assert await store.reconcile_polymarket_books((matching_rest,)) == ()
+    assert (await store.get()).books[token_id].stream_synchronized
+
+    mismatching_rest = matching_rest.model_copy(
+        update={
+            "asks": (BookLevel(price=Decimal("0.13"), size=Decimal("100")),),
+            "book_hash": "different",
+        }
+    )
+    assert await store.reconcile_polymarket_books((mismatching_rest,)) == (token_id,)
+    assert not (await store.get()).books[token_id].stream_synchronized
