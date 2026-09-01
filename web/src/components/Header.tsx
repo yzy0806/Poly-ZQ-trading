@@ -8,7 +8,9 @@ function clock(zone: string): string {
 }
 
 export function Header({ state, onControl }: { state: EngineSnapshot; onControl: (action: string) => void }) {
-  const quoteAge = Math.max(0, ...Object.values(state.quotes).map((quote) => Date.now() - new Date(quote.received_at).getTime()))
+  const requiredQuotes = Object.values(state.quotes).filter((quote) => quote.role === 'TARGET' || quote.role === 'ANCHOR')
+  const eventTimes = requiredQuotes.flatMap((quote) => quote.last_market_data_event_at ? [quote.last_market_data_event_at] : [])
+  const oldestEvent = eventTimes.length ? eventTimes.reduce((oldest, value) => new Date(value).getTime() < new Date(oldest).getTime() ? value : oldest) : null
   return <header className="topbar">
     <div className="brand"><div className="mark">ZQ</div><div><h1>Cross-Venue Arbitrage</h1><span>FOMC September 2026 · control terminal</span></div></div>
     <div className="top-status">
@@ -17,7 +19,7 @@ export function Header({ state, onControl }: { state: EngineSnapshot; onControl:
       <Status label="POLY" value={state.polymarket.status} good={state.polymarket.status === 'CONNECTED'} />
       <Status label="RULES" value={state.mapping.verified ? 'VERIFIED' : 'BLOCKED'} good={state.mapping.verified} />
       <div className="clock"><span>UTC {clock('UTC')}</span><span>NY {clock('America/New_York')}</span><span>TW {clock('Asia/Taipei')}</span></div>
-      <div className="age"><span>MAX AGE</span><b>{quoteAge ? age(new Date(Date.now() - quoteAge).toISOString()) : '—'}</b></div>
+      <div className="age"><span>OLDEST ZQ EVENT · INFO</span><b>{age(oldestEvent)}</b></div>
     </div>
     <div className="controls">
       <button onClick={() => onControl('ARM')} disabled={state.run_mode === 'READ_ONLY' || state.armed}><Power size={15} />Arm</button>

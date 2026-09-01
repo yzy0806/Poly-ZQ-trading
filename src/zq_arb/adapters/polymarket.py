@@ -120,17 +120,30 @@ def update_books_from_stream_event(
         market = (
             existing.market if existing is not None else str(payload.get("market") or "") or None
         )
+        tick_size = _decimal(_payload_value(payload, "tick_size", "tickSize"))
+        min_order_size = _decimal(
+            _payload_value(payload, "min_order_size", "minOrderSize")
+        )
+        negative_risk_value = _payload_value(payload, "neg_risk", "negRisk")
         book = OrderBook(
             token_id=token_id,
             market=market,
             bids=_levels(payload.get("bids"), reverse=True),
             asks=_levels(payload.get("asks"), reverse=False),
-            tick_size=_decimal(_payload_value(payload, "tick_size", "tickSize")),
-            min_order_size=_decimal(_payload_value(payload, "min_order_size", "minOrderSize")),
+            tick_size=(
+                tick_size
+                if tick_size is not None
+                else existing.tick_size if existing is not None else None
+            ),
+            min_order_size=(
+                min_order_size
+                if min_order_size is not None
+                else existing.min_order_size if existing is not None else None
+            ),
             negative_risk=(
-                bool(_payload_value(payload, "neg_risk", "negRisk"))
-                if _payload_value(payload, "neg_risk", "negRisk") is not None
-                else None
+                bool(negative_risk_value)
+                if negative_risk_value is not None
+                else existing.negative_risk if existing is not None else None
             ),
             book_hash=str(payload.get("hash") or "") or None,
             source="WEBSOCKET",

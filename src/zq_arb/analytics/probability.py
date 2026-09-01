@@ -130,13 +130,13 @@ def direct_zq_probability(
         days_before=days_before,
         days_after=days_after,
     )
-    move_long = implied_decision_move_bps(
+    move_buy = implied_decision_move_bps(
         target_ask,
         pre_meeting_effr,
         days_before=days_before,
         days_after=days_after,
     )
-    move_short = implied_decision_move_bps(
+    move_bid_reference = implied_decision_move_bps(
         target_bid,
         pre_meeting_effr,
         days_before=days_before,
@@ -145,18 +145,18 @@ def direct_zq_probability(
     lower, lower_probability, upper, upper_probability, buckets = adjacent_outcome_distribution(
         move_mid
     )
-    executable_long_probability: Decimal | None = None
-    executable_short_probability: Decimal | None = None
+    executable_buy_probability: Decimal | None = None
+    bid_reference_probability: Decimal | None = None
     if lower is not None and upper is not None:
         width = Decimal(upper - lower)
-        executable_long_probability = (move_long - Decimal(lower)) / width
-        executable_short_probability = (move_short - Decimal(lower)) / width
+        executable_buy_probability = (move_buy - Decimal(lower)) / width
+        bid_reference_probability = (move_bid_reference - Decimal(lower)) / width
 
     probabilities = (
         lower_probability,
         upper_probability,
-        executable_long_probability,
-        executable_short_probability,
+        executable_buy_probability,
+        bid_reference_probability,
     )
     valid = lower is not None and all(
         value is not None and Decimal("0") <= value <= Decimal("1") for value in probabilities
@@ -172,15 +172,15 @@ def direct_zq_probability(
         implied_average_effr_ask=implied_average_effr(target_ask),
         implied_average_effr_mid=implied_average_effr(target_mid),
         expected_move_bps=move_mid,
-        executable_long_expected_move_bps=move_long,
-        executable_short_expected_move_bps=move_short,
+        executable_buy_expected_move_bps=move_buy,
+        bid_reference_expected_move_bps=move_bid_reference,
         lower_step_bps=lower,
         lower_probability=lower_probability,
         upper_step_bps=upper,
         upper_probability=upper_probability,
         bucket_probabilities=buckets,
-        executable_long_probability=executable_long_probability,
-        executable_short_probability=executable_short_probability,
+        executable_buy_probability=executable_buy_probability,
+        bid_reference_probability=bid_reference_probability,
         fedwatch=fedwatch or FedWatchDiagnostic(),
         valid=valid,
         reason=(

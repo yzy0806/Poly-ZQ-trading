@@ -59,6 +59,7 @@ def test_direct_september_model_uses_calendar_weight_and_adjacent_states() -> No
         target_ask=midpoint,
         pre_meeting_effr=pre_meeting_effr,
     )
+    assert snapshot.expected_move_bps is not None
     assert snapshot.expected_move_bps.quantize(Decimal("0.001")) == Decimal("12.500")
     assert snapshot.lower_step_bps == 0
     assert snapshot.upper_step_bps == 25

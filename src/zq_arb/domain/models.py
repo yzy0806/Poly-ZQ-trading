@@ -1,12 +1,25 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from .enums import AlertSeverity, BatchState, ConnectionStatus, DataQuality, RunMode, Side
+from .enums import (
+    AlertSeverity,
+    BatchState,
+    ConnectionStatus,
+    DataQuality,
+    FarmStatus,
+    GateStatus,
+    MarginPreviewStatus,
+    MarginQualificationStatus,
+    QuoteRole,
+    RunMode,
+    Side,
+    SubscriptionStatus,
+)
 
 
 def utc_now() -> datetime:
@@ -36,10 +49,45 @@ class Quote(StrictModel):
     received_at: datetime = Field(default_factory=utc_now)
     quality: DataQuality = DataQuality.UNKNOWN
     contract_id: int | None = None
+    role: QuoteRole = QuoteRole.DIAGNOSTIC
+    last_price_change_at: datetime | None = None
+    last_market_data_event_at: datetime | None = None
+    market_data_type: int | None = None
+    subscription_status: SubscriptionStatus = SubscriptionStatus.PENDING
+    subscription_generation: int = 0
+    farm_status: FarmStatus = FarmStatus.UNKNOWN
+    analytics_qualified: bool = False
+    pretrade_qualified: bool = False
+    validation_reason: str = "awaiting live subscription qualification"
 
     def age_ms(self, now: datetime | None = None) -> int:
+        """Compatibility alias for economic price-change age."""
+
+        return self.price_change_age_ms(now)
+
+    def price_change_age_ms(self, now: datetime | None = None) -> int:
         anchor = now or utc_now()
-        return max(0, int((anchor - self.received_at).total_seconds() * 1_000))
+        timestamp = self.last_price_change_at or self.received_at
+        return max(0, (anchor - timestamp) // timedelta(milliseconds=1))
+
+    @property
+    def has_valid_two_sided_market(self) -> bool:
+        return bool(
+            self.bid is not None
+            and self.ask is not None
+            and self.bid > 0
+            and self.ask > 0
+            and self.bid <= self.ask
+        )
+
+
+class IbkrFarmHealth(StrictModel):
+    name: str
+    service: str
+    status: FarmStatus = FarmStatus.UNKNOWN
+    message: str = "not observed"
+    current: bool = False
+    last_changed_at: datetime | None = None
 
 
 class BookLevel(StrictModel):
@@ -74,6 +122,28 @@ class OrderBook(StrictModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
+    def best_bid_size(self) -> Decimal | None:
+        best_bid = self.best_bid
+        if best_bid is None:
+            return None
+        return sum(
+            (level.size for level in self.bids if level.price == best_bid),
+            start=Decimal("0"),
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def best_ask_size(self) -> Decimal | None:
+        best_ask = self.best_ask
+        if best_ask is None:
+            return None
+        return sum(
+            (level.size for level in self.asks if level.price == best_ask),
+            start=Decimal("0"),
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
     def midpoint(self) -> Decimal | None:
         if self.best_bid is None or self.best_ask is None:
             return None
@@ -104,6 +174,93 @@ class AccountMetrics(StrictModel):
     received_at: datetime | None = None
 
 
+class MarginPreview(StrictModel):
+    status: MarginPreviewStatus = MarginPreviewStatus.NOT_REQUESTED
+    order_id: int | None = None
+    contract_month: str | None = None
+    side: Literal[Side.BUY] = Side.BUY
+    quantity: int | None = None
+    limit_price: Decimal | None = None
+    init_margin_before: Decimal | None = None
+    init_margin_change: Decimal | None = None
+    init_margin_after: Decimal | None = None
+    maintenance_margin_before: Decimal | None = None
+    maintenance_margin_change: Decimal | None = None
+    maintenance_margin_after: Decimal | None = None
+    equity_with_loan_before: Decimal | None = None
+    equity_with_loan_change: Decimal | None = None
+    equity_with_loan_after: Decimal | None = None
+    commission: Decimal | None = None
+    commission_currency: str | None = None
+    warning_text: str | None = None
+    error: str | None = None
+    requested_at: datetime | None = None
+    received_at: datetime | None = None
+    qualification_status: MarginQualificationStatus = MarginQualificationStatus.NOT_REQUESTED
+    qualified_for_next_batch: bool = False
+    qualification_detail: str = "IBKR BUY-10 what-if preview has not been requested"
+    qualification_age_seconds: int | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def available(self) -> bool:
+        return (
+            self.status is MarginPreviewStatus.AVAILABLE
+            and self.init_margin_change is not None
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def next_batch_initial_margin(self) -> Decimal | None:
+        if not self.available or self.init_margin_change is None:
+            return None
+        return max(Decimal("0"), self.init_margin_change)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def projected_excess_liquidity(self) -> Decimal | None:
+        if self.equity_with_loan_after is None or self.init_margin_after is None:
+            return None
+        return self.equity_with_loan_after - self.init_margin_after
+
+    def age_seconds(self, now: datetime | None = None) -> int | None:
+        if self.received_at is None:
+            return None
+        anchor = now or utc_now()
+        return max(0, int((anchor - self.received_at).total_seconds()))
+
+
+class GateCheck(StrictModel):
+    code: str
+    category: str
+    label: str
+    status: GateStatus
+    blocking: bool = True
+    actual_value: str | None = None
+    operator: str | None = None
+    required_value: str | None = None
+    unit: str | None = None
+    detail: str
+    observed_at: datetime = Field(default_factory=utc_now)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def passed(self) -> bool:
+        return self.status is GateStatus.PASSED
+
+
+class HedgeDepthView(StrictModel):
+    leg_code: str
+    required_shares: Decimal
+    available_shares: Decimal
+    shortfall_shares: Decimal
+    price_cap: Decimal
+    maker_price: Decimal | None = None
+    emergency_vwap: Decimal | None = None
+    worst_price: Decimal | None = None
+    sufficient: bool = False
+
+
 class FedWatchDiagnostic(StrictModel):
     rates: dict[str, Decimal] = Field(default_factory=dict)
     september_start_effr: Decimal | None = None
@@ -132,36 +289,79 @@ class ProbabilitySnapshot(StrictModel):
     implied_average_effr_ask: Decimal | None = None
     implied_average_effr_mid: Decimal | None = None
     expected_move_bps: Decimal | None = None
-    executable_long_expected_move_bps: Decimal | None = None
-    executable_short_expected_move_bps: Decimal | None = None
+    executable_buy_expected_move_bps: Decimal | None = None
+    bid_reference_expected_move_bps: Decimal | None = None
     lower_step_bps: int | None = None
     lower_probability: Decimal | None = None
     upper_step_bps: int | None = None
     upper_probability: Decimal | None = None
     bucket_probabilities: dict[str, Decimal] = Field(default_factory=dict)
-    executable_long_probability: Decimal | None = None
-    executable_short_probability: Decimal | None = None
+    executable_buy_probability: Decimal | None = None
+    bid_reference_probability: Decimal | None = None
     polymarket_probability_sum: Decimal | None = None
     polymarket_expected_move_bps: Decimal | None = None
     expected_move_gap_bps: Decimal | None = None
     fedwatch: FedWatchDiagnostic = Field(default_factory=FedWatchDiagnostic)
     valid: bool = False
+    analytics_qualified: bool = False
+    execution_qualified: bool = False
+    qualification_reason: str = "NOT EXECUTION-QUALIFIED"
+    qualification_checks: tuple[GateCheck, ...] = ()
     reason: str = "awaiting target and pre-meeting anchor quotes"
     calculated_at: datetime = Field(default_factory=utc_now)
 
 
 class ScenarioPnl(StrictModel):
     move_bps: int
+    settlement_price: Decimal
+    zq_entry_price: Decimal
+    contracts: int
+    futures_point_value: Decimal
+    futures_price_change: Decimal
     futures_pnl: Decimal
+    inc25_shares: Decimal
+    inc25_entry_price: Decimal
+    inc25_payout: Decimal
+    inc25_pnl: Decimal
+    inc50plus_shares: Decimal
+    inc50plus_entry_price: Decimal
+    inc50plus_payout: Decimal
+    inc50plus_pnl: Decimal
     polymarket_pnl: Decimal
+    gross_pnl: Decimal
     costs: Decimal
     reserves: Decimal
     net_pnl: Decimal
 
 
+class OpportunityCostBreakdown(StrictModel):
+    ibkr_commission: Decimal
+    polymarket_fees: Decimal
+    zq_slippage_reserve: Decimal
+    polymarket_slippage_reserve: Decimal
+    rounding_reserve: Decimal
+    explicit_costs: Decimal
+    model_reserve: Decimal
+    operational_reserve: Decimal
+    effr_basis_reserve: Decimal
+    reserves: Decimal
+
+
+class OpportunityCalculation(StrictModel):
+    inc25_shares_per_contract: Decimal
+    inc50plus_shares_per_contract: Decimal
+    inc25_emergency_hedge_cash: Decimal
+    inc50plus_emergency_hedge_cash: Decimal
+    emergency_hedge_cash: Decimal
+    incremental_initial_margin: Decimal | None
+    emergency_cash_reserve: Decimal
+    committed_capital: Decimal | None
+    costs: OpportunityCostBreakdown
+
+
 class Opportunity(StrictModel):
-    direction: str
-    zq_side: Side
+    direction: Literal["LONG"] = "LONG"
+    zq_side: Literal[Side.BUY] = Side.BUY
     zq_price: Decimal | None = None
     contracts: int
     token_requirements: dict[str, Decimal] = Field(default_factory=dict)
@@ -174,8 +374,11 @@ class Opportunity(StrictModel):
     minimum_net_profit: Decimal | None = None
     committed_capital: Decimal | None = None
     return_on_capital_bps: Decimal | None = None
+    calculation: OpportunityCalculation | None = None
+    hedge_depth: tuple[HedgeDepthView, ...] = ()
     tradeable: bool = False
     gate_reasons: tuple[str, ...] = ()
+    gate_checks: tuple[GateCheck, ...] = ()
     calculated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -184,7 +387,9 @@ class MarketProbabilityComparison(StrictModel):
     label: str
     zq_probability: Decimal | None = None
     polymarket_bid: Decimal | None = None
+    polymarket_bid_size: Decimal | None = None
     polymarket_ask: Decimal | None = None
+    polymarket_ask_size: Decimal | None = None
     polymarket_mid: Decimal | None = None
     midpoint_gap: Decimal | None = None
     book_age_ms: int | None = None
@@ -225,7 +430,33 @@ class AlertView(StrictModel):
     message: str
     flashing: bool = False
     acknowledged: bool = False
+    resolved: bool = False
     created_at: datetime = Field(default_factory=utc_now)
+    resolved_at: datetime | None = None
+
+
+class ReconciliationStatusView(StrictModel):
+    clean: bool = False
+    method: str = "NOT_CONFIRMED"
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    confirmed_snapshot_id: int | None = None
+    reason: str = "manual venue reconciliation has not been confirmed"
+    invalidated_at: datetime | None = None
+
+
+class StrategyRiskView(StrictModel):
+    allocated_capital: Decimal = Decimal("0")
+    cumulative_realized_pnl: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    fees: Decimal = Decimal("0")
+    equity: Decimal = Decimal("0")
+    high_water_mark: Decimal = Decimal("0")
+    drawdown: Decimal = Decimal("0")
+    daily_pnl: Decimal = Decimal("0")
+    trading_day: str | None = None
+    source: str = "PERSISTED_STRATEGY_LEDGER"
+    valued_at: datetime = Field(default_factory=utc_now)
 
 
 class MarketMappingStatus(StrictModel):
@@ -256,12 +487,16 @@ class EngineSnapshot(StrictModel):
     paused: bool = False
     kill_switch: bool = False
     ibkr: VenueHealth = Field(default_factory=VenueHealth)
+    ibkr_farms: dict[str, IbkrFarmHealth] = Field(default_factory=dict)
     polymarket: VenueHealth = Field(default_factory=VenueHealth)
     eligibility: EligibilityStatus = Field(default_factory=EligibilityStatus)
     mapping: MarketMappingStatus = Field(default_factory=MarketMappingStatus)
     quotes: dict[str, Quote] = Field(default_factory=dict)
     books: dict[str, OrderBook] = Field(default_factory=dict)
     account: AccountMetrics = Field(default_factory=AccountMetrics)
+    margin_preview: MarginPreview = Field(default_factory=MarginPreview)
+    reconciliation: ReconciliationStatusView = Field(default_factory=ReconciliationStatusView)
+    strategy_risk: StrategyRiskView = Field(default_factory=StrategyRiskView)
     probabilities: ProbabilitySnapshot = Field(default_factory=ProbabilitySnapshot)
     probability_comparisons: tuple[MarketProbabilityComparison, ...] = ()
     opportunities: tuple[Opportunity, ...] = ()

@@ -1,5 +1,32 @@
 export type DecimalValue = string | number | null
 
+export interface GateCheck {
+  code: string
+  category: string
+  label: string
+  status: 'PASSED' | 'FAILED' | 'UNAVAILABLE' | 'NOT_APPLICABLE'
+  blocking: boolean
+  actual_value: string | null
+  operator: string | null
+  required_value: string | null
+  unit: string | null
+  detail: string
+  observed_at: string
+  passed: boolean
+}
+
+export interface HedgeDepthView {
+  leg_code: string
+  required_shares: DecimalValue
+  available_shares: DecimalValue
+  shortfall_shares: DecimalValue
+  price_cap: DecimalValue
+  maker_price: DecimalValue
+  emergency_vwap: DecimalValue
+  worst_price: DecimalValue
+  sufficient: boolean
+}
+
 export interface VenueHealth {
   status: string
   authenticated: boolean
@@ -17,6 +44,25 @@ export interface Quote {
   last: DecimalValue
   received_at: string
   quality: string
+  role: string
+  last_price_change_at: string | null
+  last_market_data_event_at: string | null
+  market_data_type: number | null
+  subscription_status: string
+  subscription_generation: number
+  farm_status: string
+  analytics_qualified: boolean
+  pretrade_qualified: boolean
+  validation_reason: string
+}
+
+export interface IbkrFarmHealth {
+  name: string
+  service: string
+  status: string
+  message: string
+  current: boolean
+  last_changed_at: string | null
 }
 
 export interface BookLevel { price: DecimalValue; size: DecimalValue }
@@ -27,7 +73,9 @@ export interface OrderBook {
   bids: BookLevel[]
   asks: BookLevel[]
   best_bid: DecimalValue
+  best_bid_size: DecimalValue
   best_ask: DecimalValue
+  best_ask_size: DecimalValue
   midpoint: DecimalValue
   source: string
   stream_synchronized: boolean
@@ -63,36 +111,79 @@ export interface ProbabilitySnapshot {
   implied_average_effr_ask: DecimalValue
   implied_average_effr_mid: DecimalValue
   expected_move_bps: DecimalValue
-  executable_long_expected_move_bps: DecimalValue
-  executable_short_expected_move_bps: DecimalValue
+  executable_buy_expected_move_bps: DecimalValue
+  bid_reference_expected_move_bps: DecimalValue
   lower_step_bps: number | null
   lower_probability: DecimalValue
   upper_step_bps: number | null
   upper_probability: DecimalValue
   bucket_probabilities: Record<string, DecimalValue>
-  executable_long_probability: DecimalValue
-  executable_short_probability: DecimalValue
+  executable_buy_probability: DecimalValue
+  bid_reference_probability: DecimalValue
   polymarket_probability_sum: DecimalValue
   polymarket_expected_move_bps: DecimalValue
   expected_move_gap_bps: DecimalValue
   fedwatch: FedWatchDiagnostic
   valid: boolean
+  analytics_qualified: boolean
+  execution_qualified: boolean
+  qualification_reason: string
+  qualification_checks?: GateCheck[]
   reason: string
   calculated_at: string
 }
 
 export interface ScenarioPnl {
   move_bps: number
+  settlement_price: DecimalValue
+  zq_entry_price: DecimalValue
+  contracts: number
+  futures_point_value: DecimalValue
+  futures_price_change: DecimalValue
   futures_pnl: DecimalValue
+  inc25_shares: DecimalValue
+  inc25_entry_price: DecimalValue
+  inc25_payout: DecimalValue
+  inc25_pnl: DecimalValue
+  inc50plus_shares: DecimalValue
+  inc50plus_entry_price: DecimalValue
+  inc50plus_payout: DecimalValue
+  inc50plus_pnl: DecimalValue
   polymarket_pnl: DecimalValue
+  gross_pnl: DecimalValue
   costs: DecimalValue
   reserves: DecimalValue
   net_pnl: DecimalValue
 }
 
+export interface OpportunityCostBreakdown {
+  ibkr_commission: DecimalValue
+  polymarket_fees: DecimalValue
+  zq_slippage_reserve: DecimalValue
+  polymarket_slippage_reserve: DecimalValue
+  rounding_reserve: DecimalValue
+  explicit_costs: DecimalValue
+  model_reserve: DecimalValue
+  operational_reserve: DecimalValue
+  effr_basis_reserve: DecimalValue
+  reserves: DecimalValue
+}
+
+export interface OpportunityCalculation {
+  inc25_shares_per_contract: DecimalValue
+  inc50plus_shares_per_contract: DecimalValue
+  inc25_emergency_hedge_cash: DecimalValue
+  inc50plus_emergency_hedge_cash: DecimalValue
+  emergency_hedge_cash: DecimalValue
+  incremental_initial_margin: DecimalValue
+  emergency_cash_reserve: DecimalValue
+  committed_capital: DecimalValue
+  costs: OpportunityCostBreakdown
+}
+
 export interface Opportunity {
-  direction: string
-  zq_side: string
+  direction: 'LONG'
+  zq_side: 'BUY'
   zq_price: DecimalValue
   contracts: number
   token_requirements: Record<string, DecimalValue>
@@ -105,8 +196,11 @@ export interface Opportunity {
   minimum_net_profit: DecimalValue
   committed_capital: DecimalValue
   return_on_capital_bps: DecimalValue
+  calculation: OpportunityCalculation | null
+  hedge_depth: HedgeDepthView[]
   tradeable: boolean
   gate_reasons: string[]
+  gate_checks?: GateCheck[]
   calculated_at: string
 }
 
@@ -115,7 +209,9 @@ export interface MarketProbabilityComparison {
   label: string
   zq_probability: DecimalValue
   polymarket_bid: DecimalValue
+  polymarket_bid_size: DecimalValue
   polymarket_ask: DecimalValue
+  polymarket_ask_size: DecimalValue
   polymarket_mid: DecimalValue
   midpoint_gap: DecimalValue
   book_age_ms: number | null
@@ -142,6 +238,57 @@ export interface AccountMetrics {
   received_at: string | null
 }
 
+export interface MarginPreview {
+  status: 'NOT_REQUESTED' | 'PENDING' | 'AVAILABLE' | 'FAILED'
+  order_id: number | null
+  contract_month: string | null
+  side: 'BUY'
+  quantity: number | null
+  limit_price: DecimalValue
+  init_margin_change: DecimalValue
+  init_margin_after: DecimalValue
+  maintenance_margin_change: DecimalValue
+  maintenance_margin_after: DecimalValue
+  equity_with_loan_after: DecimalValue
+  commission: DecimalValue
+  commission_currency: string | null
+  warning_text: string | null
+  error: string | null
+  requested_at: string | null
+  received_at: string | null
+  available: boolean
+  next_batch_initial_margin: DecimalValue
+  projected_excess_liquidity: DecimalValue
+  qualification_status: 'NOT_REQUESTED' | 'REFRESHING' | 'CURRENT' | 'REFRESH_REQUIRED' | 'FAILED'
+  qualified_for_next_batch: boolean
+  qualification_detail: string
+  qualification_age_seconds: number | null
+}
+
+export interface ReconciliationStatus {
+  clean: boolean
+  method: string
+  confirmed_by: string | null
+  confirmed_at: string | null
+  confirmed_snapshot_id: number | null
+  reason: string
+  invalidated_at: string | null
+}
+
+export interface StrategyRisk {
+  allocated_capital: DecimalValue
+  cumulative_realized_pnl: DecimalValue
+  unrealized_pnl: DecimalValue
+  fees: DecimalValue
+  equity: DecimalValue
+  high_water_mark: DecimalValue
+  drawdown: DecimalValue
+  daily_pnl: DecimalValue
+  trading_day: string | null
+  source: string
+  valued_at: string
+}
+
 export interface AlertView {
   alert_id: string
   severity: string
@@ -149,7 +296,9 @@ export interface AlertView {
   message: string
   flashing: boolean
   acknowledged: boolean
+  resolved: boolean
   created_at: string
+  resolved_at: string | null
 }
 
 export interface HedgeObligation {
@@ -183,6 +332,7 @@ export interface EngineSnapshot {
   paused: boolean
   kill_switch: boolean
   ibkr: VenueHealth
+  ibkr_farms: Record<string, IbkrFarmHealth>
   polymarket: VenueHealth
   eligibility: {
     checked: boolean
@@ -201,6 +351,9 @@ export interface EngineSnapshot {
   quotes: Record<string, Quote>
   books: Record<string, OrderBook>
   account: AccountMetrics
+  margin_preview: MarginPreview
+  reconciliation: ReconciliationStatus
+  strategy_risk: StrategyRisk
   probabilities: ProbabilitySnapshot
   probability_comparisons: MarketProbabilityComparison[]
   opportunities: Opportunity[]

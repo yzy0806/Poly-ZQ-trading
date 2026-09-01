@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -19,14 +20,29 @@ from zq_arb.analytics.probability import (
     with_polymarket_expectation,
 )
 from zq_arb.config import Settings
-from zq_arb.domain.enums import AlertSeverity, ConnectionStatus, DataQuality
+from zq_arb.domain.enums import (
+    AlertSeverity,
+    BatchState,
+    ConnectionStatus,
+    DataQuality,
+    FarmStatus,
+    GateStatus,
+    MarginPreviewStatus,
+    MarginQualificationStatus,
+    QuoteRole,
+    SubscriptionStatus,
+)
 from zq_arb.domain.models import (
     EngineSnapshot,
     FedWatchDiagnostic,
+    GateCheck,
+    MarginPreview,
     MarketProbabilityComparison,
     Opportunity,
+    OrderBook,
     ProbabilitySnapshot,
     Quote,
+    StrategyRiskView,
     utc_now,
 )
 from zq_arb.persistence.database import Database
@@ -58,10 +74,14 @@ class EngineRuntime:
         self._tasks: list[asyncio.Task[None]] = []
         self._stopping = asyncio.Event()
         self._polymarket_resync_requested = asyncio.Event()
+        self._margin_preview_refresh_requested = asyncio.Event()
 
     async def start(self) -> None:
         await self.database.initialize()
         await self.repository.ensure_config_version(self.settings)
+        await self.state.set_strategy_risk(
+            await self.repository.load_or_create_strategy_risk(self.settings)
+        )
         await self.repository.audit(
             actor="SYSTEM",
             action="ENGINE_START",
@@ -75,6 +95,13 @@ class EngineRuntime:
                 asyncio.create_task(self._polymarket_reference_loop(), name="polymarket-reference"),
                 asyncio.create_task(self._polymarket_stream_loop(), name="polymarket-stream"),
                 asyncio.create_task(self._ibkr_connection_loop(), name="ibkr-connection"),
+                asyncio.create_task(
+                    self._ibkr_market_data_supervisor_loop(),
+                    name="ibkr-market-data-supervisor",
+                ),
+                asyncio.create_task(
+                    self._ibkr_margin_preview_loop(), name="ibkr-margin-preview"
+                ),
             )
         )
 
@@ -88,8 +115,8 @@ class EngineRuntime:
             action="ENGINE_STOP",
             reason="application shutdown",
         )
-        for task in self._tasks:
-            task.cancel()
+        for background_task in self._tasks:
+            background_task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await self.ibkr.disconnect()
         await self.polymarket.close()
@@ -101,6 +128,15 @@ class EngineRuntime:
             try:
                 if event.venue == "IBKR":
                     await self.state.apply_ibkr_event(event)
+                    if (
+                        event.kind in {"connection", "account_summary", "pnl"}
+                        or (
+                            event.kind in {"tick_price", "tick_size"}
+                            and str(event.payload.get("month") or "")
+                            == self.settings.ibkr_zq_contract_month
+                        )
+                    ):
+                        self._margin_preview_refresh_requested.set()
                 else:
                     await self.state.apply_polymarket_event(event)
             except PolymarketProtocolError as exc:
@@ -130,8 +166,11 @@ class EngineRuntime:
             try:
                 await self.state.set_ibkr_health(ConnectionStatus.CONNECTING, "connecting to TWS")
                 await self.ibkr.connect()
+                await self.state.begin_ibkr_subscriptions()
                 self.ibkr.request_contracts_and_market_data()
+                await self.state.set_ibkr_resubscribe_required(False)
                 self.ibkr.request_open_orders_and_executions()
+                self._margin_preview_refresh_requested.set()
                 attempts = 0
                 while self.ibkr.connected and not self._stopping.is_set():
                     try:
@@ -160,6 +199,115 @@ class EngineRuntime:
                     )
                     return
                 await asyncio.sleep(self.settings.ibkr_reconnect_backoff_seconds)
+
+    async def _ibkr_market_data_supervisor_loop(self) -> None:
+        """Recreate current-generation streams after a socket or farm recovery."""
+
+        while not self._stopping.is_set():
+            snapshot = await self.state.get()
+            if self.ibkr.connected and snapshot.metadata.get("ibkr_resubscribe_required"):
+                try:
+                    await self.state.begin_ibkr_subscriptions(
+                        advance_generation=not bool(
+                            snapshot.metadata.get("ibkr_generation_preallocated")
+                        )
+                    )
+                    self.ibkr.resubscribe_market_data()
+                    await self.state.set_ibkr_resubscribe_required(False)
+                    self._margin_preview_refresh_requested.set()
+                except Exception as exc:
+                    LOGGER.warning("ibkr_market_data_resubscribe_failed", error=str(exc))
+            await asyncio.sleep(0.25)
+
+    async def _ibkr_margin_preview_loop(self) -> None:
+        """Maintain a paced, non-routing BUY-10 ZQ margin preview."""
+
+        loop = asyncio.get_running_loop()
+        last_requested = float("-inf")
+        while not self._stopping.is_set():
+            snapshot = await self.state.get()
+            target = snapshot.quotes.get(self.settings.ibkr_zq_contract_month)
+            farm = snapshot.ibkr_farms.get("US_FUTURES")
+            verified = bool(
+                (snapshot.metadata.get("contract_verification") or {})
+                .get(self.settings.ibkr_zq_contract_month, {})
+                .get("verified")
+            )
+            due = (
+                loop.time() - last_requested
+                >= self.settings.ibkr_margin_preview_interval_seconds
+            )
+            preview = snapshot.margin_preview
+            preview_age = preview.age_seconds()
+            preview_matches = bool(
+                preview.contract_month == self.settings.ibkr_zq_contract_month
+                and preview.quantity == self.settings.ibkr_zq_child_order_quantity
+                and target is not None
+                and target.ask is not None
+                and preview.limit_price == target.ask
+            )
+            refresh_needed = bool(
+                self._margin_preview_refresh_requested.is_set()
+                or not preview.available
+                or not preview_matches
+                or preview_age is None
+                or preview_age >= self.settings.ibkr_margin_preview_interval_seconds
+            )
+            eligible = bool(
+                due
+                and refresh_needed
+                and self.ibkr.connected
+                and self.settings.ibkr_account_configured
+                and snapshot.ibkr.status is ConnectionStatus.CONNECTED
+                and farm is not None
+                and farm.status is FarmStatus.CONNECTED
+                and verified
+                and target is not None
+                and target.ask is not None
+                and target.subscription_status is SubscriptionStatus.ACTIVE
+                and target.market_data_type == 1
+                and target.has_valid_two_sided_market
+            )
+            if not eligible:
+                await asyncio.sleep(0.25)
+                continue
+            order_id: int | None = None
+            last_requested = loop.time()
+            self._margin_preview_refresh_requested.clear()
+            try:
+                assert target is not None and target.ask is not None
+                order_id = self.ibkr.request_zq_margin_preview(
+                    month=self.settings.ibkr_zq_contract_month,
+                    limit_price=target.ask,
+                    quantity=self.settings.ibkr_zq_child_order_quantity,
+                )
+                deadline = loop.time() + self.settings.ibkr_margin_preview_timeout_seconds
+                while loop.time() < deadline:
+                    preview = (await self.state.get()).margin_preview
+                    if (
+                        preview.order_id == order_id
+                        and preview.status
+                        in {MarginPreviewStatus.AVAILABLE, MarginPreviewStatus.FAILED}
+                    ):
+                        break
+                    await asyncio.sleep(0.05)
+                else:
+                    await self.state.fail_margin_preview(
+                        order_id,
+                        f"IBKR what-if response exceeded "
+                        f"{self.settings.ibkr_margin_preview_timeout_seconds}s timeout",
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("ibkr_margin_preview_failed", error=str(exc))
+                await self.state.fail_margin_preview(
+                    order_id, f"IBKR what-if request failed: {type(exc).__name__}: {exc}"
+                )
+            finally:
+                if order_id is not None:
+                    self.ibkr.cancel_margin_preview(order_id)
+            await asyncio.sleep(0.25)
 
     async def _polymarket_reference_loop(self) -> None:
         mapping_due = True
@@ -250,10 +398,8 @@ class EngineRuntime:
         interval = self.settings.engine_state_publish_interval_ms / 1_000
         while not self._stopping.is_set():
             try:
-                current = await self.state.get()
-                calculated = self._calculate(current)
-                if calculated != current:
-                    await self.state.replace(calculated)
+                updated = await self.state.update(self._calculate)
+                await self._enforce_strategy_drawdown(updated)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -271,6 +417,15 @@ class EngineRuntime:
         months = self.settings.reference_contract_months
         anchor_month = months[0]
         target_month = self.settings.ibkr_zq_contract_month
+        generation = int(snapshot.metadata.get("ibkr_subscription_generation") or 0)
+        qualified_quotes = {
+            month: self._qualify_quote(quote, generation=generation)
+            for month, quote in snapshot.quotes.items()
+        }
+        snapshot = snapshot.model_copy(update={"quotes": qualified_quotes})
+        snapshot = snapshot.model_copy(
+            update={"margin_preview": self._margin_preview_view(snapshot, now)}
+        )
         anchor_quote = snapshot.quotes.get(anchor_month)
         target_quote = snapshot.quotes.get(target_month)
         anchor_mid = _mid(anchor_quote) if anchor_quote is not None else None
@@ -296,12 +451,15 @@ class EngineRuntime:
                     "health_messages": (
                         f"Awaiting {anchor_month} pre-meeting anchor and {target_month} bid/ask",
                     ),
+                    "quotes": qualified_quotes,
                 }
             )
         diagnostic = FedWatchDiagnostic()
         reference_quotes = [snapshot.quotes.get(month) for month in months]
         reference_mids = [_mid(quote) if quote is not None else None for quote in reference_quotes]
-        if all(value is not None for value in reference_mids):
+        if all(
+            quote is not None and quote.analytics_qualified for quote in reference_quotes
+        ) and all(value is not None for value in reference_mids):
             diagnostic = fedwatch_reference(
                 ReferencePrices(*(value for value in reference_mids if value is not None))
             )
@@ -319,27 +477,49 @@ class EngineRuntime:
             and book.midpoint is not None
         }
         probabilities = with_polymarket_expectation(probabilities, polymarket_midpoints)
-        required_quotes = (anchor_quote, target_quote)
-        quotes_fresh = all(
-            quote.quality is DataQuality.LIVE
-            and quote.age_ms(now) <= self.settings.max_quote_age_ms
-            for quote in required_quotes
-        )
+        analytics_qualified = anchor_quote.analytics_qualified and target_quote.analytics_qualified
         long_book_25 = self._book(snapshot, "INC25", yes=True)
         long_book_50 = self._book(snapshot, "INC50PLUS", yes=True)
-        short_book_25 = self._book(snapshot, "INC25", yes=False)
-        short_book_50 = self._book(snapshot, "INC50PLUS", yes=False)
-        relevant_books = (long_book_25, long_book_50, short_book_25, short_book_50)
+        relevant_books = (long_book_25, long_book_50)
         books_available = all(book is not None for book in relevant_books)
         books_fresh = (
             books_available
             and all(book is not None and book.stream_synchronized for book in relevant_books)
             and snapshot.polymarket.status is ConnectionStatus.CONNECTED
         )
+        cross_venue_checks = self._cross_venue_checks(
+            snapshot,
+            target_quote=target_quote,
+            anchor_quote=anchor_quote,
+            probabilities=probabilities,
+            long_book_25=long_book_25,
+            long_book_50=long_book_50,
+            now=now,
+            generation=generation,
+        )
+        blocking_cross_venue_checks = tuple(check for check in cross_venue_checks if check.blocking)
+        failed_cross_venue_checks = tuple(
+            check for check in blocking_cross_venue_checks if not check.passed
+        )
+        execution_qualified = not failed_cross_venue_checks
+        qualification_reason = (
+            "EXECUTION-QUALIFIED immutable snapshot"
+            if execution_qualified
+            else (
+                f"NOT EXECUTION-QUALIFIED — {len(failed_cross_venue_checks)} of "
+                f"{len(blocking_cross_venue_checks)} execution checks failed"
+            )
+        )
+        probabilities = probabilities.model_copy(
+            update={
+                "analytics_qualified": analytics_qualified,
+                "execution_qualified": execution_qualified,
+                "qualification_reason": qualification_reason,
+                "qualification_checks": cross_venue_checks,
+            }
+        )
         opportunities: list[Opportunity] = []
-        incremental_margin = self._metadata_decimal(
-            snapshot, "next_batch_initial_margin"
-        ) or Decimal("0")
+        _, _, _, incremental_margin = self._margin_preview_qualification(snapshot, now)
         emergency_reserve = Decimal("0")
         costs = CostInputs(
             model_reserve=self.settings.model_risk_reserve_usd,
@@ -347,15 +527,11 @@ class EngineRuntime:
             effr_basis_reserve=self.settings.effr_basis_reserve_usd,
         )
         if probabilities.pre_meeting_effr is not None and books_available:
-            candidates = (
-                ("LONG", target_quote.ask, long_book_25, long_book_50),
-                ("SHORT", target_quote.bid, short_book_25, short_book_50),
-            )
-            for direction, price, book25, book50 in candidates:
-                if price is None or book25 is None or book50 is None:
-                    continue
+            price = target_quote.ask
+            book25 = long_book_25
+            book50 = long_book_50
+            if price is not None and book25 is not None and book50 is not None:
                 raw = build_three_state_opportunity(
-                    direction=direction,
                     contracts=self.settings.ibkr_zq_child_order_quantity,
                     zq_price=price,
                     pre_meeting_effr=probabilities.pre_meeting_effr,
@@ -371,8 +547,10 @@ class EngineRuntime:
                     snapshot,
                     raw,
                     now=now,
-                    quotes_fresh=quotes_fresh,
                     books_fresh=books_fresh,
+                    target_subscription_qualified=target_quote.pretrade_qualified,
+                    anchor_subscription_qualified=anchor_quote.pretrade_qualified,
+                    cross_venue_checks=cross_venue_checks,
                 )
                 qualification = self.risk.qualify(raw, context)
                 opportunities.append(
@@ -380,20 +558,44 @@ class EngineRuntime:
                         update={
                             "tradeable": qualification.tradeable,
                             "gate_reasons": qualification.reasons,
+                            "gate_checks": qualification.checks,
                         }
                     )
                 )
         health: list[str] = []
-        if not quotes_fresh:
-            health.append("Target ZQ and pre-meeting anchor quotes are not live and fresh")
+        zq_farm = snapshot.ibkr_farms.get("US_FUTURES")
+        if zq_farm is None or zq_farm.status is not FarmStatus.CONNECTED:
+            health.append("US futures market-data farm disconnected")
+        if target_quote.subscription_status is not SubscriptionStatus.ACTIVE:
+            health.append("ZQU6 current-generation live subscription is not qualified")
+        if not target_quote.analytics_qualified:
+            health.append(f"ZQU6 not qualified: {target_quote.validation_reason}")
+        if anchor_quote.subscription_status is not SubscriptionStatus.ACTIVE:
+            health.append("ZQQ6 current-generation live subscription is not qualified")
+        if not anchor_quote.analytics_qualified:
+            health.append(f"ZQQ6 not qualified: {anchor_quote.validation_reason}")
         if not books_fresh:
             health.append("Polymarket hedge books are unavailable or WebSocket-unsynchronized")
         if not probabilities.valid:
             health.append(probabilities.reason)
         if snapshot.mapping.errors:
             health.extend(snapshot.mapping.errors)
+        metadata = deepcopy(snapshot.metadata)
+        market_event_ages = tuple(
+            max(0, int((now - quote.last_market_data_event_at).total_seconds() * 1_000))
+            for quote in (target_quote, anchor_quote)
+            if quote.last_market_data_event_at is not None
+        )
+        metadata.update(
+            {
+                "maximum_market_event_age_ms": max(market_event_ages, default=None),
+                "cross_venue_snapshot_qualified": execution_qualified,
+                "cross_venue_snapshot_at": now.isoformat(),
+            }
+        )
         return snapshot.model_copy(
             update={
+                "quotes": qualified_quotes,
                 "probabilities": probabilities,
                 "probability_comparisons": self._probability_comparisons(
                     snapshot,
@@ -402,6 +604,185 @@ class EngineRuntime:
                 ),
                 "opportunities": tuple(opportunities),
                 "health_messages": tuple(dict.fromkeys(health)),
+                "metadata": metadata,
+            }
+        )
+
+    def _cross_venue_checks(
+        self,
+        snapshot: EngineSnapshot,
+        *,
+        target_quote: Quote,
+        anchor_quote: Quote,
+        probabilities: ProbabilitySnapshot,
+        long_book_25: OrderBook | None,
+        long_book_50: OrderBook | None,
+        now: datetime,
+        generation: int,
+    ) -> tuple[GateCheck, ...]:
+        checks: list[GateCheck] = []
+
+        def add(
+            code: str,
+            label: str,
+            passed: bool | None,
+            actual: str,
+            operator: str,
+            required: str,
+            detail: str,
+            *,
+            blocking: bool = True,
+            unit: str | None = None,
+        ) -> None:
+            status = (
+                GateStatus.UNAVAILABLE
+                if passed is None
+                else GateStatus.PASSED
+                if passed
+                else GateStatus.FAILED
+            )
+            resolved_detail = (
+                f"{label} passed: {actual} {operator} {required}" if passed else detail
+            )
+            checks.append(
+                GateCheck(
+                    code=code,
+                    category="CROSS_VENUE",
+                    label=label,
+                    status=status,
+                    blocking=blocking,
+                    actual_value=actual,
+                    operator=operator,
+                    required_value=required,
+                    unit=unit,
+                    detail=resolved_detail,
+                    observed_at=now,
+                )
+            )
+
+        def quote_checks(prefix: str, label: str, quote: Quote) -> None:
+            add(
+                f"{prefix}_LIVE_DATA",
+                f"{label} live market data",
+                quote.market_data_type == 1 and quote.quality is DataQuality.LIVE,
+                f"{quote.quality.value} ({quote.market_data_type or 'unknown'})",
+                "==",
+                "LIVE (1)",
+                f"{label} market data is not live",
+            )
+            add(
+                f"{prefix}_SUBSCRIPTION",
+                f"{label} subscription",
+                quote.subscription_status is SubscriptionStatus.ACTIVE,
+                quote.subscription_status.value,
+                "==",
+                SubscriptionStatus.ACTIVE.value,
+                f"{label} subscription is not active",
+            )
+            add(
+                f"{prefix}_GENERATION",
+                f"{label} subscription generation",
+                quote.subscription_generation == generation,
+                str(quote.subscription_generation),
+                "==",
+                str(generation),
+                f"{label} subscription generation is not current",
+            )
+            add(
+                f"{prefix}_FARM",
+                f"{label} US futures farm",
+                quote.farm_status is FarmStatus.CONNECTED,
+                quote.farm_status.value,
+                "==",
+                FarmStatus.CONNECTED.value,
+                f"{label} US futures farm is not connected",
+            )
+            add(
+                f"{prefix}_TWO_SIDED",
+                f"{label} two-sided quote",
+                quote.has_valid_two_sided_market,
+                f"bid={quote.bid}; ask={quote.ask}",
+                "==",
+                "positive and uncrossed",
+                f"{label} bid/ask is incomplete or crossed",
+            )
+        quote_checks("ZQU6", "ZQU6", target_quote)
+        quote_checks("ZQQ6", "ZQQ6 anchor", anchor_quote)
+        add(
+            "DIRECT_ZQ_MODEL",
+            "Direct ZQU6 adjacent-state probability model",
+            probabilities.valid,
+            (
+                f"move={probabilities.expected_move_bps}; "
+                f"buy_probability={probabilities.executable_buy_probability}; "
+                f"bid_reference_probability={probabilities.bid_reference_probability}"
+            ),
+            "within",
+            "move [-50, 50] bp and probabilities [0, 1]",
+            "direct ZQU6 move or adjacent-state probability is outside the approved range",
+        )
+        polymarket_connected = snapshot.polymarket.status is ConnectionStatus.CONNECTED
+        add(
+            "POLYMARKET_WEBSOCKET",
+            "Polymarket market WebSocket",
+            polymarket_connected,
+            snapshot.polymarket.status.value,
+            "==",
+            ConnectionStatus.CONNECTED.value,
+            "Polymarket market WebSocket is not connected",
+        )
+        for code, label, book in (
+            ("INC25_YES_BOOK", "INC25 YES hedge book", long_book_25),
+            ("INC50PLUS_YES_BOOK", "INC50PLUS YES hedge book", long_book_50),
+        ):
+            synchronized = book is not None and book.stream_synchronized
+            actual = (
+                "SYNCHRONIZED"
+                if synchronized
+                else "UNAVAILABLE"
+                if book is None
+                else "UNSYNCHRONIZED"
+            )
+            add(
+                code,
+                label,
+                synchronized if book is not None else None,
+                actual,
+                "==",
+                "SYNCHRONIZED",
+                f"{label} is unavailable or WebSocket-unsynchronized",
+            )
+        return tuple(checks)
+
+    def _qualify_quote(self, quote: Quote, *, generation: int) -> Quote:
+        role = quote.role
+        base_reasons: list[str] = []
+        if quote.market_data_type != 1 or quote.quality is not DataQuality.LIVE:
+            base_reasons.append("market data is not live")
+        if quote.subscription_status is not SubscriptionStatus.ACTIVE:
+            base_reasons.append("subscription is not active")
+        if quote.subscription_generation != generation:
+            base_reasons.append("subscription generation mismatch")
+        if quote.farm_status is not FarmStatus.CONNECTED:
+            base_reasons.append("US futures farm is not connected")
+        if not quote.has_valid_two_sided_market:
+            base_reasons.append("two-sided quote is incomplete or crossed")
+        analytics_qualified = not base_reasons
+        pretrade_qualified = (
+            role is not QuoteRole.DIAGNOSTIC
+            and not base_reasons
+        )
+        if base_reasons:
+            reason = "; ".join(base_reasons)
+        elif role is QuoteRole.DIAGNOSTIC:
+            reason = "diagnostic live subscription qualified; never execution-authorizing"
+        else:
+            reason = "current-generation live subscription qualified"
+        return quote.model_copy(
+            update={
+                "analytics_qualified": analytics_qualified,
+                "pretrade_qualified": pretrade_qualified,
+                "validation_reason": reason,
             }
         )
 
@@ -422,7 +803,9 @@ class EngineRuntime:
                     label=leg.label,
                     zq_probability=zq_probability,
                     polymarket_bid=book.best_bid if book else None,
+                    polymarket_bid_size=book.best_bid_size if book else None,
                     polymarket_ask=book.best_ask if book else None,
+                    polymarket_ask_size=book.best_ask_size if book else None,
                     polymarket_mid=midpoint,
                     midpoint_gap=(
                         zq_probability - midpoint
@@ -442,56 +825,180 @@ class EngineRuntime:
         opportunity: Opportunity,
         *,
         now: datetime,
-        quotes_fresh: bool,
         books_fresh: bool,
+        target_subscription_qualified: bool,
+        anchor_subscription_qualified: bool,
+        cross_venue_checks: tuple[GateCheck, ...],
     ) -> GateContext:
         verification = snapshot.metadata.get("contract_verification") or {}
         contract_verified = bool(
             verification.get(self.settings.ibkr_zq_contract_month, {}).get("verified")
         )
-        required_months = {
-            self.settings.reference_contract_months[0],
-            self.settings.ibkr_zq_contract_month,
-        }
+        (
+            margin_available,
+            margin_actual,
+            margin_detail,
+            next_batch_margin,
+        ) = self._margin_preview_qualification(snapshot, now)
+        projected_excess = None
+        if margin_available and next_batch_margin is not None:
+            preview = snapshot.margin_preview
+            if preview.projected_excess_liquidity is not None:
+                projected_excess = preview.projected_excess_liquidity
+            elif snapshot.account.full_excess_liquidity is not None:
+                projected_excess = (
+                    snapshot.account.full_excess_liquidity - next_batch_margin
+                )
+        projected_cushion = None
+        if (
+            projected_excess is not None
+            and snapshot.account.net_liquidation is not None
+            and snapshot.account.net_liquidation > 0
+        ):
+            projected_cushion = projected_excess / snapshot.account.net_liquidation
         return GateContext(
             now=now,
-            ibkr_connected=snapshot.ibkr.status is ConnectionStatus.CONNECTED,
-            ibkr_data_live=all(
-                quote.quality is DataQuality.LIVE
-                for month, quote in snapshot.quotes.items()
-                if month in required_months
-            ),
+            ibkr_status=snapshot.ibkr.status,
             polymarket_connected=snapshot.polymarket.status is ConnectionStatus.CONNECTED,
             mapping_verified=snapshot.mapping.verified,
             eligibility_checked=snapshot.eligibility.checked,
             eligibility_blocked=snapshot.eligibility.blocked,
             eligibility_country=snapshot.eligibility.country,
-            books_fresh=books_fresh,
-            quotes_fresh=quotes_fresh,
-            cross_venue_synchronized=quotes_fresh and books_fresh,
+            polymarket_books_synchronized=books_fresh,
+            target_subscription_qualified=target_subscription_qualified,
+            anchor_subscription_qualified=anchor_subscription_qualified,
+            cross_venue_snapshot_qualified=(
+                target_subscription_qualified
+                and anchor_subscription_qualified
+                and books_fresh
+            ),
             contract_verified=contract_verified,
-            full_hedge_depth_available=not opportunity.gate_reasons,
-            margin_preview_available=bool(snapshot.metadata.get("margin_preview_available")),
-            projected_full_excess_liquidity=snapshot.account.full_excess_liquidity,
-            projected_margin_cushion=snapshot.account.cushion,
-            next_batch_initial_margin=self._metadata_decimal(snapshot, "next_batch_initial_margin"),
+            full_hedge_depth_available=bool(opportunity.hedge_depth)
+            and all(
+                depth.sufficient and depth.maker_price is not None
+                for depth in opportunity.hedge_depth
+            ),
+            margin_preview_available=margin_available,
+            margin_preview_actual=margin_actual,
+            margin_preview_detail=margin_detail,
+            projected_full_excess_liquidity=projected_excess,
+            projected_margin_cushion=projected_cushion,
+            next_batch_initial_margin=next_batch_margin,
             current_zq_position=int(snapshot.metadata.get("zq_position") or 0),
             active_batches=int(snapshot.metadata.get("active_batches") or 0),
             unresolved_hedge=any(
                 obligation.deficit_shares > 0 for obligation in snapshot.active_batch.obligations
             ),
-            reconciliation_clean=bool(snapshot.metadata.get("reconciliation_clean")),
+            reconciliation_clean=snapshot.reconciliation.clean,
+            reconciliation_detail=snapshot.reconciliation.reason,
             critical_alert_active=any(
-                alert.severity is AlertSeverity.CRITICAL and not alert.acknowledged
+                alert.severity is AlertSeverity.CRITICAL
+                and not alert.acknowledged
+                and not alert.resolved
                 for alert in snapshot.alerts
             ),
             paused=snapshot.paused,
             kill_switch=snapshot.kill_switch,
-            strategy_daily_pnl=snapshot.account.daily_pnl,
-            strategy_drawdown=None,
+            strategy_daily_pnl=snapshot.strategy_risk.daily_pnl,
+            strategy_drawdown=snapshot.strategy_risk.drawdown,
+            cross_venue_checks=cross_venue_checks,
         )
 
-    def _book(self, snapshot: EngineSnapshot, leg_code: str, *, yes: bool) -> Any:
+    def _margin_preview_qualification(
+        self, snapshot: EngineSnapshot, now: datetime
+    ) -> tuple[bool | None, str, str, Decimal | None]:
+        preview = snapshot.margin_preview
+        age = preview.age_seconds(now)
+        target = snapshot.quotes.get(self.settings.ibkr_zq_contract_month)
+        matches = bool(
+            preview.contract_month == self.settings.ibkr_zq_contract_month
+            and preview.quantity == self.settings.ibkr_zq_child_order_quantity
+            and preview.side.value == "BUY"
+            and target is not None
+            and target.ask is not None
+            and preview.limit_price == target.ask
+        )
+        fresh = bool(
+            age is not None and age <= self.settings.ibkr_margin_preview_max_age_seconds
+        )
+        available = preview.available and matches and fresh and not preview.warning_text
+        actual = (
+            f"raw-status={preview.status.value}; order={preview.order_id or 'none'}; "
+            f"month={preview.contract_month or 'none'}; qty={preview.quantity or 'none'}; "
+            f"side={preview.side.value}; age={age if age is not None else 'unavailable'}s; "
+            f"limit={preview.limit_price}; target-limit={target.ask if target else None}; "
+            f"initial-margin-change={preview.init_margin_change}"
+        )
+        if available:
+            detail = (
+                "matching BUY-10 ZQ what-if preview is available and current; "
+                f"limit={preview.limit_price}, age={age}s"
+            )
+            return True, "CURRENT; " + actual, detail, preview.next_batch_initial_margin
+        if preview.status in {
+            MarginPreviewStatus.NOT_REQUESTED,
+            MarginPreviewStatus.PENDING,
+        }:
+            return (
+                None,
+                (
+                    "REFRESHING; " + actual
+                    if preview.status is MarginPreviewStatus.PENDING
+                    else "REFRESH_REQUIRED; " + actual
+                ),
+                preview.error
+                or "IBKR BUY-10 ZQ what-if preview has not completed",
+                None,
+            )
+        reasons: list[str] = []
+        if not preview.available:
+            reasons.append(preview.error or "IBKR preview did not return usable margin")
+        if not matches:
+            reasons.append(
+                "preview does not match the configured BUY-10 September batch and current limit"
+            )
+        if not fresh:
+            reasons.append(
+                f"preview age exceeds {self.settings.ibkr_margin_preview_max_age_seconds}s"
+            )
+        if preview.warning_text:
+            reasons.append(f"IBKR warning: {preview.warning_text}")
+        status = (
+            "FAILED"
+            if preview.status is MarginPreviewStatus.FAILED
+            else "REFRESH_REQUIRED"
+        )
+        return False, f"{status}; {actual}", "; ".join(reasons), None
+
+    def _margin_preview_view(
+        self,
+        snapshot: EngineSnapshot,
+        now: datetime,
+    ) -> MarginPreview:
+        available, _actual, detail, _margin = self._margin_preview_qualification(snapshot, now)
+        preview = snapshot.margin_preview
+        if available:
+            status = MarginQualificationStatus.CURRENT
+        elif preview.status is MarginPreviewStatus.PENDING:
+            status = MarginQualificationStatus.REFRESHING
+        elif preview.status is MarginPreviewStatus.FAILED:
+            status = MarginQualificationStatus.FAILED
+        elif preview.status is MarginPreviewStatus.NOT_REQUESTED:
+            status = MarginQualificationStatus.NOT_REQUESTED
+        else:
+            status = MarginQualificationStatus.REFRESH_REQUIRED
+        return preview.model_copy(
+            update={
+                "qualification_status": status,
+                "qualified_for_next_batch": available is True,
+                "qualification_detail": detail,
+                "qualification_age_seconds": preview.age_seconds(now),
+            }
+        )
+
+    def _book(
+        self, snapshot: EngineSnapshot, leg_code: str, *, yes: bool
+    ) -> OrderBook | None:
         for leg in self.settings.market_legs:
             if leg.code == leg_code:
                 return snapshot.books.get(leg.yes_token_id if yes else leg.no_token_id)
@@ -501,6 +1008,152 @@ class EngineRuntime:
     def _metadata_decimal(snapshot: EngineSnapshot, key: str) -> Decimal | None:
         value: Any = snapshot.metadata.get(key)
         return Decimal(str(value)) if value is not None else None
+
+    def request_margin_preview_refresh(self) -> None:
+        self._margin_preview_refresh_requested.set()
+
+    async def confirm_reconciliation(self, actor: str, reason: str) -> None:
+        if self.settings.run_mode.is_live:
+            raise ValueError("manual reconciliation cannot authorize a live run mode")
+        snapshot = await self.state.get()
+        if snapshot.ibkr.status is not ConnectionStatus.CONNECTED:
+            raise ValueError("IBKR must be connected before reconciliation can be confirmed")
+        if snapshot.polymarket.status is not ConnectionStatus.CONNECTED:
+            raise ValueError("Polymarket must be connected before reconciliation can be confirmed")
+        if snapshot.active_batch.state not in {BatchState.IDLE, BatchState.COMPLETE}:
+            raise ValueError("the active batch must be terminal before reconciliation")
+        if any(obligation.deficit_shares > 0 for obligation in snapshot.active_batch.obligations):
+            raise ValueError("hedge obligations remain unresolved")
+        observed = {
+            "snapshot_id": snapshot.snapshot_id,
+            "ibkr_status": snapshot.ibkr.status.value,
+            "polymarket_status": snapshot.polymarket.status.value,
+            "zq_position": int(snapshot.metadata.get("zq_position") or 0),
+            "active_batches": int(snapshot.metadata.get("active_batches") or 0),
+            "active_batch": snapshot.active_batch.model_dump(mode="json"),
+            "synchronized_polymarket_books": sum(
+                1 for book in snapshot.books.values() if book.stream_synchronized
+            ),
+        }
+        await self.repository.record_reconciliation(
+            actor=actor,
+            reason=reason,
+            expected={"unresolved_hedge_obligations": 0},
+            observed=observed,
+        )
+        await self.state.confirm_reconciliation(
+            actor=actor,
+            reason=reason,
+            snapshot_id=snapshot.snapshot_id,
+        )
+
+    async def record_strategy_valuation(
+        self,
+        *,
+        cumulative_realized_pnl: Decimal,
+        unrealized_pnl: Decimal,
+        fees: Decimal,
+        daily_pnl: Decimal,
+        source: str,
+        valued_at: datetime | None = None,
+    ) -> StrategyRiskView:
+        current = (await self.state.get()).strategy_risk
+        timestamp = valued_at or utc_now()
+        equity = (
+            current.allocated_capital
+            + cumulative_realized_pnl
+            + unrealized_pnl
+            - fees
+        )
+        high_water_mark = max(current.high_water_mark, equity)
+        risk = StrategyRiskView(
+            allocated_capital=current.allocated_capital,
+            cumulative_realized_pnl=cumulative_realized_pnl,
+            unrealized_pnl=unrealized_pnl,
+            fees=fees,
+            equity=equity,
+            high_water_mark=high_water_mark,
+            drawdown=max(Decimal("0"), high_water_mark - equity),
+            daily_pnl=daily_pnl,
+            trading_day=timestamp.date().isoformat(),
+            source=source,
+            valued_at=timestamp,
+        )
+        await self.repository.save_strategy_risk(risk)
+        await self.state.set_strategy_risk(risk)
+        await self._enforce_strategy_drawdown(await self.state.get())
+        return risk
+
+    async def reset_strategy_risk(self, actor: str, reason: str) -> None:
+        snapshot = await self.state.get()
+        if not snapshot.reconciliation.clean:
+            raise ValueError("venue reconciliation must be clean before a strategy-risk reset")
+        if snapshot.active_batch.state not in {BatchState.IDLE, BatchState.COMPLETE}:
+            raise ValueError("the active batch must be terminal before a strategy-risk reset")
+        current = snapshot.strategy_risk
+        reset = current.model_copy(
+            update={
+                "high_water_mark": current.equity,
+                "drawdown": Decimal("0"),
+                "source": "MANUAL_AUDITED_RISK_RESET",
+                "valued_at": utc_now(),
+            }
+        )
+        await self.repository.save_strategy_risk(reset)
+        await self.state.set_strategy_risk(reset)
+        await self.state.set_drawdown_halt(False)
+        await self.state.resolve_alerts("STRATEGY_DRAWDOWN_LIMIT")
+        await self.repository.audit(
+            actor=actor,
+            action="RESET_STRATEGY_RISK",
+            reason=reason,
+            details={
+                "equity": reset.equity,
+                "new_high_water_mark": reset.high_water_mark,
+            },
+        )
+
+    async def _enforce_strategy_drawdown(self, snapshot: EngineSnapshot) -> None:
+        risk = snapshot.strategy_risk
+        if risk.drawdown < self.settings.max_strategy_drawdown_usd:
+            return
+        if bool(snapshot.metadata.get("drawdown_halt_active")):
+            return
+        cancel_error: str | None = None
+        if (
+            snapshot.active_batch.zq_order_id is not None
+            and snapshot.active_batch.remaining_quantity > 0
+        ):
+            try:
+                self.ibkr.cancel_order(snapshot.active_batch.zq_order_id)
+            except Exception as exc:
+                cancel_error = f"{type(exc).__name__}: {exc}"
+                LOGGER.exception("drawdown_cancel_unfilled_failed", error=cancel_error)
+        await self.state.set_operating_state(paused=True, armed=False)
+        await self.state.set_drawdown_halt(True)
+        await self.state.add_alert(
+            AlertSeverity.CRITICAL,
+            "STRATEGY_DRAWDOWN_LIMIT",
+            (
+                f"Strategy drawdown {risk.drawdown} USD reached the "
+                f"{self.settings.max_strategy_drawdown_usd} USD limit. "
+                "Unfilled ZQ was cancelled where possible; filled positions were preserved."
+            ),
+            flashing=True,
+        )
+        await self.repository.audit(
+            actor="SYSTEM",
+            action="STRATEGY_DRAWDOWN_HALT",
+            reason="strategy drawdown limit reached",
+            details={
+                "drawdown": risk.drawdown,
+                "limit": self.settings.max_strategy_drawdown_usd,
+                "zq_order_id": snapshot.active_batch.zq_order_id,
+                "remaining_quantity": snapshot.active_batch.remaining_quantity,
+                "cancel_error": cancel_error,
+                "filled_positions_preserved": True,
+            },
+        )
 
     async def audit_control(self, actor: str, action: str, reason: str) -> None:
         await self.repository.audit(actor=actor, action=action, reason=reason)

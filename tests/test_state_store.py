@@ -7,14 +7,66 @@ import pytest
 
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.config import Settings
-from zq_arb.domain.enums import AlertSeverity
+from zq_arb.domain.enums import AlertSeverity, MarginPreviewStatus
 from zq_arb.domain.models import BookLevel, EligibilityStatus, MarketMappingStatus, OrderBook
 from zq_arb.services.state import StateStore
 
 
 @pytest.mark.asyncio
+async def test_ibkr_what_if_order_state_becomes_typed_margin_preview(
+    settings: Settings,
+) -> None:
+    store = StateStore(settings)
+    context = {
+        "order_id": 7001,
+        "contract_month": "202609",
+        "side": "BUY",
+        "quantity": 10,
+        "limit_price": "96.330",
+    }
+    await store.apply_ibkr_event(
+        VenueEvent(venue="IBKR", kind="margin_preview_requested", payload=context)
+    )
+    await store.apply_ibkr_event(
+        VenueEvent(
+            venue="IBKR",
+            kind="margin_preview",
+            payload={
+                **context,
+                "status": "PreSubmitted",
+                "init_margin_before": "84,000.00",
+                "init_margin_change": "1,250.50",
+                "init_margin_after": "85,250.50",
+                "maintenance_margin_before": "73,000.00",
+                "maintenance_margin_change": "1,100.25",
+                "maintenance_margin_after": "74,100.25",
+                "equity_with_loan_before": "1,000,000.00",
+                "equity_with_loan_change": "0.00",
+                "equity_with_loan_after": "1,000,000.00",
+                "commission": "20.00",
+                "commission_currency": "USD",
+                "warning_text": "",
+            },
+        )
+    )
+    preview = (await store.get()).margin_preview
+    assert preview.status is MarginPreviewStatus.AVAILABLE
+    assert preview.next_batch_initial_margin == Decimal("1250.50")
+    assert preview.init_margin_after == Decimal("85250.50")
+    assert preview.commission == Decimal("20.00")
+    assert preview.projected_excess_liquidity == Decimal("914749.50")
+
+
+@pytest.mark.asyncio
 async def test_ibkr_ticks_are_reduced_into_immutable_quote(settings: Settings) -> None:
     store = StateStore(settings)
+    await store.apply_ibkr_event(
+        VenueEvent(
+            venue="IBKR",
+            kind="error",
+            payload={"code": 2104, "message": "Market data farm connection is OK:usfuture"},
+        )
+    )
     await store.apply_ibkr_event(
         VenueEvent(venue="IBKR", kind="market_data_type", payload={"market_data_type": 1})
     )
@@ -160,6 +212,33 @@ async def test_read_only_operating_state_never_arms(settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
+async def test_manual_reconciliation_is_auditable_state_and_order_events_invalidate_it(
+    settings: Settings,
+) -> None:
+    store = StateStore(settings)
+    await store.confirm_reconciliation(
+        actor="operator",
+        reason="positions checked at both venues",
+        snapshot_id=17,
+    )
+    confirmed = await store.get()
+    assert confirmed.reconciliation.clean
+    assert confirmed.reconciliation.confirmed_by == "operator"
+    assert confirmed.reconciliation.confirmed_snapshot_id == 17
+
+    await store.apply_ibkr_event(
+        VenueEvent(
+            venue="IBKR",
+            kind="order_status",
+            payload={"order_id": "42", "status": "Submitted"},
+        )
+    )
+    invalidated = await store.get()
+    assert not invalidated.reconciliation.clean
+    assert "order status" in invalidated.reconciliation.reason
+
+
+@pytest.mark.asyncio
 async def test_polymarket_stream_events_synchronize_then_disconnect_blocks_books(
     settings: Settings,
 ) -> None:
@@ -200,13 +279,27 @@ async def test_rest_reconciliation_preserves_match_and_blocks_mismatch(settings:
         bids=(BookLevel(price=Decimal("0.10"), size=Decimal("100")),),
         asks=(BookLevel(price=Decimal("0.12"), size=Decimal("100")),),
         book_hash="same",
+        tick_size=None,
+        min_order_size=None,
         source="WEBSOCKET",
         stream_synchronized=True,
     )
     await store.set_books((live_book,))
-    matching_rest = live_book.model_copy(update={"source": "REST", "stream_synchronized": False})
+    matching_rest = live_book.model_copy(
+        update={
+            "source": "REST",
+            "stream_synchronized": False,
+            "tick_size": Decimal("0.01"),
+            "min_order_size": Decimal("5"),
+            "negative_risk": True,
+        }
+    )
     assert await store.reconcile_polymarket_books((matching_rest,)) == ()
     assert (await store.get()).books[token_id].stream_synchronized
+    enriched = (await store.get()).books[token_id]
+    assert enriched.tick_size == Decimal("0.01")
+    assert enriched.min_order_size == Decimal("5")
+    assert enriched.negative_risk is True
 
     mismatching_rest = matching_rest.model_copy(
         update={

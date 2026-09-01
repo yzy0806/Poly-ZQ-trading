@@ -6,11 +6,11 @@ export function number(value: DecimalValue, digits = 2): string {
   return Number.isFinite(parsed) ? parsed.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—'
 }
 
-export function usd(value: DecimalValue): string {
+export function usd(value: DecimalValue, digits = 0): string {
   if (value === null || value === undefined || value === '') return '—'
   const parsed = Number(value)
   return Number.isFinite(parsed)
-    ? parsed.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 })
+    ? parsed.toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits })
     : '—'
 }
 
@@ -27,8 +27,8 @@ export function age(iso: string | null | undefined): string {
   return `${Math.max(0, elapsed / 1000).toFixed(1)}s`
 }
 
-export function signedUsd(value: DecimalValue): string {
-  const formatted = usd(value)
+export function signedUsd(value: DecimalValue, digits = 0): string {
+  const formatted = usd(value, digits)
   if (formatted === '—' || Number(value) === 0) return formatted
   return Number(value) > 0 ? `+${formatted}` : formatted
 }

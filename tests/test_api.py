@@ -53,6 +53,8 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
     app = create_app(configured)
     runtime = app.state.runtime
     runtime.repository.audit = AsyncMock(return_value="event")
+    runtime.confirm_reconciliation = AsyncMock(return_value=None)
+    runtime.reset_strategy_risk = AsyncMock(return_value=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         health = await client.get("/healthz")
@@ -93,6 +95,28 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
             },
         )
         assert bad_csrf.status_code == 403
+        reconciled = await client.post(
+            "/api/v1/control",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "action": "CONFIRM_RECONCILED",
+                "reason": "venue positions checked manually",
+                "confirmation_secret": "control-secret",
+            },
+        )
+        assert reconciled.status_code == 200
+        runtime.confirm_reconciliation.assert_awaited_once()
+        risk_reset = await client.post(
+            "/api/v1/control",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "action": "RESET_STRATEGY_RISK",
+                "reason": "approved post-review high-water reset",
+                "confirmation_secret": "control-secret",
+            },
+        )
+        assert risk_reset.status_code == 200
+        runtime.reset_strategy_risk.assert_awaited_once()
     await runtime.polymarket.close()
     await runtime.database.close()
 
@@ -123,6 +147,7 @@ async def test_ready_requires_and_accepts_complete_fresh_data(
             bid=Decimal("96.30"),
             ask=Decimal("96.31"),
             quality=DataQuality.LIVE,
+            analytics_qualified=True,
         )
         for month in required_months
     }

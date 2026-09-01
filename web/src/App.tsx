@@ -29,6 +29,8 @@ export default function App() {
     catch (error) { if (error instanceof ApiError && error.status === 401) setAuthenticated(false); else setAuthenticated(false) }
   }, [])
 
+  // The initial authentication fetch is the external synchronization owned by this effect.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void initialize() }, [initialize])
   useEffect(() => {
     if (!authenticated) return
@@ -41,11 +43,12 @@ export default function App() {
   if (authenticated === null) return <div className="loading">Loading terminal…</div>
   if (!authenticated) return <Login onSuccess={() => { setAuthenticated(true); void initialize() }} />
   if (!state) return <div className="loading">Synchronizing engine state…</div>
-  const emergency = state.alerts.find((alert) => alert.severity === 'CRITICAL' && !alert.acknowledged) ?? state.alerts.find((alert) => alert.severity === 'CRITICAL')
+  const emergency = state.alerts.find((alert) => alert.severity === 'CRITICAL' && !alert.acknowledged && !alert.resolved) ?? state.alerts.find((alert) => alert.severity === 'CRITICAL' && !alert.resolved)
   const submitControl = async (reason: string, secret: string, alert?: AlertView) => {
     if (!selectedAction) return
     try { await control(selectedAction, reason, secret, alert?.alert_id); setSelectedAction(null); setControlError('') }
     catch (error) { setControlError(error instanceof Error ? error.message : 'Control request failed') }
   }
-  return <div className="app"><Header state={state} onControl={(action) => { setSelectedAction(action); setControlError('') }} />{emergency && <EmergencyBanner alert={emergency} acknowledge={() => { setSelectedAction('ACKNOWLEDGE_ALERT'); setControlError('') }} />}<main className="dashboard"><ProbabilityPanel state={state} /><OpportunityPanel opportunities={state.opportunities} /><ExecutionPanel batch={state.active_batch} /><RiskPanel account={state.account} /><HealthPanel state={state} /></main><footer><span>Snapshot #{state.snapshot_id}</span><span>Generated {new Date(state.generated_at).toLocaleString()}</span><span>All prices and decisions originate from backend snapshot {state.snapshot_id}.</span></footer>{selectedAction && <ControlDialog action={selectedAction} close={() => setSelectedAction(null)} error={controlError} submit={(reason, secret) => void submitControl(reason, secret, selectedAction === 'ACKNOWLEDGE_ALERT' ? emergency : undefined)} />}</div>
+  const openControl = (action: string) => { setSelectedAction(action); setControlError('') }
+  return <div className="app"><Header state={state} onControl={openControl} />{emergency && <EmergencyBanner alert={emergency} acknowledge={() => openControl('ACKNOWLEDGE_ALERT')} />}<main className="dashboard"><ProbabilityPanel state={state} /><OpportunityPanel opportunities={state.opportunities} /><ExecutionPanel batch={state.active_batch} /><RiskPanel account={state.account} preview={state.margin_preview} reconciliation={state.reconciliation} strategyRisk={state.strategy_risk} onControl={openControl} /><HealthPanel state={state} /></main><footer><span>Snapshot #{state.snapshot_id}</span><span>Generated {new Date(state.generated_at).toLocaleString()}</span><span>All prices and decisions originate from backend snapshot {state.snapshot_id}.</span></footer>{selectedAction && <ControlDialog action={selectedAction} close={() => setSelectedAction(null)} error={controlError} submit={(reason, secret) => void submitControl(reason, secret, selectedAction === 'ACKNOWLEDGE_ALERT' ? emergency : undefined)} />}</div>
 }

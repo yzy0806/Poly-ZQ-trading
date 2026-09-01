@@ -1,31 +1,59 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from zq_arb.config import Settings
-from zq_arb.domain.enums import ConnectionStatus, DataQuality, RunMode
+from zq_arb.domain.enums import (
+    BatchState,
+    ConnectionStatus,
+    DataQuality,
+    FarmStatus,
+    MarginPreviewStatus,
+    QuoteRole,
+    RunMode,
+    SubscriptionStatus,
+)
 from zq_arb.domain.models import (
     AccountMetrics,
+    BatchView,
     BookLevel,
     EligibilityStatus,
+    MarginPreview,
     MarketMappingStatus,
     OrderBook,
     Quote,
+    StrategyRiskView,
     VenueHealth,
+    utc_now,
 )
 from zq_arb.services.engine import EngineRuntime
 
 
 def quote(month: str, price: str) -> Quote:
     mid = Decimal(price)
+    now = utc_now()
+    role = (
+        QuoteRole.ANCHOR
+        if month == "202608"
+        else QuoteRole.TARGET
+        if month == "202609"
+        else QuoteRole.DIAGNOSTIC
+    )
     return Quote(
         instrument=month,
         bid=mid - Decimal("0.0025"),
         ask=mid + Decimal("0.0025"),
         last=mid,
         quality=DataQuality.LIVE,
+        role=role,
+        last_price_change_at=now,
+        last_market_data_event_at=now,
+        market_data_type=1,
+        subscription_status=SubscriptionStatus.ACTIVE,
+        farm_status=FarmStatus.CONNECTED,
     )
 
 
@@ -43,7 +71,7 @@ def book(token_id: str, bid: str, ask: str, market: str) -> OrderBook:
 
 
 @pytest.mark.asyncio
-async def test_engine_builds_comparisons_and_both_profit_paths(settings: Settings) -> None:
+async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Settings) -> None:
     paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
     runtime = EngineRuntime(paper)
     snapshot = await runtime.state.get()
@@ -85,16 +113,25 @@ async def test_engine_builds_comparisons_and_both_profit_paths(settings: Setting
                 "quotes": quotes,
                 "books": books,
                 "account": AccountMetrics(
+                    net_liquidation=Decimal("100000"),
                     full_excess_liquidity=Decimal("50000"),
                     cushion=Decimal("0.8"),
+                ),
+                "margin_preview": MarginPreview(
+                    status=MarginPreviewStatus.AVAILABLE,
+                    order_id=7001,
+                    contract_month=paper.ibkr_zq_contract_month,
+                    quantity=paper.ibkr_zq_child_order_quantity,
+                    limit_price=Decimal("96.3275"),
+                    init_margin_change=Decimal("1000"),
+                    received_at=utc_now(),
                 ),
                 "metadata": {
                     "contract_verification": {paper.ibkr_zq_contract_month: {"verified": True}},
                     "ibkr_market_data_type": 1,
+                    "ibkr_subscription_generation": 0,
                     "zq_position": 0,
                     "active_batches": 0,
-                    "margin_preview_available": True,
-                    "next_batch_initial_margin": "1000",
                     "reconciliation_clean": True,
                 },
             }
@@ -104,14 +141,24 @@ async def test_engine_builds_comparisons_and_both_profit_paths(settings: Setting
     await runtime.database.close()
     assert calculated.probabilities.valid
     assert len(calculated.probability_comparisons) == 5
-    assert {opportunity.direction for opportunity in calculated.opportunities} == {
-        "LONG",
-        "SHORT",
-    }
-    long = next(item for item in calculated.opportunities if item.direction == "LONG")
+    inc25_comparison = next(
+        row for row in calculated.probability_comparisons if row.code == "INC25"
+    )
+    assert inc25_comparison.polymarket_bid_size == Decimal("20000")
+    assert inc25_comparison.polymarket_ask_size == Decimal("20000")
+    assert [opportunity.direction for opportunity in calculated.opportunities] == ["LONG"]
+    long = calculated.opportunities[0]
+    assert long.zq_side.value == "BUY"
     assert long.token_prices["INC25"] == Decimal("0.27")
     assert long.emergency_token_prices["INC25"] == Decimal("0.28")
     assert len(long.scenarios) == len(long.emergency_scenarios) == 3
+    model_check = next(
+        check
+        for check in calculated.probabilities.qualification_checks
+        if check.code == "DIRECT_ZQ_MODEL"
+    )
+    assert model_check.passed
+    assert model_check.required_value == "move [-50, 50] bp and probabilities [0, 1]"
 
 
 @pytest.mark.asyncio
@@ -146,3 +193,79 @@ async def test_direct_signal_does_not_require_october_or_november(settings: Sett
     assert calculated.probabilities.valid
     assert not calculated.probabilities.fedwatch.valid
     assert calculated.probabilities.expected_move_bps is not None
+
+
+@pytest.mark.asyncio
+async def test_margin_preview_warning_fails_closed(settings: Settings) -> None:
+    runtime = EngineRuntime(settings)
+    snapshot = await runtime.state.get()
+    warned = snapshot.model_copy(
+        update={
+            "quotes": {
+                settings.ibkr_zq_contract_month: quote(
+                    settings.ibkr_zq_contract_month, "96.3275"
+                )
+            },
+            "margin_preview": MarginPreview(
+                status=MarginPreviewStatus.AVAILABLE,
+                order_id=7002,
+                contract_month=settings.ibkr_zq_contract_month,
+                quantity=settings.ibkr_zq_child_order_quantity,
+                limit_price=Decimal("96.330"),
+                init_margin_change=Decimal("1000"),
+                warning_text="IBKR margin warning",
+                received_at=utc_now(),
+            )
+        }
+    )
+    available, actual, detail, margin = runtime._margin_preview_qualification(
+        warned, utc_now()
+    )
+    await runtime.polymarket.close()
+    await runtime.database.close()
+    assert available is False
+    assert "AVAILABLE" in actual
+    assert detail == "IBKR warning: IBKR margin warning"
+    assert margin is None
+
+
+@pytest.mark.asyncio
+async def test_drawdown_limit_cancels_only_unfilled_order_and_halts(settings: Settings) -> None:
+    runtime = EngineRuntime(settings)
+    snapshot = (await runtime.state.get()).model_copy(
+        update={
+            "active_batch": BatchView(
+                state=BatchState.ZQ_PARTIAL,
+                zq_order_id=42,
+                original_quantity=10,
+                filled_quantity=Decimal("2"),
+                remaining_quantity=Decimal("8"),
+            ),
+            "strategy_risk": StrategyRiskView(
+                allocated_capital=Decimal("100000"),
+                equity=Decimal("98000"),
+                high_water_mark=Decimal("100000"),
+                drawdown=Decimal("2000"),
+            ),
+        }
+    )
+    await runtime.state.replace(snapshot)
+
+    with (
+        patch.object(
+            runtime.repository,
+            "audit",
+            new=AsyncMock(return_value="audit-event"),
+        ),
+        patch.object(runtime.ibkr, "cancel_order") as cancel_order,
+    ):
+        await runtime._enforce_strategy_drawdown(await runtime.state.get())
+        cancel_order.assert_called_once_with(42)
+    halted = await runtime.state.get()
+
+    assert halted.paused
+    assert not halted.armed
+    assert halted.metadata["drawdown_halt_active"] is True
+    assert any(alert.code == "STRATEGY_DRAWDOWN_LIMIT" for alert in halted.alerts)
+    await runtime.polymarket.close()
+    await runtime.database.close()

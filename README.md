@@ -1,6 +1,6 @@
 # ZQ–Polymarket Arbitrage Engine
 
-Production-oriented Python and TypeScript implementation of the approved September 2026 ZQ/Polymarket design. The repository is deliberately fail-closed: source checkout, dependency installation, process restart, missing credentials, missing reserves, or stale data cannot enable live orders.
+Production-oriented Python and TypeScript implementation of the approved September 2026 ZQ/Polymarket design. The repository is deliberately fail-closed: source checkout, dependency installation, process restart, missing credentials, missing reserves, unqualified subscriptions, or unsynchronized books cannot enable live orders.
 
 ## Authorized Stage
 
@@ -67,7 +67,7 @@ npm run dev
 
 The dashboard is served at the origin configured by `DASHBOARD_ORIGIN`. The backend binds only to `API_HOST` and `API_PORT` from `.env`.
 
-The coverage gate applies to deterministic pricing, risk, state, security, persistence, and public-data code. The official IBKR callback bridge, long-running orchestration loops, and process entrypoint are excluded from line coverage and are verified by the read-only integration smoke test. That smoke test contains no order call.
+The coverage gate applies to deterministic pricing, risk, state, security, persistence, and public-data code. The official IBKR callback bridge, long-running orchestration loops, and process entrypoint are excluded from line coverage and are verified by the read-only integration smoke test. That smoke test contains no routing order call; when `IBKR_ACCOUNT_ID` is configured it requests one non-routing `whatIf=True` margin preview.
 
 Before starting the operator terminal, fill the still-required local values for `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, `SESSION_SIGNING_KEY`, `CONTROL_CONFIRMATION_SECRET`, and `IBKR_ACCOUNT_ID`. Authenticated CLOB values remain unnecessary for the current `READ_ONLY` stage.
 
@@ -81,6 +81,16 @@ Before starting the operator terminal, fill the still-required local values for 
 
 4. The adjacent-state ZQ probabilities and normalized Polymarket expected move explain the cross-venue difference. Only conservative terminal scenario P&L and the full risk-gate result can qualify an opportunity.
 
+5. IBKR price-change and market-event ages are informational and do not expire a quiet quote. Bid/ask size callbacks count as stream activity even when IBKR correctly omits an unchanged price.
+
+6. A TWS socket connection does not by itself qualify a quote. Qualification also requires market-data type 1, the current subscription generation, an active subscription, a healthy relevant `usfuture*` market-data farm, and a complete uncrossed bid/ask rebuilt after startup or reconnect. The dashboard displays provisional calculations but marks them `NOT EXECUTION-QUALIFIED` whenever those gates are incomplete.
+
+7. The latest IBKR `BUY 10 ZQU6` what-if margin preview is requested no faster than once per minute and refreshed after connectivity recovery or a changed candidate. The dashboard shows `REFRESHING` while awaiting a matching response. It never uses an expired raw `AVAILABLE` response or substitutes zero margin for committed-capital and return calculations.
+
+8. Strategy capital, equity, high-water mark, fees, daily P&L, and drawdown are maintained in a persistent strategy ledger separate from IBKR account-level metrics. A `$2,000` drawdown cancels only unfilled ZQ, preserves fills, pauses and disarms the engine, and requires audited manual review.
+
+9. Version-one cross-venue discrepancies are resolved manually. The authenticated reconciliation confirmation is recorded with its source snapshot and is invalidated by reconnects, order changes, executions, cancellations, and unresolved hedge obligations.
+
 ## Safety Invariants
 
 1. Process startup always begins in `READ_ONLY`, regardless of the previous database state.
@@ -89,10 +99,16 @@ Before starting the operator terminal, fill the still-required local values for 
 
 3. ZQ orders are `LMT/DAY` and are never automatically repriced.
 
-4. Polymarket orders cannot precede a confirmed, unique IBKR `execId`.
+4. Version 1 is structurally long-only: the engine can submit only `BUY` ZQ entries and may hedge confirmed fills only by buying the approved Polymarket Yes legs. Bid-side and No-token data are diagnostic and cannot create an order.
 
-5. Filled ZQ is never automatically flattened.
+5. Polymarket orders cannot precede a confirmed, unique IBKR `execId`.
 
-6. `LIMITED_LIVE` and `LIVE_ARMED` reject zero reserves, absent L2 credentials, failed wallet classification, non-Hong-Kong geoblock results, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
+6. Filled ZQ is never automatically flattened.
 
-7. Credentials and account identifiers are redacted before logging and are never serialized into browser state or persistence payloads.
+7. `LIMITED_LIVE` and `LIVE_ARMED` reject zero reserves, absent L2 credentials, failed wallet classification, non-Hong-Kong geoblock results, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
+
+8. Credentials and account identifiers are redacted before logging and are never serialized into browser state or persistence payloads.
+
+9. Every failed qualification is transported as typed actual-versus-required evidence. The dashboard renders all blocking gates and never truncates the failure list.
+
+10. `STRATEGY_ALLOCATED_CAPITAL_USD` is the approved strategy-equity baseline and must match the persisted risk ledger. Changing it requires an audited risk reset rather than silently rewriting historical drawdown.

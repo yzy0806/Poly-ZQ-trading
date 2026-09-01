@@ -156,6 +156,39 @@ def test_market_websocket_snapshot_and_delta_update_the_authoritative_book() -> 
     assert updated.book_hash == "hash-2"
 
 
+def test_market_websocket_book_preserves_rest_static_metadata_when_omitted() -> None:
+    seeded = update_books_from_stream_event(
+        {},
+        VenueEvent(
+            venue="POLYMARKET",
+            kind="book",
+            payload={
+                "token_id": "token-1",
+                "bids": [{"price": "0.520", "size": "100"}],
+                "asks": [{"price": "0.530", "size": "100"}],
+                "tick_size": "0.001",
+                "min_order_size": "5",
+                "neg_risk": True,
+            },
+        ),
+    )[0]
+    (updated,) = update_books_from_stream_event(
+        {seeded.token_id: seeded},
+        VenueEvent(
+            venue="POLYMARKET",
+            kind="book",
+            payload={
+                "token_id": "token-1",
+                "bids": [{"price": "0.521", "size": "110"}],
+                "asks": [{"price": "0.531", "size": "90"}],
+            },
+        ),
+    )
+    assert updated.tick_size == Decimal("0.001")
+    assert updated.min_order_size == Decimal("5")
+    assert updated.negative_risk is True
+
+
 def test_market_websocket_delta_requires_a_seed_book() -> None:
     event = VenueEvent(
         venue="POLYMARKET",

@@ -132,12 +132,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
         if not expected_months.issubset(snapshot.quotes):
             reasons.append("target ZQ or pre-meeting anchor quote is unavailable")
-        elif any(
-            quote.quality.value != "LIVE" or quote.age_ms() > configured.max_quote_age_ms
-            for quote in snapshot.quotes.values()
-            if quote.instrument in expected_months
-        ):
-            reasons.append("target ZQ or pre-meeting anchor quote is not live and fresh")
+        else:
+            target_quote = snapshot.quotes[configured.ibkr_zq_contract_month]
+            anchor_quote = snapshot.quotes[configured.reference_contract_months[0]]
+            if not target_quote.analytics_qualified:
+                reasons.append(f"ZQU6 subscription not qualified: {target_quote.validation_reason}")
+            if not anchor_quote.analytics_qualified:
+                reasons.append(f"ZQQ6 subscription not qualified: {anchor_quote.validation_reason}")
         expected_tokens = {
             token_id
             for leg in configured.market_legs
@@ -255,9 +256,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=status.HTTP_409_CONFLICT, detail="READ_ONLY cannot arm"
                 )
             if not any(opportunity.tradeable for opportunity in snapshot.opportunities):
+                runtime.request_margin_preview_refresh()
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="no opportunity passes every hard gate",
+                    detail=(
+                        "no opportunity passes every hard gate; a current IBKR margin "
+                        "preview has been requested"
+                    ),
                 )
             await runtime.state.set_operating_state(armed=True)
         elif payload.action is ControlAction.DISARM:
@@ -275,6 +280,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     status_code=status.HTTP_409_CONFLICT, detail="no active ZQ order"
                 )
             runtime.ibkr.cancel_order(snapshot.active_batch.zq_order_id)
+            await runtime.state.invalidate_reconciliation(
+                "operator cancelled an unfilled IBKR order"
+            )
+        elif payload.action is ControlAction.CONFIRM_RECONCILED:
+            try:
+                await runtime.confirm_reconciliation(identity.username, payload.reason)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(exc),
+                ) from exc
+        elif payload.action is ControlAction.RESET_STRATEGY_RISK:
+            try:
+                await runtime.reset_strategy_risk(identity.username, payload.reason)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(exc),
+                ) from exc
         await runtime.audit_control(identity.username, payload.action.value, payload.reason)
         return {"accepted": True, "action": payload.action.value}
 

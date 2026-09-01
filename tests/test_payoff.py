@@ -6,10 +6,13 @@ from zq_arb.analytics.payoff import (
     CostInputs,
     build_three_state_opportunity,
     hedge_shares_per_contract,
+    maker_price,
     round_shares_up,
     walk_asks,
 )
 from zq_arb.domain.models import BookLevel, OrderBook
+
+TEST_ASSET_ID = "test-market-asset"
 
 
 def book(token_id: str, prices: tuple[tuple[str, str], ...]) -> OrderBook:
@@ -50,9 +53,28 @@ def test_depth_walker_respects_price_cap() -> None:
     assert result.worst_price == Decimal("0.40")
 
 
+def test_maker_price_posts_at_highest_non_crossing_tick() -> None:
+    market = OrderBook(
+        token_id=TEST_ASSET_ID,
+        bids=(BookLevel(price=Decimal("0.520"), size=Decimal("100")),),
+        asks=(BookLevel(price=Decimal("0.530"), size=Decimal("100")),),
+        tick_size=Decimal("0.001"),
+    )
+    assert maker_price(market, Decimal("0.95")) == Decimal("0.529")
+    assert maker_price(market, Decimal("0.525")) == Decimal("0.525")
+
+
+def test_maker_price_fails_closed_without_static_tick_metadata() -> None:
+    market = OrderBook(
+        token_id=TEST_ASSET_ID,
+        bids=(BookLevel(price=Decimal("0.520"), size=Decimal("100")),),
+        asks=(BookLevel(price=Decimal("0.530"), size=Decimal("100")),),
+    )
+    assert maker_price(market, Decimal("0.95")) is None
+
+
 def test_three_state_profit_contains_every_approved_state() -> None:
     opportunity = build_three_state_opportunity(
-        direction="LONG",
         contracts=10,
         zq_price=Decimal("96.30"),
         pre_meeting_effr=Decimal("3.625"),
@@ -75,11 +97,51 @@ def test_three_state_profit_contains_every_approved_state() -> None:
     )
     assert opportunity.committed_capital is not None
     assert opportunity.return_on_capital_bps is not None
+    assert opportunity.calculation is not None
+    assert opportunity.calculation.inc25_shares_per_contract == Decimal("486.15")
+    assert opportunity.calculation.inc50plus_shares_per_contract == Decimal("972.30")
+    assert opportunity.calculation.emergency_hedge_cash == (
+        opportunity.calculation.inc25_emergency_hedge_cash
+        + opportunity.calculation.inc50plus_emergency_hedge_cash
+    )
+    first = opportunity.scenarios[0]
+    assert first.futures_price_change == first.settlement_price - first.zq_entry_price
+    assert first.futures_pnl == (
+        Decimal(first.contracts) * first.futures_point_value * first.futures_price_change
+    )
+    assert first.inc25_pnl == first.inc25_shares * (
+        first.inc25_payout - first.inc25_entry_price
+    )
+    assert first.inc50plus_pnl == first.inc50plus_shares * (
+        first.inc50plus_payout - first.inc50plus_entry_price
+    )
+    assert first.polymarket_pnl == first.inc25_pnl + first.inc50plus_pnl
+    assert first.gross_pnl == first.futures_pnl + first.polymarket_pnl
+    assert first.net_pnl == first.gross_pnl - first.costs - first.reserves
+
+
+def test_order_book_reports_aggregated_best_level_sizes() -> None:
+    market = OrderBook(
+        token_id=TEST_ASSET_ID,
+        bids=(
+            BookLevel(price=Decimal("0.51"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.51"), size=Decimal("25")),
+            BookLevel(price=Decimal("0.50"), size=Decimal("900")),
+        ),
+        asks=(
+            BookLevel(price=Decimal("0.52"), size=Decimal("80")),
+            BookLevel(price=Decimal("0.52"), size=Decimal("20")),
+            BookLevel(price=Decimal("0.53"), size=Decimal("700")),
+        ),
+    )
+    assert market.best_bid == Decimal("0.51")
+    assert market.best_bid_size == Decimal("125")
+    assert market.best_ask == Decimal("0.52")
+    assert market.best_ask_size == Decimal("100")
 
 
 def test_empty_book_fails_closed() -> None:
     opportunity = build_three_state_opportunity(
-        direction="SHORT",
         contracts=10,
         zq_price=Decimal("96.30"),
         pre_meeting_effr=Decimal("3.625"),
@@ -92,4 +154,29 @@ def test_empty_book_fails_closed() -> None:
         emergency_price_cap=Decimal("0.99"),
     )
     assert not opportunity.tradeable
-    assert "order book is empty" in opportunity.gate_reasons
+    assert any(check.code == "INC25_YES_EMERGENCY_DEPTH" for check in opportunity.gate_checks)
+    assert opportunity.direction == "LONG"
+    assert opportunity.zq_side.value == "BUY"
+    assert len(opportunity.hedge_depth) == 2
+
+
+def test_missing_margin_preserves_profit_but_withholds_capital_and_return() -> None:
+    opportunity = build_three_state_opportunity(
+        contracts=10,
+        zq_price=Decimal("96.30"),
+        pre_meeting_effr=Decimal("3.625"),
+        inc25_book=book("25", (("0.30", "6000"),)),
+        inc50_book=book("50", (("0.10", "12000"),)),
+        cost_inputs=CostInputs(),
+        incremental_margin=None,
+        emergency_cash_reserve=Decimal("0"),
+        post_price_cap=Decimal("0.95"),
+        emergency_price_cap=Decimal("0.99"),
+    )
+
+    assert opportunity.minimum_net_profit is not None
+    assert opportunity.committed_capital is None
+    assert opportunity.return_on_capital_bps is None
+    assert opportunity.calculation is not None
+    assert opportunity.calculation.incremental_initial_margin is None
+    assert opportunity.calculation.committed_capital is None

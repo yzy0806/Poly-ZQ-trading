@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    env_file_version: int = 3
+    env_file_version: int = 5
     app_env: str = "development"
     run_mode: RunMode = RunMode.READ_ONLY
     live_trading_enabled: bool = False
@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     ibkr_zq_auto_reprice_enabled: bool
     ibkr_zq_max_price_revisions: int
     ibkr_zq_price_revision_seconds: int
+    ibkr_margin_preview_interval_seconds: int
+    ibkr_margin_preview_timeout_seconds: int
+    ibkr_margin_preview_max_age_seconds: int
 
     polymarket_clob_host: str
     polymarket_data_api_host: str
@@ -183,10 +186,9 @@ class Settings(BaseSettings):
     min_margin_cushion_ratio: Decimal
     max_daily_loss_usd: Decimal
     max_strategy_drawdown_usd: Decimal
+    strategy_allocated_capital_usd: Decimal
     tail_loss_gate_enabled: bool
     max_tail_loss_usd: Decimal | None = None
-    max_quote_age_ms: int
-    max_cross_venue_timestamp_skew_ms: int
     max_clock_drift_ms: int
     model_risk_reserve_usd: Decimal
     operational_risk_reserve_usd: Decimal
@@ -239,8 +241,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def enforce_safety_invariants(self) -> Self:
         errors: list[str] = []
-        if self.env_file_version != 3:
-            errors.append("ENV_FILE_VERSION must be 3")
+        if self.env_file_version != 5:
+            errors.append("ENV_FILE_VERSION must be 5")
         if self.api_workers != 1:
             errors.append("API_WORKERS must be 1 for deterministic state ownership")
         if self.ibkr_zq_child_order_quantity != 10:
@@ -255,6 +257,16 @@ class Settings(BaseSettings):
             errors.append("IBKR_ZQ_TIME_IN_FORCE must be DAY")
         if self.ibkr_zq_auto_reprice_enabled or self.ibkr_zq_max_price_revisions != 0:
             errors.append("automatic ZQ repricing must remain disabled")
+        if self.ibkr_margin_preview_interval_seconds < 60:
+            errors.append("IBKR_MARGIN_PREVIEW_INTERVAL_SECONDS cannot be below 60")
+        if self.ibkr_margin_preview_timeout_seconds < 1:
+            errors.append("IBKR_MARGIN_PREVIEW_TIMEOUT_SECONDS must be positive")
+        if self.ibkr_margin_preview_max_age_seconds < self.ibkr_margin_preview_interval_seconds:
+            errors.append(
+                "IBKR_MARGIN_PREVIEW_MAX_AGE_SECONDS cannot be below the preview interval"
+            )
+        if self.strategy_allocated_capital_usd <= 0:
+            errors.append("STRATEGY_ALLOCATED_CAPITAL_USD must be positive")
         if self.polymarket_default_order_type.upper() != "GTC" or not self.polymarket_post_only:
             errors.append("the default Polymarket path must be post-only GTC")
         if self.fomc_post_decision_resume_enabled:
@@ -343,6 +355,7 @@ class Settings(BaseSettings):
 
     def live_readiness_errors(self) -> list[str]:
         errors: list[str] = []
+        errors.append("automated venue reconciliation is not implemented")
         if not self.live_trading_enabled:
             errors.append("LIVE_TRADING_ENABLED is false")
         if not self.ibkr_order_submission_enabled:

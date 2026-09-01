@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import sys
 import threading
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -71,6 +72,9 @@ class IbkrAdapter:
         self._order_id_lock = threading.Lock()
         self._contracts: dict[str, Any] = {}
         self._request_to_month: dict[int, str] = {}
+        self._stream_request_ids: set[int] = set()
+        self._margin_preview_context: dict[int, dict[str, Any]] = {}
+        self._completed_margin_preview_ids: deque[int] = deque(maxlen=100)
         self._stopped = False
         self._pnl_requested = False
 
@@ -81,6 +85,7 @@ class IbkrAdapter:
     async def connect(self) -> None:
         if self.connected:
             return
+        self._connected.clear()
         self._loop = asyncio.get_running_loop()
         self._api = _load_official_api(self.settings.ibkr_python_api_path)
         self._client = self._build_client()
@@ -130,6 +135,7 @@ class IbkrAdapter:
                 adapter._emit("next_valid_id", {"order_id": orderId})
 
             def connectionClosed(self) -> None:
+                adapter._connected.clear()
                 adapter._emit("connection", {"status": "DISCONNECTED"})
 
             def managedAccounts(self, accountsList: str) -> None:
@@ -138,10 +144,18 @@ class IbkrAdapter:
 
             def error(self, *args: Any) -> None:
                 req_id, code, message, advanced = adapter._normalize_error(args)
+                if req_id is not None and req_id in adapter._completed_margin_preview_ids:
+                    adapter._completed_margin_preview_ids.remove(req_id)
+                    return
+                month = adapter._request_to_month.get(req_id) if req_id is not None else None
+                preview = adapter._margin_preview_context.get(req_id or -1)
                 adapter._emit(
                     "error",
                     {
                         "request_id": req_id,
+                        "month": month,
+                        "margin_preview": preview is not None,
+                        "margin_preview_context": preview,
                         "code": code,
                         "message": message,
                         "advanced_reject": advanced,
@@ -180,7 +194,74 @@ class IbkrAdapter:
             def marketDataType(self, reqId: int, marketDataType: int) -> None:
                 adapter._emit(
                     "market_data_type",
-                    {"request_id": reqId, "market_data_type": marketDataType},
+                    {
+                        "request_id": reqId,
+                        "month": adapter._request_to_month.get(reqId),
+                        "market_data_type": marketDataType,
+                    },
+                )
+
+            def openOrder(
+                self, orderId: int, contract: Any, order: Any, orderState: Any
+            ) -> None:
+                context = adapter._margin_preview_context.get(orderId)
+                if context is None:
+                    adapter._emit(
+                        "open_order",
+                        {
+                            "order_id": orderId,
+                            "contract_id": getattr(contract, "conId", None),
+                            "symbol": str(getattr(contract, "symbol", "")),
+                            "contract_month": str(
+                                getattr(contract, "lastTradeDateOrContractMonth", "")
+                            ),
+                            "action": str(getattr(order, "action", "")),
+                            "quantity": str(getattr(order, "totalQuantity", "")),
+                            "limit_price": str(getattr(order, "lmtPrice", "")),
+                            "order_ref": str(getattr(order, "orderRef", "")),
+                            "status": str(getattr(orderState, "status", "")),
+                        },
+                    )
+                    return
+                adapter._emit(
+                    "margin_preview",
+                    {
+                        **context,
+                        "order_id": orderId,
+                        "status": str(getattr(orderState, "status", "")),
+                        "init_margin_before": str(
+                            getattr(orderState, "initMarginBefore", "")
+                        ),
+                        "init_margin_change": str(
+                            getattr(orderState, "initMarginChange", "")
+                        ),
+                        "init_margin_after": str(
+                            getattr(orderState, "initMarginAfter", "")
+                        ),
+                        "maintenance_margin_before": str(
+                            getattr(orderState, "maintMarginBefore", "")
+                        ),
+                        "maintenance_margin_change": str(
+                            getattr(orderState, "maintMarginChange", "")
+                        ),
+                        "maintenance_margin_after": str(
+                            getattr(orderState, "maintMarginAfter", "")
+                        ),
+                        "equity_with_loan_before": str(
+                            getattr(orderState, "equityWithLoanBefore", "")
+                        ),
+                        "equity_with_loan_change": str(
+                            getattr(orderState, "equityWithLoanChange", "")
+                        ),
+                        "equity_with_loan_after": str(
+                            getattr(orderState, "equityWithLoanAfter", "")
+                        ),
+                        "commission": str(getattr(orderState, "commission", "")),
+                        "commission_currency": str(
+                            getattr(orderState, "commissionCurrency", "")
+                        ),
+                        "warning_text": str(getattr(orderState, "warningText", "")),
+                    },
                 )
 
             def accountSummary(
@@ -215,6 +296,12 @@ class IbkrAdapter:
                 )
 
             def orderStatus(self, *args: Any) -> None:
+                order_id = int(args[0]) if args else -1
+                if (
+                    order_id in adapter._margin_preview_context
+                    or order_id in adapter._completed_margin_preview_ids
+                ):
+                    return
                 names = (
                     "order_id",
                     "status",
@@ -347,9 +434,21 @@ class IbkrAdapter:
             market_request_id = 2_000 + index
             self._request_to_month[detail_request_id] = month
             self._request_to_month[market_request_id] = month
+            self._stream_request_ids.add(market_request_id)
             contract = self._new_zq_contract(month)
             self._client.reqContractDetails(detail_request_id, contract)
             self._client.reqMktData(market_request_id, contract, "", False, False, [])
+
+    def resubscribe_market_data(self) -> None:
+        """Replace every streaming subscription after an IBKR connectivity restore."""
+
+        if not self.connected:
+            raise IbkrAdapterError("TWS is not connected")
+        for request_id in tuple(self._stream_request_ids):
+            self._client.cancelMktData(request_id)
+            self._request_to_month.pop(request_id, None)
+        self._stream_request_ids.clear()
+        self.request_contracts_and_market_data()
 
     def request_open_orders_and_executions(self) -> None:
         if not self.connected:
@@ -371,12 +470,11 @@ class IbkrAdapter:
         self,
         *,
         month: str,
-        side: str,
         limit_price: Decimal,
         quantity: int,
         order_ref: str,
     ) -> int:
-        """Submit only when explicit PAPER flags are set; live modes remain prohibited."""
+        """Submit a version-one long-ZQ entry; the strategy cannot create SELL orders."""
 
         if self.settings.run_mode.value != "PAPER":
             raise PermissionError("IBKR orders require RUN_MODE=PAPER in this build")
@@ -386,15 +484,13 @@ class IbkrAdapter:
             raise PermissionError("configured IBKR endpoint is not marked as paper")
         if quantity != self.settings.ibkr_zq_child_order_quantity:
             raise ValueError("ZQ child order quantity must be exactly 10")
-        if side.upper() not in {"BUY", "SELL"}:
-            raise ValueError("ZQ side must be BUY or SELL")
         contract = self._contracts.get(month)
         if contract is None:
             raise IbkrAdapterError("qualified ZQ contract is unavailable")
         if self._api is None:
             raise IbkrAdapterError("IB API modules not loaded")
         order = self._api.order.Order()
-        order.action = side.upper()
+        order.action = "BUY"
         order.orderType = "LMT"
         order.tif = "DAY"
         order.totalQuantity = quantity
@@ -404,6 +500,55 @@ class IbkrAdapter:
         order_id = self._allocate_order_id()
         self._client.placeOrder(order_id, contract, order)
         return order_id
+
+    def request_zq_margin_preview(
+        self,
+        *,
+        month: str,
+        limit_price: Decimal,
+        quantity: int,
+    ) -> int:
+        """Request a non-routing BUY ZQ what-if and return its IBKR order id."""
+
+        if not self.connected:
+            raise IbkrAdapterError("TWS is not connected")
+        if not self.settings.ibkr_account_configured:
+            raise IbkrAdapterError("IBKR_ACCOUNT_ID is not configured")
+        if quantity != self.settings.ibkr_zq_child_order_quantity:
+            raise ValueError("margin preview quantity must match the 10-contract child order")
+        contract = self._contracts.get(month)
+        if contract is None:
+            raise IbkrAdapterError("verified ZQ contract is unavailable for margin preview")
+        if self._api is None:
+            raise IbkrAdapterError("IB API modules not loaded")
+        order_id = self._allocate_order_id()
+        context = {
+            "contract_month": month,
+            "side": "BUY",
+            "quantity": quantity,
+            "limit_price": str(limit_price),
+        }
+        self._margin_preview_context[order_id] = context
+        order = self._api.order.Order()
+        order.action = "BUY"
+        order.orderType = "LMT"
+        order.tif = "DAY"
+        order.totalQuantity = quantity
+        order.lmtPrice = float(limit_price)
+        order.account = self.settings.ibkr_account_id.get_secret_value()
+        order.orderRef = f"ZQ-MARGIN-PREVIEW-{order_id}"
+        order.whatIf = True
+        order.transmit = True
+        self._emit("margin_preview_requested", {**context, "order_id": order_id})
+        self._client.placeOrder(order_id, contract, order)
+        return order_id
+
+    def cancel_margin_preview(self, order_id: int) -> None:
+        self._completed_margin_preview_ids.append(order_id)
+        if self._client is not None and self.connected:
+            with contextlib.suppress(Exception):
+                self._client.cancelOrder(order_id, "margin-preview-complete")
+        self._margin_preview_context.pop(order_id, None)
 
     def cancel_order(self, order_id: int) -> None:
         if not self.settings.ibkr_order_submission_enabled:
@@ -425,6 +570,9 @@ class IbkrAdapter:
                     for request_id in tuple(self._request_to_month):
                         if request_id >= 2_000:
                             self._client.cancelMktData(request_id)
+                    self._margin_preview_context.clear()
+                    self._completed_margin_preview_ids.clear()
+                    self._stream_request_ids.clear()
                     self._client.disconnect()
         if self._network_thread is not None:
             await asyncio.to_thread(self._network_thread.join, 2)

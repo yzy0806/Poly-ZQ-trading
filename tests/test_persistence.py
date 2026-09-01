@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from zq_arb.config import Settings
 from zq_arb.persistence.database import Database
-from zq_arb.persistence.models import AuditLogRecord, ConfigVersion
+from zq_arb.persistence.models import AuditLogRecord, ConfigVersion, StrategyRiskRecord
 from zq_arb.persistence.repository import Repository
 
 
@@ -22,9 +22,15 @@ async def test_config_and_audit_are_durable(tmp_path: Path, settings: Settings) 
     repository = Repository(database)
     await repository.ensure_config_version(isolated)
     await repository.audit(actor="TEST", action="VERIFY", reason="unit test")
+    risk = await repository.load_or_create_strategy_risk(isolated)
     async with database.session() as session:
         config_count = await session.scalar(select(func.count()).select_from(ConfigVersion))
         audit_count = await session.scalar(select(func.count()).select_from(AuditLogRecord))
+        risk_count = await session.scalar(select(func.count()).select_from(StrategyRiskRecord))
     await database.close()
     assert config_count == 1
     assert audit_count == 1
+    assert risk_count == 1
+    assert risk.allocated_capital == isolated.strategy_allocated_capital_usd
+    assert risk.equity == isolated.strategy_allocated_capital_usd
+    assert risk.drawdown == 0
