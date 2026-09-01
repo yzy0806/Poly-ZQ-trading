@@ -10,13 +10,13 @@ import structlog
 
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.adapters.ibkr import IbkrAdapter
+from zq_arb.adapters.nyfed import NewYorkFedEffrAdapter
 from zq_arb.adapters.polymarket import PolymarketAdapter, PolymarketProtocolError
 from zq_arb.analytics.payoff import CostInputs, build_three_state_opportunity
 from zq_arb.analytics.probability import (
-    ReferencePrices,
+    DiagnosticPrices,
     direct_zq_probability,
     fedwatch_reference,
-    implied_average_effr,
     with_polymarket_expectation,
 )
 from zq_arb.config import Settings
@@ -33,6 +33,7 @@ from zq_arb.domain.enums import (
     SubscriptionStatus,
 )
 from zq_arb.domain.models import (
+    EffrObservation,
     EngineSnapshot,
     FedWatchDiagnostic,
     GateCheck,
@@ -69,6 +70,9 @@ class EngineRuntime:
         self.repository = Repository(self.database)
         self.events: asyncio.Queue[VenueEvent] = asyncio.Queue(maxsize=settings.event_queue_maxsize)
         self.ibkr = IbkrAdapter(settings, self.events)
+        self.nyfed = (
+            NewYorkFedEffrAdapter(settings) if settings.effr_source == "NYFED_API" else None
+        )
         self.polymarket = PolymarketAdapter(settings)
         self.risk = RiskEngine(settings)
         self._tasks: list[asyncio.Task[None]] = []
@@ -86,7 +90,15 @@ class EngineRuntime:
             actor="SYSTEM",
             action="ENGINE_START",
             reason="application startup",
-            details={"run_mode": self.settings.run_mode.value},
+            details={
+                "run_mode": self.settings.run_mode.value,
+                "effr_source": self.settings.effr_source,
+                "manual_effr_percent": (
+                    str(self.settings.pre_meeting_effr_percent)
+                    if self.settings.pre_meeting_effr_percent is not None
+                    else None
+                ),
+            },
         )
         self._tasks.extend(
             (
@@ -104,6 +116,10 @@ class EngineRuntime:
                 ),
             )
         )
+        if self.settings.effr_source == "NYFED_API":
+            self._tasks.append(
+                asyncio.create_task(self._effr_reference_loop(), name="nyfed-effr-reference")
+            )
 
     async def stop(self) -> None:
         if self._stopping.is_set():
@@ -119,6 +135,8 @@ class EngineRuntime:
             background_task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await self.ibkr.disconnect()
+        if self.nyfed is not None:
+            await self.nyfed.close()
         await self.polymarket.close()
         await self.database.close()
 
@@ -356,6 +374,71 @@ class EngineRuntime:
             except TimeoutError:
                 pass
 
+    async def _effr_reference_loop(self) -> None:
+        assert self.nyfed is not None
+        while not self._stopping.is_set():
+            try:
+                previous = (await self.state.get()).effr
+                observation = await self.nyfed.fetch_latest()
+                await self.state.set_effr(observation)
+                await self.state.resolve_alerts("NYFED_EFFR_FETCH")
+                if (
+                    previous.source,
+                    previous.rate_percent,
+                    previous.effective_date,
+                    previous.target_rate_from,
+                    previous.target_rate_to,
+                    previous.revision_indicator,
+                ) != (
+                    observation.source,
+                    observation.rate_percent,
+                    observation.effective_date,
+                    observation.target_rate_from,
+                    observation.target_rate_to,
+                    observation.revision_indicator,
+                ):
+                    await self.repository.audit(
+                        actor="SYSTEM",
+                        action="EFFR_REFERENCE_UPDATED",
+                        reason=observation.reason,
+                        details={
+                            "observation": observation.model_dump(mode="json"),
+                            "endpoint": self.settings.nyfed_effr_api_url,
+                        },
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("nyfed_effr_fetch_failed", error=str(exc))
+                snapshot = await self.state.get()
+                current = snapshot.effr
+                expired = bool(
+                    current.effective_date is None
+                    or (utc_now().date() - current.effective_date).days
+                    > self.settings.nyfed_effr_max_age_days
+                )
+                if expired:
+                    await self.state.set_effr(
+                        current.model_copy(
+                            update={
+                                "valid": False,
+                                "reason": f"New York Fed EFFR unavailable: {type(exc).__name__}",
+                            }
+                        )
+                    )
+                await self.state.add_alert(
+                    AlertSeverity.WARNING,
+                    "NYFED_EFFR_FETCH",
+                    f"New York Fed EFFR refresh failed: {type(exc).__name__}",
+                )
+            try:
+                await asyncio.wait_for(
+                    self._stopping.wait(),
+                    timeout=self.settings.nyfed_effr_refresh_seconds,
+                )
+            except TimeoutError:
+                pass
+
     async def _polymarket_stream_loop(self) -> None:
         token_ids = [
             token_id
@@ -414,8 +497,7 @@ class EngineRuntime:
 
     def _calculate(self, snapshot: EngineSnapshot) -> EngineSnapshot:
         now = utc_now()
-        months = self.settings.reference_contract_months
-        anchor_month = months[0]
+        months = self.settings.subscription_contract_months
         target_month = self.settings.ibkr_zq_contract_month
         generation = int(snapshot.metadata.get("ibkr_subscription_generation") or 0)
         qualified_quotes = {
@@ -426,19 +508,24 @@ class EngineRuntime:
         snapshot = snapshot.model_copy(
             update={"margin_preview": self._margin_preview_view(snapshot, now)}
         )
-        anchor_quote = snapshot.quotes.get(anchor_month)
         target_quote = snapshot.quotes.get(target_month)
-        anchor_mid = _mid(anchor_quote) if anchor_quote is not None else None
+        effr = snapshot.effr
+        missing_inputs: list[str] = []
+        if target_quote is None or target_quote.bid is None or target_quote.ask is None:
+            missing_inputs.append(f"{target_month} bid/ask")
+        if not effr.valid or effr.rate_percent is None:
+            missing_inputs.append("validated pre-meeting EFFR")
         if (
-            anchor_quote is None
-            or target_quote is None
-            or anchor_mid is None
+            target_quote is None
             or target_quote.bid is None
             or target_quote.ask is None
+            or not effr.valid
+            or effr.rate_percent is None
         ):
             probabilities = ProbabilitySnapshot(
                 target_contract_month=target_month,
-                reason=f"awaiting {anchor_month} anchor and {target_month} bid/ask",
+                pre_meeting_effr=effr.rate_percent,
+                reason=f"awaiting {', '.join(missing_inputs)}",
             )
             return snapshot.model_copy(
                 update={
@@ -448,8 +535,13 @@ class EngineRuntime:
                         {},
                         now,
                     ),
-                    "health_messages": (
-                        f"Awaiting {anchor_month} pre-meeting anchor and {target_month} bid/ask",
+                    "health_messages": tuple(
+                        dict.fromkeys(
+                            (
+                                *(f"Awaiting {item}" for item in missing_inputs),
+                                *(() if effr.valid else (f"EFFR not qualified: {effr.reason}",)),
+                            )
+                        )
                     ),
                     "quotes": qualified_quotes,
                 }
@@ -460,14 +552,16 @@ class EngineRuntime:
         if all(
             quote is not None and quote.analytics_qualified for quote in reference_quotes
         ) and all(value is not None for value in reference_mids):
+            diagnostic_values = [value for value in reference_mids if value is not None]
             diagnostic = fedwatch_reference(
-                ReferencePrices(*(value for value in reference_mids if value is not None))
+                DiagnosticPrices(*diagnostic_values),
+                pre_meeting_effr=effr.rate_percent,
             )
         probabilities = direct_zq_probability(
             target_contract_month=target_month,
             target_bid=target_quote.bid,
             target_ask=target_quote.ask,
-            pre_meeting_effr=implied_average_effr(anchor_mid),
+            pre_meeting_effr=effr.rate_percent,
             fedwatch=diagnostic,
         )
         polymarket_midpoints = {
@@ -477,7 +571,7 @@ class EngineRuntime:
             and book.midpoint is not None
         }
         probabilities = with_polymarket_expectation(probabilities, polymarket_midpoints)
-        analytics_qualified = anchor_quote.analytics_qualified and target_quote.analytics_qualified
+        analytics_qualified = effr.valid and target_quote.analytics_qualified
         long_book_25 = self._book(snapshot, "INC25", yes=True)
         long_book_50 = self._book(snapshot, "INC50PLUS", yes=True)
         relevant_books = (long_book_25, long_book_50)
@@ -490,7 +584,7 @@ class EngineRuntime:
         cross_venue_checks = self._cross_venue_checks(
             snapshot,
             target_quote=target_quote,
-            anchor_quote=anchor_quote,
+            effr=effr,
             probabilities=probabilities,
             long_book_25=long_book_25,
             long_book_50=long_book_50,
@@ -549,7 +643,7 @@ class EngineRuntime:
                     now=now,
                     books_fresh=books_fresh,
                     target_subscription_qualified=target_quote.pretrade_qualified,
-                    anchor_subscription_qualified=anchor_quote.pretrade_qualified,
+                    effr_qualified=effr.valid,
                     cross_venue_checks=cross_venue_checks,
                 )
                 qualification = self.risk.qualify(raw, context)
@@ -570,10 +664,8 @@ class EngineRuntime:
             health.append("ZQU6 current-generation live subscription is not qualified")
         if not target_quote.analytics_qualified:
             health.append(f"ZQU6 not qualified: {target_quote.validation_reason}")
-        if anchor_quote.subscription_status is not SubscriptionStatus.ACTIVE:
-            health.append("ZQQ6 current-generation live subscription is not qualified")
-        if not anchor_quote.analytics_qualified:
-            health.append(f"ZQQ6 not qualified: {anchor_quote.validation_reason}")
+        if not effr.valid:
+            health.append(f"EFFR not qualified: {effr.reason}")
         if not books_fresh:
             health.append("Polymarket hedge books are unavailable or WebSocket-unsynchronized")
         if not probabilities.valid:
@@ -583,7 +675,7 @@ class EngineRuntime:
         metadata = deepcopy(snapshot.metadata)
         market_event_ages = tuple(
             max(0, int((now - quote.last_market_data_event_at).total_seconds() * 1_000))
-            for quote in (target_quote, anchor_quote)
+            for quote in (target_quote,)
             if quote.last_market_data_event_at is not None
         )
         metadata.update(
@@ -613,7 +705,7 @@ class EngineRuntime:
         snapshot: EngineSnapshot,
         *,
         target_quote: Quote,
-        anchor_quote: Quote,
+        effr: EffrObservation,
         probabilities: ProbabilitySnapshot,
         long_book_25: OrderBook | None,
         long_book_50: OrderBook | None,
@@ -707,7 +799,19 @@ class EngineRuntime:
                 f"{label} bid/ask is incomplete or crossed",
             )
         quote_checks("ZQU6", "ZQU6", target_quote)
-        quote_checks("ZQQ6", "ZQQ6 anchor", anchor_quote)
+        add(
+            "PRE_MEETING_EFFR",
+            "Pre-meeting EFFR input",
+            effr.valid and effr.rate_percent is not None,
+            (
+                f"source={effr.source}; rate={effr.rate_percent}; "
+                f"effective_date={effr.effective_date or 'manual'}"
+            ),
+            "==",
+            "validated NYFED_API observation or explicit MANUAL override",
+            f"pre-meeting EFFR is not qualified: {effr.reason}",
+            unit="percent",
+        )
         add(
             "DIRECT_ZQ_MODEL",
             "Direct ZQU6 adjacent-state probability model",
@@ -768,10 +872,7 @@ class EngineRuntime:
         if not quote.has_valid_two_sided_market:
             base_reasons.append("two-sided quote is incomplete or crossed")
         analytics_qualified = not base_reasons
-        pretrade_qualified = (
-            role is not QuoteRole.DIAGNOSTIC
-            and not base_reasons
-        )
+        pretrade_qualified = role is QuoteRole.TARGET and not base_reasons
         if base_reasons:
             reason = "; ".join(base_reasons)
         elif role is QuoteRole.DIAGNOSTIC:
@@ -827,7 +928,7 @@ class EngineRuntime:
         now: datetime,
         books_fresh: bool,
         target_subscription_qualified: bool,
-        anchor_subscription_qualified: bool,
+        effr_qualified: bool,
         cross_venue_checks: tuple[GateCheck, ...],
     ) -> GateContext:
         verification = snapshot.metadata.get("contract_verification") or {}
@@ -866,10 +967,10 @@ class EngineRuntime:
             eligibility_country=snapshot.eligibility.country,
             polymarket_books_synchronized=books_fresh,
             target_subscription_qualified=target_subscription_qualified,
-            anchor_subscription_qualified=anchor_subscription_qualified,
+            effr_qualified=effr_qualified,
             cross_venue_snapshot_qualified=(
                 target_subscription_qualified
-                and anchor_subscription_qualified
+                and effr_qualified
                 and books_fresh
             ),
             contract_verified=contract_verified,

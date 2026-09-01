@@ -67,10 +67,7 @@ async def smoke() -> int:
         await state.begin_ibkr_subscriptions()
         ibkr.request_contracts_and_market_data()
         ibkr.request_open_orders_and_executions()
-        required_months = (
-            settings.reference_contract_months[0],
-            settings.ibkr_zq_contract_month,
-        )
+        required_months = (settings.ibkr_zq_contract_month,)
         deadline = asyncio.get_running_loop().time() + 10
         while asyncio.get_running_loop().time() < deadline:
             timeout = max(0.01, deadline - asyncio.get_running_loop().time())

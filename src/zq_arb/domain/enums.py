@@ -48,7 +48,6 @@ class DataQuality(StrEnum):
 
 class QuoteRole(StrEnum):
     TARGET = "TARGET"
-    ANCHOR = "ANCHOR"
     DIAGNOSTIC = "DIAGNOSTIC"
 
 

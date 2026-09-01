@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -88,6 +88,18 @@ class IbkrFarmHealth(StrictModel):
     message: str = "not observed"
     current: bool = False
     last_changed_at: datetime | None = None
+
+
+class EffrObservation(StrictModel):
+    source: Literal["NYFED_API", "MANUAL"] = "NYFED_API"
+    rate_percent: Decimal | None = None
+    effective_date: date | None = None
+    fetched_at: datetime | None = None
+    target_rate_from: Decimal | None = None
+    target_rate_to: Decimal | None = None
+    revision_indicator: str = ""
+    valid: bool = False
+    reason: str = "awaiting New York Fed EFFR"
 
 
 class BookLevel(StrictModel):
@@ -275,7 +287,7 @@ class FedWatchDiagnostic(StrictModel):
     bucket_probabilities: dict[str, Decimal] = Field(default_factory=dict)
     september_residual_bps: Decimal | None = None
     valid: bool = False
-    reason: str = "awaiting four reference quotes"
+    reason: str = "awaiting September-November reference quotes"
 
 
 class ProbabilitySnapshot(StrictModel):
@@ -307,7 +319,7 @@ class ProbabilitySnapshot(StrictModel):
     execution_qualified: bool = False
     qualification_reason: str = "NOT EXECUTION-QUALIFIED"
     qualification_checks: tuple[GateCheck, ...] = ()
-    reason: str = "awaiting target and pre-meeting anchor quotes"
+    reason: str = "awaiting target quote and validated pre-meeting EFFR"
     calculated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -489,6 +501,7 @@ class EngineSnapshot(StrictModel):
     ibkr: VenueHealth = Field(default_factory=VenueHealth)
     ibkr_farms: dict[str, IbkrFarmHealth] = Field(default_factory=dict)
     polymarket: VenueHealth = Field(default_factory=VenueHealth)
+    effr: EffrObservation = Field(default_factory=EffrObservation)
     eligibility: EligibilityStatus = Field(default_factory=EligibilityStatus)
     mapping: MarketMappingStatus = Field(default_factory=MarketMappingStatus)
     quotes: dict[str, Quote] = Field(default_factory=dict)

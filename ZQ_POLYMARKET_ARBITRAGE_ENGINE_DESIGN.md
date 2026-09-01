@@ -31,7 +31,7 @@ The future implementation must launch in `READ_ONLY` mode. Progression to `PAPER
 
 3. Stream Polymarket level-2 order books for the configured Yes and No outcome tokens.
 
-4. Use `ZQU6` as the primary implied-rate signal, with `ZQQ6` as the pre-meeting EFFR anchor; calculate the direct expected September decision move, adjacent-outcome probabilities, normalized Polymarket expected move, full intermediate calculations, conservative hedge P&L, and a secondary August-through-November FedWatch diagnostic.
+4. Use `ZQU6` as the primary implied-rate signal, with a validated official New York Fed EFFR observation or explicit manual fallback as the pre-meeting rate; calculate the direct expected September decision move, adjacent-outcome probabilities, normalized Polymarket expected move, full intermediate calculations, conservative hedge P&L, and a secondary September-through-November FedWatch diagnostic.
 
 5. Display signals, inputs, calculations, payoff scenarios, liquidity, order state, positions, margin, P&L, data health, and alerts on a local dashboard.
 
@@ -127,7 +127,7 @@ Trading stops if any identifier, rule text, token mapping, fee schedule, order-a
 
 ### 5.1 Direct `ZQU6` Implied Move — Primary Model
 
-Version 1 uses the current September contract as the primary signal. August `ZQQ6` supplies the pre-meeting EFFR anchor because it is the configured non-meeting contract immediately before September. October and November are not required for the primary signal, readiness, opportunity calculation, or order qualification.
+Version 1 uses the current September contract as the primary signal. The pre-meeting EFFR is a validated observation from the official New York Fed Markets API by default. `EFFR_SOURCE=MANUAL` with `PRE_MEETING_EFFR_PERCENT` is the explicit operator-supplied fallback. October and November are not required for the primary signal, readiness, opportunity calculation, or order qualification.
 
 For midpoint display:
 
@@ -140,7 +140,7 @@ R_{Sep,mid}=100-F_{Sep,mid}
 $$
 
 $$
-R_{pre}=100-F_{Aug,mid}
+R_{pre}=EFFR_{official\ or\ manual}
 $$
 
 With 16 calendar days at the pre-decision EFFR and 14 days at the post-decision EFFR, the post-decision weight is:
@@ -179,7 +179,7 @@ One ZQ price identifies one expected rate move; it does not uniquely determine f
 
 ### 5.2 CME-Style Probability Tree — Secondary Diagnostic
 
-The dashboard retains the August-through-November CME anchor-month method only for reference, model-health monitoring, and audit. CME assumes 25 bp increments, a proportional EFFR response, and propagation from full months without FOMC meetings. Missing October or November data makes this diagnostic unavailable but does not invalidate the direct `ZQU6` primary model.
+The dashboard retains a September-through-November CME-style method only for reference, model-health monitoring, and audit. It begins with the same validated pre-meeting EFFR observation used by the primary model, assumes 25 bp increments and a proportional EFFR response, and propagates rates from full months without FOMC meetings. Missing October or November data makes this diagnostic unavailable but does not invalidate the direct `ZQU6` primary model.
 
 For October, with 28 calendar days through the meeting and three post-meeting days:
 
@@ -191,14 +191,14 @@ $$
 EFFR_{start,Oct}=\frac{31R_{Oct}-3R_{Nov}}{28}
 $$
 
-The September end rate equals the October start rate, while August supplies the September start anchor:
+The September end rate equals the October start rate, while the validated EFFR observation supplies the September start rate:
 
 $$
 EFFR_{end,Sep}=EFFR_{start,Oct}
 $$
 
 $$
-\Delta EFFR_{Sep}=EFFR_{end,Sep}-R_{Aug}
+\Delta EFFR_{Sep}=EFFR_{end,Sep}-R_{pre}
 $$
 
 The expected number of 25 bp steps is `x = Delta EFFR / 0.25`. If `k = floor(x)` and `u = x-k`, the adjacent diagnostic outcomes are `25k` bp with probability `1-u` and `25(k+1)` bp with probability `u`.
@@ -538,7 +538,7 @@ All P&L is shown in USD with venue timestamps, data age, and calculation version
 
 ### 11.1 Header and Control Bar
 
-The fixed header shows mode, arm status, kill switch, IBKR connection, Polymarket connection, market-data type, eligibility, current time in UTC, New York, Chicago, and Taipei, oldest target-or-anchor market-event age as informational telemetry, active batch, and the highest alert severity. Economic price-change and event ages are never presented as execution-expiry clocks.
+The fixed header shows mode, arm status, kill switch, IBKR connection, Polymarket connection, market-data type, eligibility, current time in UTC, New York, Chicago, and Taipei, target market-event age as informational telemetry, active batch, and the highest alert severity. Economic price-change and event ages are never presented as execution-expiry clocks.
 
 The only live control actions are `Arm`, `Disarm`, `Pause New Trades`, `Cancel Unfilled`, and `Emergency Halt`. Every action requires confirmation and an audit reason. Credentials, private keys, and account identifiers are never rendered.
 
@@ -550,11 +550,11 @@ The panel shows all intermediate values rather than only the final probability:
 |---|---|
 | ZQ quotes | Contract role, bid, ask, sizes, last, price-change time, last market-data event, subscription state and generation, farm state, and live/delayed type |
 | Direct `ZQU6` signal | September bid, ask, midpoint, `100 − price` implied average EFFR, and primary-signal label |
-| Calendar weighting | August pre-meeting EFFR anchor, `14/30` post-decision weight, and direct expected move |
+| Calendar weighting | Pre-meeting EFFR rate, source, effective date, `14/30` post-decision weight, and direct expected move |
 | Executable move | Authorized buy-at-ask expected move, non-tradable bid-side spread reference, adjacent 25 bp states, and executable long-ZQ probability |
 | Polymarket | Bid, ask, best-bid size, best-ask size, mid, normalized five-market expected move, raw midpoint sum, depth VWAP, fee schedule, size available, token and rule status |
 | Comparison | Adjacent-state ZQ model versus each Polymarket midpoint, best bid and aggregated size at that price, best ask and aggregated size at that price, direct ZQ expected move minus normalized Polymarket expected move, WebSocket synchronization state, book-change age, and mapping status |
-| Secondary diagnostic | Collapsible August-through-November FedWatch expected move, adjacent states, probabilities, and September residual |
+| Secondary diagnostic | Collapsible September-through-November FedWatch expected move, adjacent states, probabilities, and September residual |
 
 The displayed order-book age is the time since the last economic book change, not the transport-freshness decision. A quiet book remains eligible while its market WebSocket is connected and the local book is synchronized. The panel shows a separate `SYNC` or `BLOCKED` status for every token.
 
@@ -578,7 +578,7 @@ The backend requests the what-if preview through `placeOrder` with `whatIf=True`
 
 ### 11.6 Audit and Health Panel
 
-The panel shows TWS socket status separately from the US futures market-data farm, August anchor subscription, September execution subscription, HMDS, and security-definition service. IBKR `1100` marks the socket degraded; `1101` or `1102` restores the socket to connected while forcing a new subscription generation and a new margin projection. Qualification preserves and displays the actual `CONNECTED`, `DEGRADED`, or `DISCONNECTED` state. The panel also shows last data messages, reconnects, dropped or out-of-order messages, API warnings, rejected orders, reconciliation status, rule hash, configuration version, software version, and the last manual control action. Recovered warnings remain in history with `RESOLVED` status and do not remain current trading blockers.
+The panel shows TWS socket status separately from the US futures market-data farm, September execution subscription, October and November diagnostic subscriptions, the EFFR source and effective date, HMDS, and security-definition service. IBKR `1100` marks the socket degraded; `1101` or `1102` restores the socket to connected while forcing a new subscription generation and a new margin projection. Qualification preserves and displays the actual `CONNECTED`, `DEGRADED`, or `DISCONNECTED` state. The panel also shows last data messages, reconnects, dropped or out-of-order messages, API warnings, rejected orders, reconciliation status, rule hash, configuration version, software version, and the last manual control action. Recovered warnings remain in history with `RESOLVED` status and do not remain current trading blockers.
 
 ### 11.7 Version-1 Emergency Notification
 
@@ -762,7 +762,7 @@ Development occurs in the Asia/Taipei workspace timezone, but the approved produ
 
 Every ZQ quote stores `last_price_change_at`, `last_market_data_event_at`, `market_data_type`, `subscription_status`, `subscription_generation`, and `farm_status`. The first two timestamps are display and audit evidence only; neither has a maximum-age trading gate. A quiet valid market does not become stale merely because its price and size remain unchanged.
 
-The September `ZQU6` target and August `ZQQ6` anchor use the same subscription-integrity controls. Qualification requires the TWS socket to be connected, the relevant `usfuture*` market-data farm to be connected, market-data type `1` to be live, the quote to belong to the current subscription generation, the subscription to be active, and the complete bid/ask to be positive and uncrossed. October and November use the same data-integrity checks for diagnostics but can never authorize an order.
+The September `ZQU6` target is the only execution-authorizing ZQ subscription. Qualification requires the TWS socket to be connected, the relevant `usfuture*` market-data farm to be connected, market-data type `1` to be live, the quote to belong to the current subscription generation, the subscription to be active, and the complete bid/ask to be positive and uncrossed. October and November use the same data-integrity checks for diagnostics but can never authorize an order. EFFR is qualified independently by source, value, effective date, and configured maximum age.
 
 After startup or resubscription, the engine clears the prior generation's bid, ask, sizes, last price, data type, and activity time. A subscription becomes `ACTIVE` only after current-generation streaming callbacks have rebuilt a complete positive uncrossed live bid/ask while the US-futures farm is connected. IBKR may emit a bid-size or ask-size callback without repeating an unchanged price; those size callbacks update `last_market_data_event_at`, update the displayed size, and preserve qualification when the stored current-generation bid/ask remains valid. A size-only callback cannot revive a previous-generation price because that BBO was cleared before resubscription.
 
@@ -770,7 +770,7 @@ Socket heartbeats, account callbacks, current-time callbacks, auxiliary-farm mes
 
 IBKR service recovery is stateful. Error 2103 invalidates affected live-market-data subscriptions only when the affected farm is the relevant `usfuture*` farm. A recovery 2104 schedules resubscription; it does not restore eligibility by itself. Startup 2104 establishes farm health without forcing a redundant subscription cycle. Errors 2105/2106 affect HMDS history only. Errors 2157/2158 affect new security-definition resolution and do not invalidate an already verified live quote. Error 1100 invalidates every subscription and advances the generation once; 1101/1102 schedule resubscription without double-incrementing it. Recovered alerts remain auditable but are marked resolved.
 
-Cross-venue qualification is constructed from one immutable backend snapshot containing qualified current-generation September and August subscriptions, a connected Polymarket market WebSocket, and every required hedge book in synchronized state. The engine does not compare economic-change timestamps across venues and does not impose a ZQ silence timeout. Provisional calculations remain visible when these conditions fail, but the dashboard labels them `NOT EXECUTION-QUALIFIED` and the risk engine blocks new orders.
+Cross-venue qualification is constructed from one immutable backend snapshot containing a qualified current-generation September subscription, a validated EFFR observation, a connected Polymarket market WebSocket, and every required hedge book in synchronized state. The engine does not compare economic-change timestamps across venues and does not impose a ZQ silence timeout. Provisional calculations remain visible when these conditions fail, but the dashboard labels them `NOT EXECUTION-QUALIFIED` and the risk engine blocks new orders.
 
 Polymarket transport freshness is measured separately from economic book-change age: a quiet order book remains valid while its market WebSocket is connected and its local book is synchronized.
 
@@ -784,9 +784,9 @@ IBKR market data must be explicitly identified as live. A delayed or frozen call
 
 ### 16.1 Calculation Tests
 
-1. Reproduce `100 − ZQU6`, the August pre-meeting anchor, the `14/30` post-decision weight, the direct midpoint move, the executable buy-at-ask move, the non-tradable bid-side reference, adjacent-state probabilities, `486.15` exact-25 shares, and `972.30` 50-plus shares per ZQU6.
+1. Reproduce `100 − ZQU6`, the validated pre-meeting EFFR input, the `14/30` post-decision weight, the direct midpoint move, the executable buy-at-ask move, the non-tradable bid-side reference, adjacent-state probabilities, `486.15` exact-25 shares, and `972.30` 50-plus shares per ZQU6.
 
-2. Prove that the primary model and opportunity engine require only the August anchor and September bid/ask, then independently reproduce the optional August-through-November FedWatch diagnostic and September cross-contract residual.
+2. Prove that the primary model and opportunity engine require only validated EFFR and the September bid/ask, then independently reproduce the optional September-through-November FedWatch diagnostic and September cross-contract residual.
 
 3. Prove equal payoff across every covered outcome for each bundle before costs, then reconcile net payoff after all costs.
 
@@ -816,7 +816,7 @@ IBKR market data must be explicitly identified as live. A delayed or frozen call
 
 11. Verify automatic signer-funder wallet classification for all supported signature types and prove that an unknown or mismatched relationship fails closed before any order method is enabled.
 
-12. Verify that quiet August and September prices remain qualified without an age limit; bid-size and ask-size callbacks update market activity without requiring a repeated price; startup or reconnect requires a complete current-generation live bid/ask; and incomplete, delayed, frozen, crossed, wrong-generation, inactive, or disconnected-farm quotes fail closed.
+12. Verify that quiet September, October, and November prices remain qualified without an age limit; bid-size and ask-size callbacks update market activity without requiring a repeated price; startup or reconnect requires a complete current-generation live bid/ask; and incomplete, delayed, frozen, crossed, wrong-generation, inactive, or disconnected-farm quotes fail closed.
 
 13. Verify the 2103/2104 US-futures farm lifecycle, 2105/2106 HMDS isolation, 2157/2158 security-definition isolation, and 1100/1101/1102 subscription-generation invalidation and recovery without a double generation increment.
 
@@ -912,7 +912,7 @@ Version 1 is complete only when the following criteria are demonstrated:
 
 17. **CLOB credential authorization:** The owner authorized one one-time `create_or_derive_api_key` call for credential provisioning and authenticated read-only testing only. That call was consumed without a confirmed credential result. The owner subsequently instructed the project not to retry because the CLOB works; no further credential-creation call is authorized. The prohibition includes any implicit retry during startup or testing.
 
-18. **Primary probability model:** The direct `ZQU6` implied September move is the primary dashboard and comparison model. `ZQQ6` is the configured pre-meeting EFFR anchor. The August-through-November FedWatch tree remains a collapsible diagnostic and does not control opportunity qualification.
+18. **Primary probability model:** The direct `ZQU6` implied September move is the primary dashboard and comparison model. A validated official New York Fed EFFR observation is the default pre-meeting rate; an explicitly configured manual value is the fallback. The September-through-November FedWatch tree remains a collapsible diagnostic and does not control opportunity qualification.
 
 19. **Polymarket market-data path:** The public market WebSocket is authoritative for intraday books. REST is limited to startup seeding, periodic reconciliation, and recovery. A quiet synchronized book remains valid; a disconnected or uncertain book is immediately ineligible regardless of the most recent displayed price.
 

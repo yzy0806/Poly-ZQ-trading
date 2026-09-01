@@ -20,6 +20,7 @@ from zq_arb.domain.models import (
     AccountMetrics,
     BatchView,
     BookLevel,
+    EffrObservation,
     EligibilityStatus,
     MarginPreview,
     MarketMappingStatus,
@@ -36,9 +37,7 @@ def quote(month: str, price: str) -> Quote:
     mid = Decimal(price)
     now = utc_now()
     role = (
-        QuoteRole.ANCHOR
-        if month == "202608"
-        else QuoteRole.TARGET
+        QuoteRole.TARGET
         if month == "202609"
         else QuoteRole.DIAGNOSTIC
     )
@@ -78,8 +77,8 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Set
     quotes = {
         month: quote(month, price)
         for month, price in zip(
-            paper.reference_contract_months,
-            ("96.375", "96.325", "96.250", "96.200"),
+            paper.subscription_contract_months,
+            ("96.325", "96.250", "96.200"),
             strict=True,
         )
     }
@@ -162,25 +161,23 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Set
 
 
 @pytest.mark.asyncio
-async def test_engine_waits_for_target_and_anchor_quotes(settings: Settings) -> None:
+async def test_engine_waits_for_target_quote(settings: Settings) -> None:
     runtime = EngineRuntime(settings)
     snapshot = await runtime.state.get()
     calculated = runtime._calculate(snapshot)
     await runtime.polymarket.close()
     await runtime.database.close()
-    assert "pre-meeting anchor" in calculated.health_messages[0]
+    assert "202609 bid/ask" in calculated.health_messages[0]
 
 
 @pytest.mark.asyncio
 async def test_direct_signal_does_not_require_october_or_november(settings: Settings) -> None:
     runtime = EngineRuntime(settings)
     snapshot = await runtime.state.get()
-    anchor_month = settings.reference_contract_months[0]
     calculated = runtime._calculate(
         snapshot.model_copy(
             update={
                 "quotes": {
-                    anchor_month: quote(anchor_month, "96.375"),
                     settings.ibkr_zq_contract_month: quote(
                         settings.ibkr_zq_contract_month, "96.325"
                     ),
@@ -193,6 +190,25 @@ async def test_direct_signal_does_not_require_october_or_november(settings: Sett
     assert calculated.probabilities.valid
     assert not calculated.probabilities.fedwatch.valid
     assert calculated.probabilities.expected_move_bps is not None
+
+
+@pytest.mark.asyncio
+async def test_direct_signal_fails_closed_without_effr(settings: Settings) -> None:
+    runtime = EngineRuntime(settings)
+    snapshot = await runtime.state.get()
+    target_month = settings.ibkr_zq_contract_month
+    calculated = runtime._calculate(
+        snapshot.model_copy(
+            update={
+                "effr": EffrObservation(reason="official EFFR unavailable"),
+                "quotes": {target_month: quote(target_month, "96.325")},
+            }
+        )
+    )
+    await runtime.polymarket.close()
+    await runtime.database.close()
+    assert not calculated.probabilities.valid
+    assert "validated pre-meeting EFFR" in calculated.probabilities.reason
 
 
 @pytest.mark.asyncio

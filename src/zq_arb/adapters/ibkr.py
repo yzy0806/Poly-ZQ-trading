@@ -429,7 +429,7 @@ class IbkrAdapter:
     def request_contracts_and_market_data(self) -> None:
         if not self.connected:
             raise IbkrAdapterError("TWS is not connected")
-        for index, month in enumerate(self.settings.reference_contract_months, start=1):
+        for index, month in enumerate(self.settings.subscription_contract_months, start=1):
             detail_request_id = 1_000 + index
             market_request_id = 2_000 + index
             self._request_to_month[detail_request_id] = month

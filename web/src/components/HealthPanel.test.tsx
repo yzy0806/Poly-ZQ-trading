@@ -30,9 +30,20 @@ function stateFixture(): EngineSnapshot {
       reconnect_count: 0,
       last_message_at: '2026-08-27T09:00:00Z',
     },
+    effr: {
+      source: 'NYFED_API',
+      rate_percent: '3.63',
+      effective_date: '2026-08-26',
+      fetched_at: '2026-08-27T13:00:00Z',
+      target_rate_from: '3.50',
+      target_rate_to: '3.75',
+      revision_indicator: '',
+      valid: true,
+      reason: 'New York Fed official EFFR',
+    },
     quotes: {
-      '202608': {
-        instrument: '202608',
+      '202609': {
+        instrument: '202609',
         bid: '96.3675',
         ask: '96.3700',
         bid_size: '100',
@@ -40,7 +51,7 @@ function stateFixture(): EngineSnapshot {
         last: '96.3700',
         received_at: '2026-08-27T09:00:00Z',
         quality: 'LIVE',
-        role: 'ANCHOR',
+        role: 'TARGET',
         last_price_change_at: '2026-08-27T08:45:00Z',
         last_market_data_event_at: '2026-08-27T09:00:00Z',
         market_data_type: 1,
@@ -91,7 +102,8 @@ describe('HealthPanel', () => {
     render(<HealthPanel state={stateFixture()} />)
 
     expect(screen.getByText('US FUTURES FARM')).toBeTruthy()
-    expect(screen.getByText('AUG ANCHOR SUB')).toBeTruthy()
+    expect(screen.getByText('EFFR')).toBeTruthy()
+    expect(screen.getByText('SEP EXEC SUB')).toBeTruthy()
     expect(screen.getByText('IBKR_2103_USFUTURE · RESOLVED')).toBeTruthy()
   })
 })

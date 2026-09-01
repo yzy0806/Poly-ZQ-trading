@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    env_file_version: int = 5
+    env_file_version: int = 6
     app_env: str = "development"
     run_mode: RunMode = RunMode.READ_ONLY
     live_trading_enabled: bool = False
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     ibkr_zq_currency: str
     ibkr_zq_trading_class: str
     ibkr_zq_contract_month: str
-    ibkr_zq_reference_contract_months: str
+    ibkr_zq_subscription_months: str
     ibkr_zq_child_order_quantity: int
     ibkr_zq_order_type: str
     ibkr_zq_time_in_force: str
@@ -194,6 +194,13 @@ class Settings(BaseSettings):
     operational_risk_reserve_usd: Decimal
     effr_basis_reserve_usd: Decimal
 
+    effr_source: str = "NYFED_API"
+    nyfed_effr_api_url: str = "https://markets.newyorkfed.org/api/rates/all/latest.json"
+    nyfed_effr_refresh_seconds: int = 300
+    nyfed_effr_timeout_seconds: int = 10
+    nyfed_effr_max_age_days: int = 5
+    pre_meeting_effr_percent: Decimal | None = None
+
     internal_timezone: str
     operator_timezone: str
     fomc_timezone: str
@@ -228,10 +235,19 @@ class Settings(BaseSettings):
             raise ValueError("IBKR_ZQ_CONTRACT_MONTH must use YYYYMM")
         return value
 
+    @field_validator("effr_source")
+    @classmethod
+    def validate_effr_source(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in {"NYFED_API", "MANUAL"}:
+            raise ValueError("EFFR_SOURCE must be NYFED_API or MANUAL")
+        return normalized
+
     @field_validator(
         "max_tail_loss_usd",
         "fomc_trading_resume_utc",
         "recorded_market_data_path",
+        "pre_meeting_effr_percent",
         mode="before",
     )
     @classmethod
@@ -241,8 +257,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def enforce_safety_invariants(self) -> Self:
         errors: list[str] = []
-        if self.env_file_version != 5:
-            errors.append("ENV_FILE_VERSION must be 5")
+        if self.env_file_version != 6:
+            errors.append("ENV_FILE_VERSION must be 6")
         if self.api_workers != 1:
             errors.append("API_WORKERS must be 1 for deterministic state ownership")
         if self.ibkr_zq_child_order_quantity != 10:
@@ -267,6 +283,16 @@ class Settings(BaseSettings):
             )
         if self.strategy_allocated_capital_usd <= 0:
             errors.append("STRATEGY_ALLOCATED_CAPITAL_USD must be positive")
+        if self.nyfed_effr_refresh_seconds < 60:
+            errors.append("NYFED_EFFR_REFRESH_SECONDS cannot be below 60")
+        if self.nyfed_effr_timeout_seconds < 1:
+            errors.append("NYFED_EFFR_TIMEOUT_SECONDS must be positive")
+        if self.nyfed_effr_max_age_days < 1:
+            errors.append("NYFED_EFFR_MAX_AGE_DAYS must be positive")
+        if self.pre_meeting_effr_percent is not None and not (
+            Decimal("0") <= self.pre_meeting_effr_percent <= Decimal("20")
+        ):
+            errors.append("PRE_MEETING_EFFR_PERCENT must be between 0 and 20 percent")
         if self.polymarket_default_order_type.upper() != "GTC" or not self.polymarket_post_only:
             errors.append("the default Polymarket path must be post-only GTC")
         if self.fomc_post_decision_resume_enabled:
@@ -288,12 +314,20 @@ class Settings(BaseSettings):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def reference_contract_months(self) -> tuple[str, ...]:
+    def subscription_contract_months(self) -> tuple[str, ...]:
         months = tuple(
-            value.strip() for value in self.ibkr_zq_reference_contract_months.split(",") if value
+            value.strip() for value in self.ibkr_zq_subscription_months.split(",") if value
         )
-        if len(months) != 4 or any(not re.fullmatch(r"\d{6}", month) for month in months):
-            raise ValueError("IBKR_ZQ_REFERENCE_CONTRACT_MONTHS must contain four YYYYMM values")
+        if (
+            len(months) != 3
+            or len(set(months)) != 3
+            or any(not re.fullmatch(r"\d{6}", month) for month in months)
+            or months[0] != self.ibkr_zq_contract_month
+        ):
+            raise ValueError(
+                "IBKR_ZQ_SUBSCRIPTION_MONTHS must contain three unique YYYYMM values "
+                "beginning with IBKR_ZQ_CONTRACT_MONTH"
+            )
         return months
 
     @computed_field  # type: ignore[prop-decorator]
@@ -366,6 +400,8 @@ class Settings(BaseSettings):
             errors.append("OPERATOR_APPROVAL_ID is absent")
         if not self.clob_credentials_configured:
             errors.append("CLOB L2 credentials are absent")
+        if self.effr_source == "MANUAL" and self.pre_meeting_effr_percent is None:
+            errors.append("PRE_MEETING_EFFR_PERCENT is absent for MANUAL EFFR_SOURCE")
         if self.polymarket_signature_type.upper() == "AUTO" and not self._is_configured(
             self.polymarket_private_key
         ):

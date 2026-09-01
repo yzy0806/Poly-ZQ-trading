@@ -126,19 +126,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reasons.append("IBKR is not connected")
         if snapshot.polymarket.status.value != "CONNECTED":
             reasons.append("Polymarket is not connected")
-        expected_months = {
-            configured.reference_contract_months[0],
-            configured.ibkr_zq_contract_month,
-        }
-        if not expected_months.issubset(snapshot.quotes):
-            reasons.append("target ZQ or pre-meeting anchor quote is unavailable")
+        target_month = configured.ibkr_zq_contract_month
+        if target_month not in snapshot.quotes:
+            reasons.append("target ZQ quote is unavailable")
         else:
-            target_quote = snapshot.quotes[configured.ibkr_zq_contract_month]
-            anchor_quote = snapshot.quotes[configured.reference_contract_months[0]]
+            target_quote = snapshot.quotes[target_month]
             if not target_quote.analytics_qualified:
                 reasons.append(f"ZQU6 subscription not qualified: {target_quote.validation_reason}")
-            if not anchor_quote.analytics_qualified:
-                reasons.append(f"ZQQ6 subscription not qualified: {anchor_quote.validation_reason}")
+        if not snapshot.effr.valid:
+            reasons.append(f"pre-meeting EFFR not qualified: {snapshot.effr.reason}")
         expected_tokens = {
             token_id
             for leg in configured.market_legs
@@ -239,6 +235,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "run_mode": configured.run_mode.value,
             "live_authorized": False,
             "live_readiness": runtime.risk.live_readiness(),
+            "effr": snapshot.effr,
             "mapping": snapshot.mapping,
             "eligibility": snapshot.eligibility,
         }

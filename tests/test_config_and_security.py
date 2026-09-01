@@ -11,7 +11,9 @@ from zq_arb.observability import redact_value
 
 
 def settings_payload(settings: Settings) -> dict[str, object]:
-    return settings.model_dump(exclude={"cors_origins", "reference_contract_months", "market_legs"})
+    return settings.model_dump(
+        exclude={"cors_origins", "subscription_contract_months", "market_legs"}
+    )
 
 
 def test_child_quantity_safety_invariant(settings: Settings) -> None:
@@ -36,6 +38,19 @@ def test_live_mode_rejects_zero_reserves(settings: Settings) -> None:
         }
     )
     with pytest.raises(ValidationError, match="must be positive"):
+        Settings.model_validate(payload)
+
+
+def test_subscription_months_are_target_plus_two_diagnostics(
+    settings: Settings,
+) -> None:
+    assert settings.subscription_contract_months == ("202609", "202610", "202611")
+
+
+def test_manual_effr_is_percentage_points_and_range_checked(settings: Settings) -> None:
+    payload = settings_payload(settings)
+    payload["pre_meeting_effr_percent"] = "21"
+    with pytest.raises(ValidationError, match="between 0 and 20 percent"):
         Settings.model_validate(payload)
 
 

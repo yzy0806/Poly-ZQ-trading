@@ -23,7 +23,7 @@ def clear_context() -> GateContext:
         eligibility_country="HK",
         polymarket_books_synchronized=True,
         target_subscription_qualified=True,
-        anchor_subscription_qualified=True,
+        effr_qualified=True,
         cross_venue_snapshot_qualified=True,
         contract_verified=True,
         full_hedge_depth_available=True,
@@ -103,8 +103,8 @@ def test_daily_loss_limit_is_inclusive(settings: Settings) -> None:
             "ZQU6 current-generation live subscription is not qualified",
         ),
         (
-            {"anchor_subscription_qualified": False},
-            "ZQQ6 current-generation live subscription is not qualified",
+            {"effr_qualified": False},
+            "pre-meeting EFFR is not qualified",
         ),
         (
             {"cross_venue_snapshot_qualified": False},

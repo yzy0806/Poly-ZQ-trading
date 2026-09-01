@@ -41,6 +41,13 @@ class Repository:
             "strategy_version": settings.strategy_version,
             "run_mode": settings.run_mode,
             "zq_child_quantity": settings.ibkr_zq_child_order_quantity,
+            "zq_subscription_months": settings.subscription_contract_months,
+            "effr": {
+                "source": settings.effr_source,
+                "manual_percent": settings.pre_meeting_effr_percent,
+                "nyfed_api_url": settings.nyfed_effr_api_url,
+                "maximum_age_days": settings.nyfed_effr_max_age_days,
+            },
             "max_zq_position": settings.max_zq_position,
             "min_profit": settings.min_net_profit_usd,
             "min_return_bps": settings.min_return_on_capital_bps,

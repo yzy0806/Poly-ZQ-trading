@@ -6,7 +6,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from zq_arb.analytics.probability import (
-    ReferencePrices,
+    DiagnosticPrices,
     adjacent_outcome_distribution,
     direct_zq_probability,
     executable_probability,
@@ -36,14 +36,14 @@ def test_executable_binary_probability_endpoints() -> None:
 
 def test_reference_tree_exposes_all_intermediates() -> None:
     snapshot = fedwatch_reference(
-        ReferencePrices(
-            august=Decimal("96.375"),
+        DiagnosticPrices(
             september=Decimal("96.32"),
             october=Decimal("96.25"),
             november=Decimal("96.20"),
-        )
+        ),
+        pre_meeting_effr=Decimal("3.625"),
     )
-    assert set(snapshot.rates) == {"202608", "202609", "202610", "202611"}
+    assert set(snapshot.rates) == {"202609", "202610", "202611"}
     assert snapshot.expected_steps is not None
     assert snapshot.lower_probability is not None
     assert snapshot.upper_probability is not None

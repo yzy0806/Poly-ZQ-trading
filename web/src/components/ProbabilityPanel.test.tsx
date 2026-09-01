@@ -24,6 +24,17 @@ function failedSubscription(): GateCheck {
 function stateFixture(): EngineSnapshot {
   return {
     quotes: {},
+    effr: {
+      source: 'NYFED_API',
+      rate_percent: '3.6313',
+      effective_date: '2026-08-27',
+      fetched_at: '2026-08-28T00:00:00Z',
+      target_rate_from: '3.50',
+      target_rate_to: '3.75',
+      revision_indicator: '',
+      valid: true,
+      reason: 'New York Fed official EFFR',
+    },
     probability_comparisons: [{
       code: 'INC25',
       label: 'Increase 25',

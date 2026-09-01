@@ -65,6 +65,18 @@ export interface IbkrFarmHealth {
   last_changed_at: string | null
 }
 
+export interface EffrObservation {
+  source: 'NYFED_API' | 'MANUAL'
+  rate_percent: DecimalValue
+  effective_date: string | null
+  fetched_at: string | null
+  target_rate_from: DecimalValue
+  target_rate_to: DecimalValue
+  revision_indicator: string
+  valid: boolean
+  reason: string
+}
+
 export interface BookLevel { price: DecimalValue; size: DecimalValue }
 
 export interface OrderBook {
@@ -334,6 +346,7 @@ export interface EngineSnapshot {
   ibkr: VenueHealth
   ibkr_farms: Record<string, IbkrFarmHealth>
   polymarket: VenueHealth
+  effr: EffrObservation
   eligibility: {
     checked: boolean
     blocked: boolean | null

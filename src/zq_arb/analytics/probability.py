@@ -21,8 +21,7 @@ MOVE_BY_BUCKET = {
 
 
 @dataclass(frozen=True, slots=True)
-class ReferencePrices:
-    august: Decimal
+class DiagnosticPrices:
     september: Decimal
     october: Decimal
     november: Decimal
@@ -220,15 +219,18 @@ def with_polymarket_expectation(
     )
 
 
-def fedwatch_reference(prices: ReferencePrices) -> FedWatchDiagnostic:
+def fedwatch_reference(
+    prices: DiagnosticPrices,
+    *,
+    pre_meeting_effr: Decimal,
+) -> FedWatchDiagnostic:
     rates = {
-        "202608": implied_average_effr(prices.august),
         "202609": implied_average_effr(prices.september),
         "202610": implied_average_effr(prices.october),
         "202611": implied_average_effr(prices.november),
     }
     october_start = (Decimal(31) * rates["202610"] - Decimal(3) * rates["202611"]) / Decimal(28)
-    september_start = rates["202608"]
+    september_start = pre_meeting_effr
     september_end = october_start
     expected_move_percent = september_end - september_start
     expected_steps = expected_move_percent / TWENTY_FIVE_BPS_PERCENT
@@ -259,5 +261,5 @@ def fedwatch_reference(prices: ReferencePrices) -> FedWatchDiagnostic:
         bucket_probabilities=bucket_probabilities,
         september_residual_bps=residual_bps,
         valid=True,
-        reason="four-contract FedWatch diagnostic calculated",
+        reason="manual or official EFFR plus September-November diagnostic calculated",
     )

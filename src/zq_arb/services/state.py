@@ -23,6 +23,7 @@ from zq_arb.domain.enums import (
 from zq_arb.domain.models import (
     AccountMetrics,
     AlertView,
+    EffrObservation,
     EligibilityStatus,
     EngineSnapshot,
     IbkrFarmHealth,
@@ -51,11 +52,27 @@ class StateStore:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._lock = asyncio.Lock()
+        if settings.effr_source == "MANUAL":
+            manual_rate = settings.pre_meeting_effr_percent
+            effr = EffrObservation(
+                source="MANUAL",
+                rate_percent=manual_rate,
+                fetched_at=utc_now(),
+                valid=manual_rate is not None,
+                reason=(
+                    "explicit manual EFFR override from environment"
+                    if manual_rate is not None
+                    else "EFFR_SOURCE is MANUAL but PRE_MEETING_EFFR_PERCENT is absent"
+                ),
+            )
+        else:
+            effr = EffrObservation()
         self._snapshot = EngineSnapshot(
             software_version=settings.software_version,
             config_version=settings.config_version,
             strategy_version=settings.strategy_version,
             run_mode=settings.run_mode,
+            effr=effr,
             ibkr_farms={
                 "US_FUTURES": IbkrFarmHealth(name="usfuture", service="MARKET_DATA"),
                 "HMDS": IbkrFarmHealth(name="hmds", service="HISTORICAL_DATA"),
@@ -203,6 +220,9 @@ class StateStore:
 
     async def set_eligibility(self, eligibility: EligibilityStatus) -> None:
         await self.update(lambda snapshot: snapshot.model_copy(update={"eligibility": eligibility}))
+
+    async def set_effr(self, effr: EffrObservation) -> None:
+        await self.update(lambda snapshot: snapshot.model_copy(update={"effr": effr}))
 
     async def set_books(self, books: tuple[OrderBook, ...]) -> None:
         def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
@@ -674,8 +694,6 @@ class StateStore:
     def _quote_role(self, month: str) -> QuoteRole:
         if month == self.settings.ibkr_zq_contract_month:
             return QuoteRole.TARGET
-        if month == self.settings.reference_contract_months[0]:
-            return QuoteRole.ANCHOR
         return QuoteRole.DIAGNOSTIC
 
     @staticmethod

@@ -8,7 +8,7 @@ function clock(zone: string): string {
 }
 
 export function Header({ state, onControl }: { state: EngineSnapshot; onControl: (action: string) => void }) {
-  const requiredQuotes = Object.values(state.quotes).filter((quote) => quote.role === 'TARGET' || quote.role === 'ANCHOR')
+  const requiredQuotes = Object.values(state.quotes).filter((quote) => quote.role === 'TARGET')
   const eventTimes = requiredQuotes.flatMap((quote) => quote.last_market_data_event_at ? [quote.last_market_data_event_at] : [])
   const oldestEvent = eventTimes.length ? eventTimes.reduce((oldest, value) => new Date(value).getTime() < new Date(oldest).getTime() ? value : oldest) : null
   return <header className="topbar">

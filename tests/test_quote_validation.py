@@ -22,7 +22,7 @@ from zq_arb.services.state import StateStore
 def qualified_quote(*, role: QuoteRole, generation: int = 3) -> Quote:
     now = utc_now()
     return Quote(
-        instrument="202608" if role is QuoteRole.ANCHOR else "202609",
+        instrument="202609" if role is QuoteRole.TARGET else "202610",
         bid=Decimal("96.30"),
         ask=Decimal("96.31"),
         bid_size=Decimal("100"),

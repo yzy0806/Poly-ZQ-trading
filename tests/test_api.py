@@ -61,7 +61,7 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
         assert health.status_code == 200
         not_ready = await client.get("/readyz")
         assert not_ready.status_code == 503
-        assert "target ZQ or pre-meeting anchor quote is unavailable" in not_ready.json()["reasons"]
+        assert "target ZQ quote is unavailable" in not_ready.json()["reasons"]
         unauthorized = await client.get("/api/v1/state")
         assert unauthorized.status_code == 401
         authenticated = await client.post(
@@ -137,10 +137,7 @@ async def test_ready_requires_and_accepts_complete_fresh_data(
     app = create_app(configured)
     runtime = app.state.runtime
     current = await runtime.state.get()
-    required_months = {
-        configured.reference_contract_months[0],
-        configured.ibkr_zq_contract_month,
-    }
+    required_months = {configured.ibkr_zq_contract_month}
     quotes = {
         month: Quote(
             instrument=month,

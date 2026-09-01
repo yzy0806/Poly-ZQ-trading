@@ -23,7 +23,7 @@ class GateContext(BaseModel):
     eligibility_country: str | None
     polymarket_books_synchronized: bool
     target_subscription_qualified: bool
-    anchor_subscription_qualified: bool
+    effr_qualified: bool
     cross_venue_snapshot_qualified: bool
     contract_verified: bool
     full_hedge_depth_available: bool
@@ -162,10 +162,10 @@ class RiskEngine:
                 "ZQU6 subscription qualification", context.target_subscription_qualified,
                 context.target_subscription_qualified, "==", True,
                 "ZQU6 current-generation live subscription is not qualified")
-            add("ZQQ6_SUBSCRIPTION_QUALIFIED", "CROSS_VENUE",
-                "ZQQ6 anchor subscription qualification", context.anchor_subscription_qualified,
-                context.anchor_subscription_qualified, "==", True,
-                "ZQQ6 current-generation live subscription is not qualified")
+            add("PRE_MEETING_EFFR", "CROSS_VENUE",
+                "Pre-meeting EFFR qualification", context.effr_qualified,
+                context.effr_qualified, "==", True,
+                "pre-meeting EFFR is not qualified")
             add("CROSS_VENUE_SNAPSHOT", "CROSS_VENUE", "Cross-venue immutable snapshot",
                 context.cross_venue_snapshot_qualified, context.cross_venue_snapshot_qualified,
                 "==", True, "cross-venue snapshot is not execution-qualified")

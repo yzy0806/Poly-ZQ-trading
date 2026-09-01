@@ -4,7 +4,6 @@ import { Panel, Metric } from './Panel'
 import { GateTable } from './GateTable'
 
 const monthLabel: Record<string, string> = {
-  '202608': 'AUG 26',
   '202609': 'SEP 26',
   '202610': 'OCT 26',
   '202611': 'NOV 26',
@@ -21,7 +20,7 @@ export function ProbabilityPanel({ state }: { state: EngineSnapshot }) {
     : Number(p.expected_move_gap_bps) >= 0 ? 'positive' : 'negative'
 
   return <Panel title="Direct ZQU6 signal & middle calculation" eyebrow="AUTHORITATIVE BACKEND CALCULATION" className="wide">
-    <div className={'qualification-banner ' + (p.execution_qualified ? 'qualified' : 'blocked')}><b>{p.qualification_reason ?? (p.execution_qualified ? 'EXECUTION-QUALIFIED immutable snapshot' : 'NOT EXECUTION-QUALIFIED')}</b><span>{failedChecks.length ? `${failedChecks.length} detailed failure${failedChecks.length === 1 ? '' : 's'} shown below` : 'Every execution check passed'}</span></div>
+    <div className={'qualification-banner ' + (p.execution_qualified ? 'qualified' : 'blocked')}><b>{p.qualification_reason ?? (p.execution_qualified ? 'EXECUTION-QUALIFIED immutable snapshot' : 'NOT EXECUTION-QUALIFIED')}</b><span>{failedChecks.length ? `${failedChecks.length} detailed failure${failedChecks.length === 1 ? '' : 's'} shown below` : p.execution_qualified ? 'Every execution check passed' : 'Qualification inputs are unavailable'}</span></div>
     <section className="qualification-detail" aria-label="Cross-venue qualification detail">
       <div className="subhead"><span>FAILED QUALIFICATIONS — ACTUAL VS REQUIRED</span><small>All values originate from this backend snapshot.</small></div>
       <GateTable checks={failedChecks} empty="No failed cross-venue qualifications." />
@@ -32,13 +31,13 @@ export function ProbabilityPanel({ state }: { state: EngineSnapshot }) {
         <div><b>{monthLabel[month] ?? month}</b><span className={quote.quality === 'LIVE' ? 'live' : 'warn'}>{quote.quality}</span></div>
         <dl><dt>BID</dt><dd>{number(quote.bid, 4)}</dd><dt>ASK</dt><dd>{number(quote.ask, 4)}</dd><dt>LAST</dt><dd>{number(quote.last, 4)}</dd></dl>
         <div className="quote-state"><span>Price changed</span><b>{age(quote.last_price_change_at)}</b><span>Market event</span><b>{age(quote.last_market_data_event_at)} · informational</b><span>BBO size</span><b>{number(quote.bid_size, 0)} / {number(quote.ask_size, 0)}</b><span>Subscription</span><b className={quote.subscription_status === 'ACTIVE' ? 'positive' : 'negative'}>{quote.subscription_status ?? 'PENDING'} · G{quote.subscription_generation ?? '—'}</b><span>Data type</span><b className={quote.market_data_type === 1 ? 'positive' : 'negative'}>{quote.market_data_type === 1 ? 'LIVE (1)' : quote.market_data_type ?? 'UNKNOWN'}</b></div>
-        <small>{quote.role === 'TARGET' || month === p.target_contract_month ? 'PRIMARY SIGNAL' : quote.role === 'ANCHOR' || month === '202608' ? 'PRE-MEETING ANCHOR' : 'DIAGNOSTIC ONLY'} · {quote.validation_reason ?? 'awaiting subscription qualification'}</small>
+        <small>{quote.role === 'TARGET' || month === p.target_contract_month ? 'PRIMARY SIGNAL' : 'DIAGNOSTIC ONLY'} · {quote.validation_reason ?? 'awaiting subscription qualification'}</small>
       </div>)}
     </div>
     <div className="calc-flow">
       <div className="calc-block"><span>1 · SEPTEMBER CONTRACT</span><div><code>ZQU6 bid / ask</code><b>{number(p.target_bid, 4)} / {number(p.target_ask, 4)}</b></div><div><code>ZQU6 midpoint</code><b>{number(p.target_mid, 4)}</b></div><div><code>100 − ZQU6 mid</code><b>{number(p.implied_average_effr_mid, 4)}%</b></div></div>
       <div className="flow-arrow">→</div>
-      <div className="calc-block"><span>2 · CALENDAR WEIGHTING</span><div><code>August anchor EFFR</code><b>{number(p.pre_meeting_effr, 4)}%</b></div><div><code>Post-decision weight</code><b>{pct(p.post_decision_weight)}</b></div><div><code>(Sep avg − anchor) ÷ weight</code><b>{number(p.expected_move_bps, 2)} bp</b></div></div>
+      <div className="calc-block"><span>2 · CALENDAR WEIGHTING</span><div><code>Pre-meeting EFFR</code><b>{number(p.pre_meeting_effr, 4)}%</b><small>{state.effr.source} · effective {state.effr.effective_date ?? 'manual override'}</small></div><div><code>Post-decision weight</code><b>{pct(p.post_decision_weight)}</b></div><div><code>(Sep avg − EFFR) ÷ weight</code><b>{number(p.expected_move_bps, 2)} bp</b></div></div>
       <div className="flow-arrow">→</div>
       <div className="calc-block"><span>3 · LONG-ONLY EXECUTABLE MOVE</span><div><code>Buy ZQ at ask</code><b>{number(p.executable_buy_expected_move_bps, 2)} bp</b></div><div><code>Bid-side reference</code><b>{number(p.bid_reference_expected_move_bps, 2)} bp</b><small>Non-tradable spread boundary</small></div><div><code>Adjacent states</code><b>{p.lower_step_bps ?? '—'} / {p.upper_step_bps ?? '—'} bp</b></div></div>
     </div>
@@ -58,7 +57,7 @@ export function ProbabilityPanel({ state }: { state: EngineSnapshot }) {
       </table>
     </div>
     <details className="diagnostic">
-      <summary>Secondary FedWatch diagnostic · {diagnostic.valid ? 'AVAILABLE' : 'AWAITING FOUR CONTRACTS'}</summary>
+      <summary>Secondary FedWatch diagnostic · {diagnostic.valid ? 'AVAILABLE' : 'AWAITING SEP/OCT/NOV'}</summary>
       <div className="diagnostic-grid">
         <Metric label="FedWatch expected move" value={number(diagnostic.expected_move_bps, 2) + ' bp'} note={diagnostic.reason} />
         <Metric label="September residual" value={number(diagnostic.september_residual_bps, 2) + ' bp'} note="Cross-contract model health only" />

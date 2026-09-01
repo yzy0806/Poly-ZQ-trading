@@ -77,7 +77,7 @@ Before starting the operator terminal, fill the still-required local values for 
 
 2. A WebSocket disconnect or book-integrity failure marks every affected book unsynchronized. REST data may remain visible for diagnosis, but a new ZQ order remains prohibited until a valid WebSocket update restores synchronization.
 
-3. The primary rate signal uses the current `ZQU6` bid, ask, and midpoint against the August pre-meeting EFFR anchor. October and November are optional inputs for the secondary FedWatch diagnostic and are not required for the direct signal.
+3. The primary rate signal uses the current `ZQU6` bid, ask, and midpoint against a validated pre-meeting EFFR observation. By default the backend refreshes EFFR from the official New York Fed Markets API; `EFFR_SOURCE=MANUAL` with `PRE_MEETING_EFFR_PERCENT` is the explicit fallback. October and November are optional inputs for the secondary FedWatch diagnostic and are not required for the direct signal.
 
 4. The adjacent-state ZQ probabilities and normalized Polymarket expected move explain the cross-venue difference. Only conservative terminal scenario P&L and the full risk-gate result can qualify an opportunity.
 
