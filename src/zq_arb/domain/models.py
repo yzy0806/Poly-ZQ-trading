@@ -216,10 +216,7 @@ class MarginPreview(StrictModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def available(self) -> bool:
-        return (
-            self.status is MarginPreviewStatus.AVAILABLE
-            and self.init_margin_change is not None
-        )
+        return self.status is MarginPreviewStatus.AVAILABLE and self.init_margin_change is not None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -267,7 +264,8 @@ class HedgeDepthView(StrictModel):
     available_shares: Decimal
     shortfall_shares: Decimal
     price_cap: Decimal
-    maker_price: Decimal | None = None
+    marketable_limit_price: Decimal | None = None
+    best_ask_shares: Decimal = Decimal("0")
     emergency_vwap: Decimal | None = None
     worst_price: Decimal | None = None
     sufficient: bool = False
@@ -416,6 +414,10 @@ class HedgeObligationView(StrictModel):
     token_id: str
     due_shares: Decimal
     confirmed_shares: Decimal = Decimal("0")
+    state: str = "PENDING"
+    latest_order_id: str | None = None
+    latest_limit_price: Decimal | None = None
+    reprice_count: int = 0
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -431,6 +433,11 @@ class BatchView(StrictModel):
     filled_quantity: Decimal = Decimal("0")
     remaining_quantity: Decimal = Decimal("0")
     limit_price: Decimal | None = None
+    zq_order_status: str | None = None
+    cancel_reason: str | None = None
+    residual_minimum_net_profit: Decimal | None = None
+    residual_required_profit: Decimal | None = None
+    residual_return_on_capital_bps: Decimal | None = None
     obligations: tuple[HedgeObligationView, ...] = ()
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -468,6 +475,34 @@ class StrategyRiskView(StrictModel):
     daily_pnl: Decimal = Decimal("0")
     trading_day: str | None = None
     source: str = "PERSISTED_STRATEGY_LEDGER"
+    valued_at: datetime = Field(default_factory=utc_now)
+
+
+class PortfolioPositionView(StrictModel):
+    venue: Literal["IBKR", "POLYMARKET"]
+    instrument: str
+    label: str
+    strategy_quantity: Decimal = Decimal("0")
+    venue_quantity: Decimal | None = None
+    average_entry_price: Decimal | None = None
+    mark_price: Decimal | None = None
+    mark_source: str = "UNAVAILABLE"
+    multiplier: Decimal = Decimal("1")
+    cost_basis: Decimal | None = None
+    market_value: Decimal | None = None
+    unrealized_pnl: Decimal | None = None
+    simulated: bool = False
+    reconciled: bool | None = None
+    mark_updated_at: datetime | None = None
+
+
+class PortfolioView(StrictModel):
+    positions: tuple[PortfolioPositionView, ...] = ()
+    zq_unrealized_pnl: Decimal | None = Decimal("0")
+    polymarket_unrealized_pnl: Decimal | None = Decimal("0")
+    combined_unrealized_pnl: Decimal | None = Decimal("0")
+    valuation_complete: bool = True
+    valuation_reason: str = "no open strategy positions"
     valued_at: datetime = Field(default_factory=utc_now)
 
 
@@ -510,6 +545,7 @@ class EngineSnapshot(StrictModel):
     margin_preview: MarginPreview = Field(default_factory=MarginPreview)
     reconciliation: ReconciliationStatusView = Field(default_factory=ReconciliationStatusView)
     strategy_risk: StrategyRiskView = Field(default_factory=StrategyRiskView)
+    portfolio: PortfolioView = Field(default_factory=PortfolioView)
     probabilities: ProbabilitySnapshot = Field(default_factory=ProbabilitySnapshot)
     probability_comparisons: tuple[MarketProbabilityComparison, ...] = ()
     opportunities: tuple[Opportunity, ...] = ()

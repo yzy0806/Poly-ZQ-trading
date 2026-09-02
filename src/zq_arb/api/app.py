@@ -276,10 +276,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT, detail="no active ZQ order"
                 )
-            runtime.ibkr.cancel_order(snapshot.active_batch.zq_order_id)
-            await runtime.state.invalidate_reconciliation(
-                "operator cancelled an unfilled IBKR order"
-            )
+            try:
+                await runtime.execution.cancel_unfilled(payload.reason)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         elif payload.action is ControlAction.CONFIRM_RECONCILED:
             try:
                 await runtime.confirm_reconciliation(identity.username, payload.reason)

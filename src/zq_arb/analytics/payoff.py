@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from zq_arb.analytics.probability import theoretical_settlement
 from zq_arb.domain.enums import GateStatus
@@ -57,6 +57,25 @@ class CostInputs:
         return self.model_reserve + self.operational_reserve + self.effr_basis_reserve
 
 
+def conservative_ibkr_round_trip_commission(
+    *,
+    contracts: Decimal | int,
+    configured_per_contract: Decimal,
+    entry_preview_commission: Decimal | None,
+) -> Decimal:
+    """Use the configured round-trip floor or twice the current entry preview."""
+
+    quantity = Decimal(contracts)
+    if quantity < 0 or configured_per_contract < 0:
+        raise ValueError("IBKR commission inputs cannot be negative")
+    configured_total = quantity * configured_per_contract
+    if entry_preview_commission is None:
+        return configured_total
+    if entry_preview_commission < 0:
+        raise ValueError("IBKR entry commission preview cannot be negative")
+    return max(configured_total, entry_preview_commission * Decimal("2"))
+
+
 def hedge_shares_per_contract(move_bps: int) -> Decimal:
     # Multiply before division so the approved $41.67 approximation does not
     # create a repeating Decimal that rounds 486.15 up by an unintended cent.
@@ -100,17 +119,14 @@ def walk_asks(
     )
 
 
-def maker_price(book: OrderBook, price_cap: Decimal) -> Decimal | None:
-    """Return the highest valid post-only BUY price under the hard cap."""
+def marketable_limit_price(book: OrderBook, price_cap: Decimal) -> Decimal | None:
+    """Return the current lowest ask for a non-post-only BUY limit."""
 
-    if book.best_ask is None or book.tick_size is None or book.tick_size <= 0:
+    if book.best_ask is None or book.best_ask <= 0 or book.best_ask > price_cap:
         return None
     if book.best_bid is not None and book.best_bid >= book.best_ask:
         return None
-    bounded = min(book.best_ask - book.tick_size, price_cap)
-    tick_count = (bounded / book.tick_size).to_integral_value(rounding=ROUND_FLOOR)
-    rounded = tick_count * book.tick_size
-    return rounded if rounded > 0 else None
+    return book.best_ask
 
 
 def _payout(outcome_code: str, move_bps: int) -> Decimal:
@@ -137,83 +153,92 @@ def build_three_state_opportunity(
         raise ValueError("contracts must be positive")
     q25 = round_shares_up(hedge_shares_per_contract(25) * Decimal(contracts))
     q50 = round_shares_up(hedge_shares_per_contract(50) * Decimal(contracts))
-    post25 = maker_price(inc25_book, post_price_cap)
-    post50 = maker_price(inc50_book, post_price_cap)
+    post25 = marketable_limit_price(inc25_book, post_price_cap)
+    post50 = marketable_limit_price(inc50_book, post_price_cap)
     depth25 = walk_asks(inc25_book.asks, q25, price_cap=emergency_price_cap)
     depth50 = walk_asks(inc50_book.asks, q50, price_cap=emergency_price_cap)
+    exact25 = inc25_book.best_ask_size or Decimal("0") if post25 is not None else Decimal("0")
+    exact50 = inc50_book.best_ask_size or Decimal("0") if post50 is not None else Decimal("0")
     depth_views = (
         HedgeDepthView(
             leg_code="INC25 YES",
             required_shares=q25,
-            available_shares=depth25.filled_shares,
-            shortfall_shares=max(Decimal("0"), q25 - depth25.filled_shares),
+            available_shares=exact25,
+            shortfall_shares=max(Decimal("0"), q25 - exact25),
             price_cap=emergency_price_cap,
-            maker_price=post25,
+            marketable_limit_price=post25,
+            best_ask_shares=exact25,
             emergency_vwap=depth25.vwap,
             worst_price=depth25.worst_price,
-            sufficient=depth25.sufficient,
+            sufficient=post25 is not None and exact25 >= q25 and depth25.sufficient,
         ),
         HedgeDepthView(
             leg_code="INC50PLUS YES",
             required_shares=q50,
-            available_shares=depth50.filled_shares,
-            shortfall_shares=max(Decimal("0"), q50 - depth50.filled_shares),
+            available_shares=exact50,
+            shortfall_shares=max(Decimal("0"), q50 - exact50),
             price_cap=emergency_price_cap,
-            maker_price=post50,
+            marketable_limit_price=post50,
+            best_ask_shares=exact50,
             emergency_vwap=depth50.vwap,
             worst_price=depth50.worst_price,
-            sufficient=depth50.sufficient,
+            sufficient=post50 is not None and exact50 >= q50 and depth50.sufficient,
         ),
     )
     checks: list[GateCheck] = []
     for detail, book in zip(depth_views, (inc25_book, inc50_book), strict=True):
-        maker_available = detail.maker_price is not None
-        maker_inputs = (
-            f"bid={book.best_bid}; ask={book.best_ask}; tick={book.tick_size}; "
-            f"cap={post_price_cap}"
+        limit_available = detail.marketable_limit_price is not None
+        limit_inputs = (
+            f"bid={book.best_bid}; ask={book.best_ask}; tick={book.tick_size}; cap={post_price_cap}"
         )
         checks.append(
             GateCheck(
-                code=f"{detail.leg_code.replace(' ', '_')}_MAKER_PRICE",
+                code=f"{detail.leg_code.replace(' ', '_')}_MARKETABLE_LIMIT",
                 category="HEDGE_LIQUIDITY",
-                label=f"{detail.leg_code} post-only maker price",
-                status=GateStatus.PASSED if maker_available else GateStatus.UNAVAILABLE,
+                label=f"{detail.leg_code} lowest-ask BUY limit",
+                status=GateStatus.PASSED if limit_available else GateStatus.UNAVAILABLE,
                 actual_value=(
-                    f"{detail.maker_price} ({maker_inputs})" if maker_available else maker_inputs
+                    f"{detail.marketable_limit_price} ({limit_inputs})"
+                    if limit_available
+                    else limit_inputs
                 ),
                 operator="<=",
                 required_value=str(post_price_cap),
                 unit="USD/share",
                 detail=(
-                    f"{detail.leg_code} post-only price {detail.maker_price} is inside cap "
+                    f"{detail.leg_code} marketable BUY limit "
+                    f"{detail.marketable_limit_price} equals the lowest ask and is inside cap "
                     f"{post_price_cap}"
-                    if maker_available
+                    if limit_available
                     else (
-                        f"{detail.leg_code} cannot derive a post-only BUY price: "
-                        f"{maker_inputs}; a valid ask and positive tick are required, and "
-                        "the book must be uncrossed"
+                        f"{detail.leg_code} cannot derive a lowest-ask BUY limit: "
+                        f"{limit_inputs}; a valid ask inside the cap and an uncrossed book "
+                        "are required"
                     )
                 ),
             )
         )
         checks.append(
             GateCheck(
-                code=f"{detail.leg_code.replace(' ', '_')}_EMERGENCY_DEPTH",
+                code=f"{detail.leg_code.replace(' ', '_')}_BEST_ASK_SIZE",
                 category="HEDGE_LIQUIDITY",
-                label=f"{detail.leg_code} emergency depth inside cap",
+                label=f"{detail.leg_code} full size at lowest ask",
                 status=GateStatus.PASSED if detail.sufficient else GateStatus.FAILED,
                 actual_value=str(detail.available_shares),
                 operator=">=",
                 required_value=str(detail.required_shares),
                 unit="shares",
                 detail=(
-                    f"{detail.leg_code} has {detail.available_shares} shares inside the "
-                    f"{detail.price_cap} cap; {detail.required_shares} required"
+                    f"{detail.leg_code} has {detail.available_shares} shares at the current "
+                    f"lowest ask; {detail.required_shares} required, with complete emergency "
+                    f"depth through {detail.price_cap} also required"
                 ),
             )
         )
     reasons = [check.detail for check in checks if not check.passed]
-    if any(not detail.sufficient or detail.maker_price is None for detail in depth_views):
+    if any(
+        not detail.sufficient or detail.marketable_limit_price is None for detail in depth_views
+    ):
         return Opportunity(
             zq_price=zq_price,
             contracts=contracts,
@@ -232,9 +257,7 @@ def build_three_state_opportunity(
         for move in APPROVED_SCENARIOS:
             settlement = theoretical_settlement(pre_meeting_effr, Decimal(move))
             futures_price_change = settlement - zq_price
-            futures_pnl = (
-                Decimal(contracts) * FUTURES_POINT_VALUE * futures_price_change
-            )
+            futures_pnl = Decimal(contracts) * FUTURES_POINT_VALUE * futures_price_change
             inc25_payout = _payout("INC25", move)
             inc50plus_payout = _payout("INC50PLUS", move)
             inc25_pnl = q25 * (inc25_payout - price25)
@@ -262,11 +285,7 @@ def build_three_state_opportunity(
                     gross_pnl=gross_pnl,
                     costs=cost_inputs.explicit_costs,
                     reserves=cost_inputs.reserves,
-                    net_pnl=(
-                        gross_pnl
-                        - cost_inputs.explicit_costs
-                        - cost_inputs.reserves
-                    ),
+                    net_pnl=(gross_pnl - cost_inputs.explicit_costs - cost_inputs.reserves),
                 )
             )
         return tuple(scenarios)

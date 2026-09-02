@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    env_file_version: int = 6
+    env_file_version: int = 8
     app_env: str = "development"
     run_mode: RunMode = RunMode.READ_ONLY
     live_trading_enabled: bool = False
@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     ibkr_margin_preview_interval_seconds: int
     ibkr_margin_preview_timeout_seconds: int
     ibkr_margin_preview_max_age_seconds: int
+    ibkr_commission_estimate: Decimal
 
     polymarket_clob_host: str
     polymarket_data_api_host: str
@@ -112,9 +113,18 @@ class Settings(BaseSettings):
     polymarket_api_key: SecretStr
     polymarket_api_secret: SecretStr
     polymarket_api_passphrase: SecretStr
+    polymarket_builder_code: str = ""
+    polymarket_builder_api_key: SecretStr = SecretStr("")
+    polymarket_builder_api_secret: SecretStr = SecretStr("")
+    polymarket_builder_api_passphrase: SecretStr = SecretStr("")
+    polymarket_relayer_enabled: bool = False
+    polymarket_relayer_api_key: SecretStr = SecretStr("")
+    polymarket_relayer_api_key_address: SecretStr = SecretStr("")
+    polymarket_relayer_tx_type: str = ""
     polymarket_event_id: str
     polymarket_event_slug: str
     polymarket_event_title: str
+    polymarket_event_url: str = ""
     polymarket_event_start_utc: datetime
     polymarket_event_end_utc: datetime
     polymarket_event_market_count: int
@@ -125,8 +135,8 @@ class Settings(BaseSettings):
     polymarket_resolution_statement_url: str
     polymarket_default_order_type: str
     polymarket_post_only: bool
-    polymarket_post_only_reprice_seconds: int
-    polymarket_post_only_max_reprices: int
+    polymarket_hedge_reprice_seconds: int
+    polymarket_hedge_max_reprices: int
     polymarket_hard_price_cap: Decimal
     polymarket_cancel_confirm_timeout_seconds: int
     polymarket_user_ws_ping_seconds: int
@@ -257,8 +267,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def enforce_safety_invariants(self) -> Self:
         errors: list[str] = []
-        if self.env_file_version != 6:
-            errors.append("ENV_FILE_VERSION must be 6")
+        if self.env_file_version != 8:
+            errors.append("ENV_FILE_VERSION must be 8")
         if self.api_workers != 1:
             errors.append("API_WORKERS must be 1 for deterministic state ownership")
         if self.ibkr_zq_child_order_quantity != 10:
@@ -281,6 +291,8 @@ class Settings(BaseSettings):
             errors.append(
                 "IBKR_MARGIN_PREVIEW_MAX_AGE_SECONDS cannot be below the preview interval"
             )
+        if self.ibkr_commission_estimate <= 0:
+            errors.append("IBKR_COMMISSION_ESTIMATE must be positive")
         if self.strategy_allocated_capital_usd <= 0:
             errors.append("STRATEGY_ALLOCATED_CAPITAL_USD must be positive")
         if self.nyfed_effr_refresh_seconds < 60:
@@ -293,8 +305,14 @@ class Settings(BaseSettings):
             Decimal("0") <= self.pre_meeting_effr_percent <= Decimal("20")
         ):
             errors.append("PRE_MEETING_EFFR_PERCENT must be between 0 and 20 percent")
-        if self.polymarket_default_order_type.upper() != "GTC" or not self.polymarket_post_only:
-            errors.append("the default Polymarket path must be post-only GTC")
+        if self.polymarket_default_order_type.upper() != "GTC" or self.polymarket_post_only:
+            errors.append(
+                "the default Polymarket hedge path must be non-post-only GTC at the best ask"
+            )
+        if self.polymarket_hedge_reprice_seconds < 1:
+            errors.append("POLYMARKET_HEDGE_REPRICE_SECONDS must be positive")
+        if self.polymarket_hedge_max_reprices < 1:
+            errors.append("POLYMARKET_HEDGE_MAX_REPRICES must be positive")
         if self.fomc_post_decision_resume_enabled:
             errors.append("post-decision resumption is prohibited for version 1")
         if self.fomc_trading_cutoff_utc >= self.fomc_statement_utc:
@@ -389,7 +407,6 @@ class Settings(BaseSettings):
 
     def live_readiness_errors(self) -> list[str]:
         errors: list[str] = []
-        errors.append("automated venue reconciliation is not implemented")
         if not self.live_trading_enabled:
             errors.append("LIVE_TRADING_ENABLED is false")
         if not self.ibkr_order_submission_enabled:
@@ -398,8 +415,14 @@ class Settings(BaseSettings):
             errors.append("POLYMARKET_ORDER_SUBMISSION_ENABLED is false")
         if not self.operator_approval_id.strip():
             errors.append("OPERATOR_APPROVAL_ID is absent")
+        if not self.ibkr_account_configured:
+            errors.append("IBKR_ACCOUNT_ID is absent")
         if not self.clob_credentials_configured:
             errors.append("CLOB L2 credentials are absent")
+        if not self._is_configured(self.polymarket_private_key):
+            errors.append("protected Polymarket signing key is absent")
+        if self.simulate_polymarket_fills:
+            errors.append("SIMULATE_POLYMARKET_FILLS must be false in a live run mode")
         if self.effr_source == "MANUAL" and self.pre_meeting_effr_percent is None:
             errors.append("PRE_MEETING_EFFR_PERCENT is absent for MANUAL EFFR_SOURCE")
         if self.polymarket_signature_type.upper() == "AUTO" and not self._is_configured(
@@ -426,9 +449,9 @@ def _read_env_keys(path: Path) -> list[str]:
     return keys
 
 
-def validate_environment_schema(env_path: Path, example_path: Path) -> None:
+def validate_environment_schema(env_path: Path) -> None:
     actual = _read_env_keys(env_path)
-    allowed = set(_read_env_keys(example_path))
+    allowed = {name.upper() for name in Settings.model_fields}
     duplicates = sorted({key for key in actual if actual.count(key) > 1})
     unknown = sorted(set(actual) - allowed)
     problems: list[str] = []
@@ -443,7 +466,6 @@ def validate_environment_schema(env_path: Path, example_path: Path) -> None:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     env_path = Path(".env")
-    example_path = Path(".env.example")
-    if env_path.exists() and example_path.exists():
-        validate_environment_schema(env_path, example_path)
+    if env_path.exists():
+        validate_environment_schema(env_path)
     return Settings(_env_file=env_path)

@@ -5,8 +5,9 @@ from decimal import Decimal
 from zq_arb.analytics.payoff import (
     CostInputs,
     build_three_state_opportunity,
+    conservative_ibkr_round_trip_commission,
     hedge_shares_per_contract,
-    maker_price,
+    marketable_limit_price,
     round_shares_up,
     walk_asks,
 )
@@ -39,6 +40,19 @@ def test_approved_hedge_share_ratios() -> None:
     assert round_shares_up(hedge_shares_per_contract(50)) == Decimal("972.30")
 
 
+def test_commission_uses_configured_round_trip_floor_or_higher_live_preview() -> None:
+    assert conservative_ibkr_round_trip_commission(
+        contracts=10,
+        configured_per_contract=Decimal("3.64"),
+        entry_preview_commission=None,
+    ) == Decimal("36.40")
+    assert conservative_ibkr_round_trip_commission(
+        contracts=10,
+        configured_per_contract=Decimal("3.64"),
+        entry_preview_commission=Decimal("20"),
+    ) == Decimal("40")
+
+
 def test_depth_walker_respects_price_cap() -> None:
     result = walk_asks(
         [
@@ -53,24 +67,14 @@ def test_depth_walker_respects_price_cap() -> None:
     assert result.worst_price == Decimal("0.40")
 
 
-def test_maker_price_posts_at_highest_non_crossing_tick() -> None:
-    market = OrderBook(
-        token_id=TEST_ASSET_ID,
-        bids=(BookLevel(price=Decimal("0.520"), size=Decimal("100")),),
-        asks=(BookLevel(price=Decimal("0.530"), size=Decimal("100")),),
-        tick_size=Decimal("0.001"),
-    )
-    assert maker_price(market, Decimal("0.95")) == Decimal("0.529")
-    assert maker_price(market, Decimal("0.525")) == Decimal("0.525")
-
-
-def test_maker_price_fails_closed_without_static_tick_metadata() -> None:
+def test_marketable_limit_is_exactly_the_lowest_ask() -> None:
     market = OrderBook(
         token_id=TEST_ASSET_ID,
         bids=(BookLevel(price=Decimal("0.520"), size=Decimal("100")),),
         asks=(BookLevel(price=Decimal("0.530"), size=Decimal("100")),),
     )
-    assert maker_price(market, Decimal("0.95")) is None
+    assert marketable_limit_price(market, Decimal("0.95")) == Decimal("0.530")
+    assert marketable_limit_price(market, Decimal("0.525")) is None
 
 
 def test_three_state_profit_contains_every_approved_state() -> None:
@@ -109,9 +113,7 @@ def test_three_state_profit_contains_every_approved_state() -> None:
     assert first.futures_pnl == (
         Decimal(first.contracts) * first.futures_point_value * first.futures_price_change
     )
-    assert first.inc25_pnl == first.inc25_shares * (
-        first.inc25_payout - first.inc25_entry_price
-    )
+    assert first.inc25_pnl == first.inc25_shares * (first.inc25_payout - first.inc25_entry_price)
     assert first.inc50plus_pnl == first.inc50plus_shares * (
         first.inc50plus_payout - first.inc50plus_entry_price
     )
@@ -154,10 +156,32 @@ def test_empty_book_fails_closed() -> None:
         emergency_price_cap=Decimal("0.99"),
     )
     assert not opportunity.tradeable
-    assert any(check.code == "INC25_YES_EMERGENCY_DEPTH" for check in opportunity.gate_checks)
+    assert any(check.code == "INC25_YES_BEST_ASK_SIZE" for check in opportunity.gate_checks)
     assert opportunity.direction == "LONG"
     assert opportunity.zq_side.value == "BUY"
     assert len(opportunity.hedge_depth) == 2
+
+
+def test_entry_requires_full_hedge_size_at_the_exact_lowest_ask() -> None:
+    opportunity = build_three_state_opportunity(
+        contracts=10,
+        zq_price=Decimal("96.30"),
+        pre_meeting_effr=Decimal("3.625"),
+        inc25_book=book("25", (("0.30", "100"), ("0.31", "10000"))),
+        inc50_book=book("50", (("0.10", "12000"),)),
+        cost_inputs=CostInputs(),
+        incremental_margin=Decimal("0"),
+        emergency_cash_reserve=Decimal("0"),
+        post_price_cap=Decimal("0.95"),
+        emergency_price_cap=Decimal("0.99"),
+    )
+    inc25 = next(item for item in opportunity.hedge_depth if item.leg_code == "INC25 YES")
+    assert inc25.available_shares == Decimal("100")
+    assert not inc25.sufficient
+    assert any(
+        check.code == "INC25_YES_BEST_ASK_SIZE" and not check.passed
+        for check in opportunity.gate_checks
+    )
 
 
 def test_missing_margin_preserves_profit_but_withholds_capital_and_return() -> None:

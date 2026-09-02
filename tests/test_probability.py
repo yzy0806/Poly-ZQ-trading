@@ -72,6 +72,21 @@ def test_direct_september_model_uses_calendar_weight_and_adjacent_states() -> No
     assert snapshot.valid
 
 
+def test_authorizing_long_entry_measure_uses_the_best_bid() -> None:
+    snapshot = direct_zq_probability(
+        target_contract_month="202609",
+        target_bid=Decimal("96.320"),
+        target_ask=Decimal("96.325"),
+        pre_meeting_effr=Decimal("3.625"),
+    )
+    assert snapshot.executable_buy_expected_move_bps == implied_decision_move_bps(
+        Decimal("96.320"), Decimal("3.625")
+    )
+    assert snapshot.bid_reference_expected_move_bps == implied_decision_move_bps(
+        Decimal("96.325"), Decimal("3.625")
+    )
+
+
 def test_direct_model_normalizes_polymarket_expected_move() -> None:
     pre_meeting_effr = Decimal("3.625")
     midpoint = theoretical_settlement(pre_meeting_effr, Decimal("12.5"))

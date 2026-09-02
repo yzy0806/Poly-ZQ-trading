@@ -36,11 +36,7 @@ from zq_arb.services.engine import EngineRuntime
 def quote(month: str, price: str) -> Quote:
     mid = Decimal(price)
     now = utc_now()
-    role = (
-        QuoteRole.TARGET
-        if month == "202609"
-        else QuoteRole.DIAGNOSTIC
-    )
+    role = QuoteRole.TARGET if month == "202609" else QuoteRole.DIAGNOSTIC
     return Quote(
         instrument=month,
         bid=mid - Decimal("0.0025"),
@@ -121,7 +117,7 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Set
                     order_id=7001,
                     contract_month=paper.ibkr_zq_contract_month,
                     quantity=paper.ibkr_zq_child_order_quantity,
-                    limit_price=Decimal("96.3275"),
+                    limit_price=Decimal("96.3225"),
                     init_margin_change=Decimal("1000"),
                     received_at=utc_now(),
                 ),
@@ -148,7 +144,8 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Set
     assert [opportunity.direction for opportunity in calculated.opportunities] == ["LONG"]
     long = calculated.opportunities[0]
     assert long.zq_side.value == "BUY"
-    assert long.token_prices["INC25"] == Decimal("0.27")
+    assert long.zq_price == Decimal("96.3225")
+    assert long.token_prices["INC25"] == Decimal("0.28")
     assert long.emergency_token_prices["INC25"] == Decimal("0.28")
     assert len(long.scenarios) == len(long.emergency_scenarios) == 3
     model_check = next(
@@ -218,25 +215,21 @@ async def test_margin_preview_warning_fails_closed(settings: Settings) -> None:
     warned = snapshot.model_copy(
         update={
             "quotes": {
-                settings.ibkr_zq_contract_month: quote(
-                    settings.ibkr_zq_contract_month, "96.3275"
-                )
+                settings.ibkr_zq_contract_month: quote(settings.ibkr_zq_contract_month, "96.3275")
             },
             "margin_preview": MarginPreview(
                 status=MarginPreviewStatus.AVAILABLE,
                 order_id=7002,
                 contract_month=settings.ibkr_zq_contract_month,
                 quantity=settings.ibkr_zq_child_order_quantity,
-                limit_price=Decimal("96.330"),
+                limit_price=Decimal("96.3250"),
                 init_margin_change=Decimal("1000"),
                 warning_text="IBKR margin warning",
                 received_at=utc_now(),
-            )
+            ),
         }
     )
-    available, actual, detail, margin = runtime._margin_preview_qualification(
-        warned, utc_now()
-    )
+    available, actual, detail, margin = runtime._margin_preview_qualification(warned, utc_now())
     await runtime.polymarket.close()
     await runtime.database.close()
     assert available is False

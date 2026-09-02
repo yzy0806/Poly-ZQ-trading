@@ -18,6 +18,7 @@ from zq_arb.adapters.polymarket import (
     update_books_from_stream_event,
 )
 from zq_arb.config import MarketLegConfig, Settings
+from zq_arb.domain.enums import RunMode
 
 
 def market_payload(leg: MarketLegConfig) -> dict[str, object]:
@@ -199,3 +200,75 @@ def test_market_websocket_delta_requires_a_seed_book() -> None:
     )
     with pytest.raises(RuntimeError, match="before a complete book snapshot"):
         update_books_from_stream_event({}, event)
+
+
+@pytest.mark.asyncio
+async def test_simulated_hedge_is_non_post_only_limit_at_supplied_lowest_ask(
+    settings: Settings,
+) -> None:
+    configured = settings.model_copy(
+        update={
+            "run_mode": RunMode.PAPER,
+            "polymarket_order_submission_enabled": True,
+            "simulate_polymarket_fills": True,
+        }
+    )
+    adapter = PolymarketAdapter(configured)
+    result = await adapter.submit_hedge_limit(
+        token_id=configured.polymarket_inc25_yes_token_id,
+        limit_price=Decimal("0.28"),
+        shares=Decimal("1458.45"),
+        idempotency_key="batch:exec:INC25:1",
+    )
+    await adapter.close()
+    assert result.status == "matched"
+    assert result.limit_price == Decimal("0.28")
+    assert result.immediately_matched_shares == Decimal("1458.45")
+    assert result.order_id.startswith("SIM-")
+
+
+@pytest.mark.asyncio
+async def test_current_dynamic_taker_fee_parameters_are_loaded_for_both_hedges(
+    settings: Settings,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/clob-markets/"):
+            return httpx.Response(200, json={"fd": {"r": "0.25", "e": "1"}})
+        return httpx.Response(404)
+
+    adapter = PolymarketAdapter(settings)
+    await adapter._http.aclose()
+    adapter._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    parameters = await adapter.fetch_hedge_fee_parameters()
+    await adapter.close()
+    assert parameters == {
+        "INC25": {"rate": Decimal("0.25"), "exponent": Decimal("1")},
+        "INC50PLUS": {"rate": Decimal("0.25"), "exponent": Decimal("1")},
+    }
+
+
+@pytest.mark.asyncio
+async def test_current_event_positions_are_limited_to_approved_tokens(
+    settings: Settings,
+) -> None:
+    approved = settings.market_legs[0].yes_token_id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/positions"
+        assert request.url.params["user"]
+        assert request.url.params["sizeThreshold"] == "0"
+        return httpx.Response(
+            200,
+            json=[
+                {"asset": approved, "size": 12, "avgPrice": 0.42},
+                {"asset": "unrelated-token", "size": 99, "avgPrice": 0.01},
+            ],
+        )
+
+    adapter = PolymarketAdapter(settings)
+    await adapter._http.aclose()
+    adapter._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    positions = await adapter.current_event_positions()
+    await adapter.close()
+
+    assert positions == ({"asset": approved, "size": 12, "avgPrice": 0.42},)

@@ -66,7 +66,8 @@ def test_every_clear_gate_allows_paper_qualification(settings: Settings) -> None
 
 
 def test_read_only_always_prohibits_orders(settings: Settings) -> None:
-    result = RiskEngine(settings).qualify(profitable_opportunity(), clear_context())
+    read_only = settings.model_copy(update={"run_mode": RunMode.READ_ONLY})
+    result = RiskEngine(read_only).qualify(profitable_opportunity(), clear_context())
     assert not result.tradeable
     assert "READ_ONLY mode prohibits orders" in result.reasons
 
@@ -163,9 +164,7 @@ def test_profit_and_return_thresholds_are_independent(settings: Settings) -> Non
 
 def test_failed_gate_reports_actual_operator_and_required_value(settings: Settings) -> None:
     paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
-    opportunity = profitable_opportunity().model_copy(
-        update={"minimum_net_profit": Decimal("249")}
-    )
+    opportunity = profitable_opportunity().model_copy(update={"minimum_net_profit": Decimal("249")})
     result = RiskEngine(paper).qualify(opportunity, clear_context())
 
     check = next(item for item in result.checks if item.code == "MINIMUM_NET_PROFIT")
@@ -178,9 +177,7 @@ def test_failed_gate_reports_actual_operator_and_required_value(settings: Settin
 
 def test_ibkr_gate_preserves_degraded_status(settings: Settings) -> None:
     paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
-    context = clear_context().model_copy(
-        update={"ibkr_status": ConnectionStatus.DEGRADED}
-    )
+    context = clear_context().model_copy(update={"ibkr_status": ConnectionStatus.DEGRADED})
     result = RiskEngine(paper).qualify(profitable_opportunity(), context)
 
     check = next(item for item in result.checks if item.code == "IBKR_CONNECTION")

@@ -1,7 +1,6 @@
 # Local environment files may contain credentials and must never be committed.
 .env
 .env.*
-!.env.example
 
 # Common private-key and certificate formats.
 *.key

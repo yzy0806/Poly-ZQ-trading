@@ -7,7 +7,7 @@ import pytest
 
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.config import Settings
-from zq_arb.domain.enums import AlertSeverity, MarginPreviewStatus
+from zq_arb.domain.enums import AlertSeverity, MarginPreviewStatus, RunMode
 from zq_arb.domain.models import BookLevel, EligibilityStatus, MarketMappingStatus, OrderBook
 from zq_arb.services.state import StateStore
 
@@ -203,7 +203,7 @@ async def test_ibkr_errors_and_configuration_warnings_are_visible(settings: Sett
 
 @pytest.mark.asyncio
 async def test_read_only_operating_state_never_arms(settings: Settings) -> None:
-    store = StateStore(settings)
+    store = StateStore(settings.model_copy(update={"run_mode": RunMode.READ_ONLY}))
     await store.set_operating_state(paused=True, kill_switch=True, armed=True)
     snapshot = await store.get()
     assert snapshot.paused and snapshot.kill_switch
@@ -212,7 +212,7 @@ async def test_read_only_operating_state_never_arms(settings: Settings) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manual_reconciliation_is_auditable_state_and_order_events_invalidate_it(
+async def test_manual_reconciliation_is_auditable_and_routine_order_events_preserve_it(
     settings: Settings,
 ) -> None:
     store = StateStore(settings)
@@ -233,9 +233,9 @@ async def test_manual_reconciliation_is_auditable_state_and_order_events_invalid
             payload={"order_id": "42", "status": "Submitted"},
         )
     )
-    invalidated = await store.get()
-    assert not invalidated.reconciliation.clean
-    assert "order status" in invalidated.reconciliation.reason
+    preserved = await store.get()
+    assert preserved.reconciliation.clean
+    assert preserved.reconciliation.confirmed_by == "operator"
 
 
 @pytest.mark.asyncio

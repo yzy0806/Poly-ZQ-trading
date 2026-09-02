@@ -4,7 +4,7 @@ Production-oriented Python and TypeScript implementation of the approved Septemb
 
 ## Authorized Stage
 
-Implementation is authorized through `READ_ONLY` and `PAPER`. The checked-in configuration template disables both venue order paths. Live trading is not authorized.
+Implementation is authorized through `READ_ONLY` and `PAPER`. The local `.env` disables both venue order paths. Live trading is not authorized.
 
 ## Repository Layout
 
@@ -26,6 +26,8 @@ scripts/                 Controlled operational and connectivity checks
 ## Local Setup
 
 1. Keep the real `.env` untracked and local. Every runtime parameter is loaded from that file or an operating-system secret injected under the same variable name.
+
+Runtime, tests, schema validation, and operational scripts use the same local `.env` as their single configuration source.
 
 2. Confirm that `IBKR_PYTHON_API_PATH` points to the official TWS Python API installation. The current machine uses TWS API 10.39.1 at `C:/TWS API/source/pythonclient`.
 
@@ -89,7 +91,11 @@ Before starting the operator terminal, fill the still-required local values for 
 
 8. Strategy capital, equity, high-water mark, fees, daily P&L, and drawdown are maintained in a persistent strategy ledger separate from IBKR account-level metrics. A `$2,000` drawdown cancels only unfilled ZQ, preserves fills, pauses and disarms the engine, and requires audited manual review.
 
-9. Version-one cross-venue discrepancies are resolved manually. The authenticated reconciliation confirmation is recorded with its source snapshot and is invalidated by reconnects, order changes, executions, cancellations, and unresolved hedge obligations.
+9. Strategy IBKR open orders, `execId` history, and the authenticated aggregate target-contract position are automatically reconciled with authenticated Polymarket open orders and trades after startup and reconnect. Routine strategy fills and status callbacks update the durable ledger instead of invalidating reconciliation; an order, position, or obligation difference fails the gate.
+
+10. `IBKR_COMMISSION_ESTIMATE=3.64` is the conservative per-contract round-trip ZQ cost floor derived from the published non-member low-volume schedule. For a 10-contract batch the model deducts at least `$36.40`; twice a higher current IBKR entry what-if commission overrides that floor.
+
+11. The cross-venue portfolio aggregates every durable strategy execution, compares the result with venue-reported quantities, and marks long ZQ and Polymarket Yes holdings to their executable best bids every 500 milliseconds. Its combined unrealized P&L is gross of commissions and fees and remains informational; it is not silently substituted into the separately persisted drawdown ledger.
 
 ## Safety Invariants
 
@@ -97,11 +103,11 @@ Before starting the operator terminal, fill the still-required local values for 
 
 2. Exactly 10 ZQ contracts are permitted per child batch, only one batch may be active, and aggregate exposure is capped at 100.
 
-3. ZQ orders are `LMT/DAY` and are never automatically repriced.
+3. ZQ orders are `BUY LMT/DAY` at the qualified best bid and are never automatically repriced. If the still-resting quantity no longer passes the scaled profit, return, fee, and exact-ask hedge-size gates, only that unfilled remainder is cancelled.
 
 4. Version 1 is structurally long-only: the engine can submit only `BUY` ZQ entries and may hedge confirmed fills only by buying the approved Polymarket Yes legs. Bid-side and No-token data are diagnostic and cannot create an order.
 
-5. Polymarket orders cannot precede a confirmed, unique IBKR `execId`.
+5. Polymarket orders cannot precede a confirmed, unique IBKR `execId`. Each fill creates durable INC25 and INC50PLUS obligations, and each hedge is a non-post-only GTC BUY limit at the latest lowest ask.
 
 6. Filled ZQ is never automatically flattened.
 

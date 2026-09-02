@@ -1,6 +1,6 @@
-"""Application services and deterministic state ownership."""
+"""Application services and deterministic state ownership.
 
-from .engine import EngineRuntime
-from .state import StateStore
-
-__all__ = ["EngineRuntime", "StateStore"]
+Import concrete services from their modules. Keeping this package initializer free
+of eager imports prevents the execution coordinator and runtime from forming an
+order-dependent import cycle.
+"""

@@ -130,13 +130,13 @@ def direct_zq_probability(
         days_after=days_after,
     )
     move_buy = implied_decision_move_bps(
-        target_ask,
+        target_bid,
         pre_meeting_effr,
         days_before=days_before,
         days_after=days_after,
     )
     move_bid_reference = implied_decision_move_bps(
-        target_bid,
+        target_ask,
         pre_meeting_effr,
         days_before=days_before,
         days_after=days_after,

@@ -39,7 +39,7 @@ export function ProbabilityPanel({ state }: { state: EngineSnapshot }) {
       <div className="flow-arrow">→</div>
       <div className="calc-block"><span>2 · CALENDAR WEIGHTING</span><div><code>Pre-meeting EFFR</code><b>{number(p.pre_meeting_effr, 4)}%</b><small>{state.effr.source} · effective {state.effr.effective_date ?? 'manual override'}</small></div><div><code>Post-decision weight</code><b>{pct(p.post_decision_weight)}</b></div><div><code>(Sep avg − EFFR) ÷ weight</code><b>{number(p.expected_move_bps, 2)} bp</b></div></div>
       <div className="flow-arrow">→</div>
-      <div className="calc-block"><span>3 · LONG-ONLY EXECUTABLE MOVE</span><div><code>Buy ZQ at ask</code><b>{number(p.executable_buy_expected_move_bps, 2)} bp</b></div><div><code>Bid-side reference</code><b>{number(p.bid_reference_expected_move_bps, 2)} bp</b><small>Non-tradable spread boundary</small></div><div><code>Adjacent states</code><b>{p.lower_step_bps ?? '—'} / {p.upper_step_bps ?? '—'} bp</b></div></div>
+      <div className="calc-block"><span>3 · LONG-ONLY ENTRY MOVE</span><div><code>BUY ZQ limit at best bid</code><b>{number(p.executable_buy_expected_move_bps, 2)} bp</b></div><div><code>Ask-side reference</code><b>{number(p.bid_reference_expected_move_bps, 2)} bp</b><small>Non-authorizing spread boundary</small></div><div><code>Adjacent states</code><b>{p.lower_step_bps ?? '—'} / {p.upper_step_bps ?? '—'} bp</b></div></div>
     </div>
     <div className="prob-summary">
       <div className="distribution">

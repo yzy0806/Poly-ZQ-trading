@@ -12,13 +12,30 @@ ALLOWED_TRANSITIONS: dict[BatchState, frozenset[BatchState]] = {
     BatchState.IDLE: frozenset({BatchState.QUALIFIED, BatchState.RECOVERY, BatchState.HALTED}),
     BatchState.QUALIFIED: frozenset({BatchState.ZQ_SUBMITTED, BatchState.IDLE, BatchState.HALTED}),
     BatchState.ZQ_SUBMITTED: frozenset(
-        {BatchState.ZQ_PARTIAL, BatchState.COMPLETE, BatchState.RECOVERY, BatchState.HALTED}
+        {
+            BatchState.ZQ_PARTIAL,
+            BatchState.CANCEL_PENDING,
+            BatchState.COMPLETE,
+            BatchState.RECOVERY,
+            BatchState.HALTED,
+        }
     ),
     BatchState.ZQ_PARTIAL: frozenset(
         {
+            BatchState.CANCEL_PENDING,
             BatchState.POLY_HEDGE_PENDING,
             BatchState.PARTIALLY_HEDGED,
             BatchState.HEDGED,
+            BatchState.RECOVERY,
+            BatchState.HALTED_MANUAL,
+        }
+    ),
+    BatchState.CANCEL_PENDING: frozenset(
+        {
+            BatchState.ZQ_PARTIAL,
+            BatchState.POLY_HEDGE_PENDING,
+            BatchState.HEDGED,
+            BatchState.COMPLETE,
             BatchState.RECOVERY,
             BatchState.HALTED_MANUAL,
         }

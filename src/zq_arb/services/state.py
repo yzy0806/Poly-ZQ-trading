@@ -12,6 +12,7 @@ from zq_arb.adapters.polymarket import update_books_from_stream_event
 from zq_arb.config import Settings
 from zq_arb.domain.enums import (
     AlertSeverity,
+    BatchState,
     ConnectionStatus,
     DataQuality,
     FarmStatus,
@@ -23,6 +24,7 @@ from zq_arb.domain.enums import (
 from zq_arb.domain.models import (
     AccountMetrics,
     AlertView,
+    BatchView,
     EffrObservation,
     EligibilityStatus,
     EngineSnapshot,
@@ -30,6 +32,7 @@ from zq_arb.domain.models import (
     MarginPreview,
     MarketMappingStatus,
     OrderBook,
+    PortfolioView,
     Quote,
     ReconciliationStatusView,
     StrategyRiskView,
@@ -270,9 +273,7 @@ class StateStore:
                         update={
                             "market": current.market or rest_book.market,
                             "tick_size": rest_book.tick_size or current.tick_size,
-                            "min_order_size": (
-                                rest_book.min_order_size or current.min_order_size
-                            ),
+                            "min_order_size": (rest_book.min_order_size or current.min_order_size),
                             "negative_risk": (
                                 rest_book.negative_risk
                                 if rest_book.negative_risk is not None
@@ -330,6 +331,7 @@ class StateStore:
         """Start a generation that requires a new complete streaming bid/ask."""
 
         generation = 0
+
         def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
             nonlocal generation
             self._month_data_types.clear()
@@ -517,9 +519,9 @@ class StateStore:
             await self._apply_pnl(event)
             return
         if event.kind in {"open_order", "order_status", "execution"}:
-            await self.invalidate_reconciliation(
-                f"IBKR {event.kind.replace('_', ' ')} event requires operator reconciliation"
-            )
+            # The durable execution coordinator owns strategy-order lifecycle
+            # events. Routine fills/status callbacks must not invalidate the
+            # venue reconciliation gate.
             return
         if event.kind == "configuration_warning":
             await self.add_alert(
@@ -617,9 +619,7 @@ class StateStore:
             limit_price=_decimal(event.payload.get("limit_price")),
             requested_at=event.received_at,
         )
-        await self.update(
-            lambda snapshot: snapshot.model_copy(update={"margin_preview": preview})
-        )
+        await self.update(lambda snapshot: snapshot.model_copy(update={"margin_preview": preview}))
 
     async def _apply_margin_preview(self, event: VenueEvent) -> None:
         order_id = int(event.payload["order_id"])
@@ -660,9 +660,7 @@ class StateStore:
             received_at=event.received_at,
             **fields,
         )
-        await self.update(
-            lambda snapshot: snapshot.model_copy(update={"margin_preview": preview})
-        )
+        await self.update(lambda snapshot: snapshot.model_copy(update={"margin_preview": preview}))
 
     async def fail_margin_preview(self, order_id: int | None, error: str) -> None:
         def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
@@ -908,6 +906,13 @@ class StateStore:
             await self.set_ibkr_health(ConnectionStatus.DEGRADED, message)
 
     async def apply_polymarket_event(self, event: VenueEvent) -> None:
+        if event.kind.lower().startswith("user_"):
+            await self.set_polymarket_health(
+                ConnectionStatus.CONNECTED,
+                f"authenticated user WebSocket: {event.kind}",
+                authenticated=True,
+            )
+            return
         if event.kind.lower() == "stream_connected":
             await self.set_polymarket_health(
                 ConnectionStatus.CONNECTED,
@@ -944,11 +949,43 @@ class StateStore:
 
         await self.update(apply)
 
+    async def set_active_batch(self, batch: BatchView) -> None:
+        active = 0 if batch.state in {BatchState.IDLE, BatchState.COMPLETE} else 1
+
+        def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
+            metadata = deepcopy(snapshot.metadata)
+            metadata["active_batches"] = active
+            return snapshot.model_copy(update={"active_batch": batch, "metadata": metadata})
+
+        await self.update(apply)
+
+    async def set_execution_state(self, batch: BatchView, portfolio: PortfolioView) -> None:
+        """Publish one consistent batch-and-portfolio ledger snapshot."""
+
+        active = 0 if batch.state in {BatchState.IDLE, BatchState.COMPLETE} else 1
+
+        def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
+            metadata = deepcopy(snapshot.metadata)
+            metadata["active_batches"] = active
+            return snapshot.model_copy(
+                update={"active_batch": batch, "portfolio": portfolio, "metadata": metadata}
+            )
+
+        await self.update(apply)
+
     async def set_strategy_risk(self, risk: StrategyRiskView) -> None:
         await self.update(lambda snapshot: snapshot.model_copy(update={"strategy_risk": risk}))
 
     async def set_drawdown_halt(self, active: bool) -> None:
         await self._set_metadata_values(drawdown_halt_active=active)
+
+    async def set_zq_position(self, quantity: Decimal) -> None:
+        """Publish the authenticated aggregate IBKR position used by the risk gate."""
+
+        integral = quantity.to_integral_value()
+        if quantity != integral:
+            raise ValueError("IBKR reported a fractional ZQ futures position")
+        await self._set_metadata_values(zq_position=int(integral))
 
     async def confirm_reconciliation(
         self,
@@ -972,6 +1009,35 @@ class StateStore:
                         confirmed_at=now,
                         confirmed_snapshot_id=snapshot_id,
                         reason=reason,
+                    ),
+                }
+            )
+
+        await self.update(apply)
+
+    async def set_automated_reconciliation(
+        self,
+        *,
+        clean: bool,
+        reason: str,
+        snapshot_id: int,
+    ) -> None:
+        now = utc_now()
+
+        def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
+            metadata = deepcopy(snapshot.metadata)
+            metadata["reconciliation_clean"] = clean
+            return snapshot.model_copy(
+                update={
+                    "metadata": metadata,
+                    "reconciliation": ReconciliationStatusView(
+                        clean=clean,
+                        method="AUTHENTICATED_VENUE_LEDGER",
+                        confirmed_by="SYSTEM" if clean else None,
+                        confirmed_at=now if clean else None,
+                        confirmed_snapshot_id=snapshot_id if clean else None,
+                        reason=reason,
+                        invalidated_at=None if clean else now,
                     ),
                 }
             )

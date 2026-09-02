@@ -21,7 +21,8 @@ export interface HedgeDepthView {
   available_shares: DecimalValue
   shortfall_shares: DecimalValue
   price_cap: DecimalValue
-  maker_price: DecimalValue
+  marketable_limit_price: DecimalValue
+  best_ask_shares: DecimalValue
   emergency_vwap: DecimalValue
   worst_price: DecimalValue
   sufficient: boolean
@@ -301,6 +302,34 @@ export interface StrategyRisk {
   valued_at: string
 }
 
+export interface PortfolioPosition {
+  venue: 'IBKR' | 'POLYMARKET'
+  instrument: string
+  label: string
+  strategy_quantity: DecimalValue
+  venue_quantity: DecimalValue
+  average_entry_price: DecimalValue
+  mark_price: DecimalValue
+  mark_source: string
+  multiplier: DecimalValue
+  cost_basis: DecimalValue
+  market_value: DecimalValue
+  unrealized_pnl: DecimalValue
+  simulated: boolean
+  reconciled: boolean | null
+  mark_updated_at: string | null
+}
+
+export interface PortfolioView {
+  positions: PortfolioPosition[]
+  zq_unrealized_pnl: DecimalValue
+  polymarket_unrealized_pnl: DecimalValue
+  combined_unrealized_pnl: DecimalValue
+  valuation_complete: boolean
+  valuation_reason: string
+  valued_at: string
+}
+
 export interface AlertView {
   alert_id: string
   severity: string
@@ -319,6 +348,10 @@ export interface HedgeObligation {
   due_shares: DecimalValue
   confirmed_shares: DecimalValue
   deficit_shares: DecimalValue
+  state: string
+  latest_order_id: string | null
+  latest_limit_price: DecimalValue
+  reprice_count: number
 }
 
 export interface BatchView {
@@ -329,6 +362,11 @@ export interface BatchView {
   filled_quantity: DecimalValue
   remaining_quantity: DecimalValue
   limit_price: DecimalValue
+  zq_order_status: string | null
+  cancel_reason: string | null
+  residual_minimum_net_profit: DecimalValue
+  residual_required_profit: DecimalValue
+  residual_return_on_capital_bps: DecimalValue
   obligations: HedgeObligation[]
   updated_at: string
 }
@@ -367,6 +405,7 @@ export interface EngineSnapshot {
   margin_preview: MarginPreview
   reconciliation: ReconciliationStatus
   strategy_risk: StrategyRisk
+  portfolio: PortfolioView
   probabilities: ProbabilitySnapshot
   probability_comparisons: MarketProbabilityComparison[]
   opportunities: Opportunity[]

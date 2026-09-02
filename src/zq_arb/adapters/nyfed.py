@@ -22,9 +22,7 @@ def _decimal(value: Any, *, field: str, required: bool = False) -> Decimal | Non
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
-        raise NewYorkFedProtocolError(
-            f"New York Fed EFFR response has invalid {field}"
-        ) from exc
+        raise NewYorkFedProtocolError(f"New York Fed EFFR response has invalid {field}") from exc
     if not number.is_finite():
         raise NewYorkFedProtocolError(f"New York Fed EFFR response has non-finite {field}")
     return number

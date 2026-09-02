@@ -89,7 +89,7 @@ describe('ProbabilityPanel', () => {
     expect(screen.getByText('3')).toBeTruthy()
     expect(screen.getByText('== 4')).toBeTruthy()
     expect(screen.getByText('ZQU6 subscription generation is not current')).toBeTruthy()
-    expect(screen.getByText(/LONG-ONLY EXECUTABLE MOVE/)).toBeTruthy()
+    expect(screen.getByText(/LONG-ONLY ENTRY MOVE/)).toBeTruthy()
     expect(screen.getByText('Bid size')).toBeTruthy()
     expect(screen.getByText('12,345')).toBeTruthy()
     expect(screen.getByText('Ask size')).toBeTruthy()

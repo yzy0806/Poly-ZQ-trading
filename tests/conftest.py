@@ -10,7 +10,7 @@ from zq_arb.config import Settings
 
 @pytest.fixture(scope="session")
 def settings() -> Settings:
-    configured = Settings(_env_file=Path(".env.example"))
+    configured = Settings(_env_file=Path(".env"))
     return configured.model_copy(
         update={
             "effr_source": "MANUAL",

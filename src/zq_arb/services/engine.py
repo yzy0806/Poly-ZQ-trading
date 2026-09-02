@@ -12,7 +12,15 @@ from zq_arb.adapters.events import VenueEvent
 from zq_arb.adapters.ibkr import IbkrAdapter
 from zq_arb.adapters.nyfed import NewYorkFedEffrAdapter
 from zq_arb.adapters.polymarket import PolymarketAdapter, PolymarketProtocolError
-from zq_arb.analytics.payoff import CostInputs, build_three_state_opportunity
+from zq_arb.analytics.payoff import (
+    CostInputs,
+    build_three_state_opportunity,
+    conservative_ibkr_round_trip_commission,
+    hedge_shares_per_contract,
+    round_shares_up,
+    walk_asks,
+)
+from zq_arb.analytics.portfolio import value_strategy_portfolio
 from zq_arb.analytics.probability import (
     DiagnosticPrices,
     direct_zq_probability,
@@ -46,6 +54,7 @@ from zq_arb.domain.models import (
     StrategyRiskView,
     utc_now,
 )
+from zq_arb.execution.coordinator import ExecutionCoordinator
 from zq_arb.persistence.database import Database
 from zq_arb.persistence.repository import Repository
 from zq_arb.risk.engine import GateContext, RiskEngine
@@ -74,11 +83,21 @@ class EngineRuntime:
             NewYorkFedEffrAdapter(settings) if settings.effr_source == "NYFED_API" else None
         )
         self.polymarket = PolymarketAdapter(settings)
+        self.execution = ExecutionCoordinator(
+            settings=settings,
+            repository=self.repository,
+            state=self.state,
+            ibkr=self.ibkr,
+            polymarket=self.polymarket,
+        )
         self.risk = RiskEngine(settings)
         self._tasks: list[asyncio.Task[None]] = []
         self._stopping = asyncio.Event()
         self._polymarket_resync_requested = asyncio.Event()
         self._margin_preview_refresh_requested = asyncio.Event()
+        self._polymarket_fee_parameters: dict[str, dict[str, Decimal]] = {}
+        self._polymarket_fee_parameters_at: datetime | None = None
+        self._event_overflow_halted = False
 
     async def start(self) -> None:
         await self.database.initialize()
@@ -86,6 +105,7 @@ class EngineRuntime:
         await self.state.set_strategy_risk(
             await self.repository.load_or_create_strategy_risk(self.settings)
         )
+        await self.execution.recover()
         await self.repository.audit(
             actor="SYSTEM",
             action="ENGINE_START",
@@ -111,11 +131,33 @@ class EngineRuntime:
                     self._ibkr_market_data_supervisor_loop(),
                     name="ibkr-market-data-supervisor",
                 ),
-                asyncio.create_task(
-                    self._ibkr_margin_preview_loop(), name="ibkr-margin-preview"
-                ),
+                asyncio.create_task(self._ibkr_margin_preview_loop(), name="ibkr-margin-preview"),
             )
         )
+        if (
+            self.settings.polymarket_order_submission_enabled
+            and not self.settings.simulate_polymarket_fills
+            and (
+                self.settings.run_mode.value == "PAPER"
+                or (self.settings.run_mode.is_live and self.settings.live_trading_enabled)
+            )
+        ):
+            self._tasks.extend(
+                (
+                    asyncio.create_task(
+                        self._polymarket_user_stream_loop(),
+                        name="polymarket-user-stream",
+                    ),
+                    asyncio.create_task(
+                        self._polymarket_account_reconciliation_loop(),
+                        name="polymarket-account-reconciliation",
+                    ),
+                    asyncio.create_task(
+                        self._polymarket_order_heartbeat_loop(),
+                        name="polymarket-order-heartbeat",
+                    ),
+                )
+            )
         if self.settings.effr_source == "NYFED_API":
             self._tasks.append(
                 asyncio.create_task(self._effr_reference_loop(), name="nyfed-effr-reference")
@@ -145,17 +187,16 @@ class EngineRuntime:
             event = await self.events.get()
             try:
                 if event.venue == "IBKR":
+                    await self.execution.handle_ibkr_event(event)
                     await self.state.apply_ibkr_event(event)
-                    if (
-                        event.kind in {"connection", "account_summary", "pnl"}
-                        or (
-                            event.kind in {"tick_price", "tick_size"}
-                            and str(event.payload.get("month") or "")
-                            == self.settings.ibkr_zq_contract_month
-                        )
+                    if event.kind in {"connection", "account_summary", "pnl"} or (
+                        event.kind in {"tick_price", "tick_size"}
+                        and str(event.payload.get("month") or "")
+                        == self.settings.ibkr_zq_contract_month
                     ):
                         self._margin_preview_refresh_requested.set()
                 else:
+                    await self.execution.handle_polymarket_event(event)
                     await self.state.apply_polymarket_event(event)
             except PolymarketProtocolError as exc:
                 LOGGER.warning("polymarket_book_resync_required", kind=event.kind, error=str(exc))
@@ -187,6 +228,7 @@ class EngineRuntime:
                 await self.state.begin_ibkr_subscriptions()
                 self.ibkr.request_contracts_and_market_data()
                 await self.state.set_ibkr_resubscribe_required(False)
+                await self.execution.begin_ibkr_reconciliation()
                 self.ibkr.request_open_orders_and_executions()
                 self._margin_preview_refresh_requested.set()
                 attempts = 0
@@ -223,6 +265,20 @@ class EngineRuntime:
 
         while not self._stopping.is_set():
             snapshot = await self.state.get()
+            if self.ibkr.event_queue_overflowed and not self._event_overflow_halted:
+                self._event_overflow_halted = True
+                await self.state.set_operating_state(
+                    kill_switch=True,
+                    paused=True,
+                    armed=False,
+                )
+                await self.state.add_alert(
+                    AlertSeverity.CRITICAL,
+                    "VENUE_EVENT_QUEUE_OVERFLOW",
+                    "An IBKR callback was lost because the venue event queue overflowed; "
+                    "trading is halted pending restart and reconciliation",
+                    flashing=True,
+                )
             if self.ibkr.connected and snapshot.metadata.get("ibkr_resubscribe_required"):
                 try:
                     await self.state.begin_ibkr_subscriptions(
@@ -251,18 +307,15 @@ class EngineRuntime:
                 .get(self.settings.ibkr_zq_contract_month, {})
                 .get("verified")
             )
-            due = (
-                loop.time() - last_requested
-                >= self.settings.ibkr_margin_preview_interval_seconds
-            )
+            due = loop.time() - last_requested >= self.settings.ibkr_margin_preview_interval_seconds
             preview = snapshot.margin_preview
             preview_age = preview.age_seconds()
             preview_matches = bool(
                 preview.contract_month == self.settings.ibkr_zq_contract_month
                 and preview.quantity == self.settings.ibkr_zq_child_order_quantity
                 and target is not None
-                and target.ask is not None
-                and preview.limit_price == target.ask
+                and target.bid is not None
+                and preview.limit_price == target.bid
             )
             refresh_needed = bool(
                 self._margin_preview_refresh_requested.is_set()
@@ -281,7 +334,7 @@ class EngineRuntime:
                 and farm.status is FarmStatus.CONNECTED
                 and verified
                 and target is not None
-                and target.ask is not None
+                and target.bid is not None
                 and target.subscription_status is SubscriptionStatus.ACTIVE
                 and target.market_data_type == 1
                 and target.has_valid_two_sided_market
@@ -293,20 +346,19 @@ class EngineRuntime:
             last_requested = loop.time()
             self._margin_preview_refresh_requested.clear()
             try:
-                assert target is not None and target.ask is not None
+                assert target is not None and target.bid is not None
                 order_id = self.ibkr.request_zq_margin_preview(
                     month=self.settings.ibkr_zq_contract_month,
-                    limit_price=target.ask,
+                    limit_price=target.bid,
                     quantity=self.settings.ibkr_zq_child_order_quantity,
                 )
                 deadline = loop.time() + self.settings.ibkr_margin_preview_timeout_seconds
                 while loop.time() < deadline:
                     preview = (await self.state.get()).margin_preview
-                    if (
-                        preview.order_id == order_id
-                        and preview.status
-                        in {MarginPreviewStatus.AVAILABLE, MarginPreviewStatus.FAILED}
-                    ):
+                    if preview.order_id == order_id and preview.status in {
+                        MarginPreviewStatus.AVAILABLE,
+                        MarginPreviewStatus.FAILED,
+                    }:
                         break
                     await asyncio.sleep(0.05)
                 else:
@@ -362,6 +414,8 @@ class EngineRuntime:
                         "polymarket_book_reconciliation_mismatch",
                         mismatch_count=len(mismatches),
                     )
+                self._polymarket_fee_parameters = await self.polymarket.fetch_hedge_fee_parameters()
+                self._polymarket_fee_parameters_at = utc_now()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -477,12 +531,84 @@ class EngineRuntime:
                     )
                 await asyncio.sleep(self.settings.polymarket_reconnect_backoff_seconds)
 
+    async def _polymarket_user_stream_loop(self) -> None:
+        attempts = 0
+        while not self._stopping.is_set():
+            try:
+                async for event in self.polymarket.authenticated_user_stream():
+                    attempts = 0
+                    await self.events.put(event)
+                raise ConnectionError("Polymarket authenticated user stream ended")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                attempts += 1
+                LOGGER.warning("polymarket_user_stream_failed", attempt=attempts, error=str(exc))
+                await self.state.set_polymarket_health(
+                    ConnectionStatus.DEGRADED,
+                    "authenticated user stream unavailable; REST reconciliation active",
+                    authenticated=False,
+                )
+                if attempts >= self.settings.polymarket_reconnect_max_attempts:
+                    await self.state.add_alert(
+                        AlertSeverity.CRITICAL,
+                        "POLYMARKET_USER_STREAM_RECONNECTING",
+                        "Authenticated Polymarket user stream reconnect threshold reached",
+                        flashing=True,
+                    )
+                    attempts = 0
+                await asyncio.sleep(self.settings.polymarket_reconnect_backoff_seconds)
+
+    async def _polymarket_account_reconciliation_loop(self) -> None:
+        interval = max(5, self.settings.polymarket_book_snapshot_interval_seconds)
+        while not self._stopping.is_set():
+            try:
+                await self.execution.reconcile_polymarket_account()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("polymarket_account_reconciliation_failed", error=str(exc))
+                await self.state.add_alert(
+                    AlertSeverity.WARNING,
+                    "POLYMARKET_ACCOUNT_RECONCILIATION_FAILED",
+                    f"Authenticated account reconciliation failed: {type(exc).__name__}",
+                )
+            try:
+                await asyncio.wait_for(self._stopping.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+
+    async def _polymarket_order_heartbeat_loop(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                await self.polymarket.send_order_heartbeat()
+                await self.state.resolve_alerts("POLYMARKET_ORDER_HEARTBEAT")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("polymarket_order_heartbeat_failed", error=str(exc))
+                await self.state.add_alert(
+                    AlertSeverity.CRITICAL,
+                    "POLYMARKET_ORDER_HEARTBEAT_FAILED",
+                    "Polymarket cancel-on-disconnect heartbeat failed; open hedge orders "
+                    "may be auto-cancelled and will be reconciled",
+                    flashing=True,
+                )
+            try:
+                await asyncio.wait_for(
+                    self._stopping.wait(),
+                    timeout=self.settings.polymarket_user_ws_ping_seconds,
+                )
+            except TimeoutError:
+                pass
+
     async def _analytics_loop(self) -> None:
         interval = self.settings.engine_state_publish_interval_ms / 1_000
         while not self._stopping.is_set():
             try:
                 updated = await self.state.update(self._calculate)
                 await self._enforce_strategy_drawdown(updated)
+                await self.execution.cycle(updated)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -505,6 +631,9 @@ class EngineRuntime:
             for month, quote in snapshot.quotes.items()
         }
         snapshot = snapshot.model_copy(update={"quotes": qualified_quotes})
+        snapshot = snapshot.model_copy(
+            update={"portfolio": value_strategy_portfolio(snapshot)}
+        )
         snapshot = snapshot.model_copy(
             update={"margin_preview": self._margin_preview_view(snapshot, now)}
         )
@@ -615,13 +744,52 @@ class EngineRuntime:
         opportunities: list[Opportunity] = []
         _, _, _, incremental_margin = self._margin_preview_qualification(snapshot, now)
         emergency_reserve = Decimal("0")
+        q25 = round_shares_up(
+            hedge_shares_per_contract(25) * Decimal(self.settings.ibkr_zq_child_order_quantity)
+        )
+        q50 = round_shares_up(
+            hedge_shares_per_contract(50) * Decimal(self.settings.ibkr_zq_child_order_quantity)
+        )
+        polymarket_fees = Decimal("0")
+        if long_book_25 is not None and long_book_25.best_ask is not None:
+            emergency25 = walk_asks(
+                long_book_25.asks,
+                q25,
+                price_cap=self.settings.polymarket_emergency_max_price,
+            )
+            fee_prices25 = [long_book_25.best_ask]
+            if emergency25.vwap is not None:
+                fee_prices25.append(emergency25.vwap)
+            polymarket_fees += max(
+                self._polymarket_taker_fee("INC25", q25, value) for value in fee_prices25
+            )
+        if long_book_50 is not None and long_book_50.best_ask is not None:
+            emergency50 = walk_asks(
+                long_book_50.asks,
+                q50,
+                price_cap=self.settings.polymarket_emergency_max_price,
+            )
+            fee_prices50 = [long_book_50.best_ask]
+            if emergency50.vwap is not None:
+                fee_prices50.append(emergency50.vwap)
+            polymarket_fees += max(
+                self._polymarket_taker_fee("INC50PLUS", q50, value) for value in fee_prices50
+            )
         costs = CostInputs(
+            ibkr_commission=conservative_ibkr_round_trip_commission(
+                contracts=self.settings.ibkr_zq_child_order_quantity,
+                configured_per_contract=self.settings.ibkr_commission_estimate,
+                entry_preview_commission=(
+                    snapshot.margin_preview.commission if incremental_margin is not None else None
+                ),
+            ),
+            polymarket_fees=polymarket_fees,
             model_reserve=self.settings.model_risk_reserve_usd,
             operational_reserve=self.settings.operational_risk_reserve_usd,
             effr_basis_reserve=self.settings.effr_basis_reserve_usd,
         )
         if probabilities.pre_meeting_effr is not None and books_available:
-            price = target_quote.ask
+            price = target_quote.bid
             book25 = long_book_25
             book50 = long_book_50
             if price is not None and book25 is not None and book50 is not None:
@@ -683,6 +851,15 @@ class EngineRuntime:
                 "maximum_market_event_age_ms": max(market_event_ages, default=None),
                 "cross_venue_snapshot_qualified": execution_qualified,
                 "cross_venue_snapshot_at": now.isoformat(),
+                "polymarket_fee_parameters": {
+                    code: {name: str(value) for name, value in values.items()}
+                    for code, values in self._polymarket_fee_parameters.items()
+                },
+                "polymarket_fee_parameters_at": (
+                    self._polymarket_fee_parameters_at.isoformat()
+                    if self._polymarket_fee_parameters_at is not None
+                    else None
+                ),
             }
         )
         return snapshot.model_copy(
@@ -798,6 +975,7 @@ class EngineRuntime:
                 "positive and uncrossed",
                 f"{label} bid/ask is incomplete or crossed",
             )
+
         quote_checks("ZQU6", "ZQU6", target_quote)
         add(
             "PRE_MEETING_EFFR",
@@ -835,6 +1013,51 @@ class EngineRuntime:
             ConnectionStatus.CONNECTED.value,
             "Polymarket market WebSocket is not connected",
         )
+        fee_parameters_available = all(
+            code in self._polymarket_fee_parameters for code in ("INC25", "INC50PLUS")
+        )
+        fee_age_seconds = (
+            (now - self._polymarket_fee_parameters_at).total_seconds()
+            if self._polymarket_fee_parameters_at is not None
+            else None
+        )
+        fee_parameters_current = fee_parameters_available and (
+            fee_age_seconds is not None
+            and fee_age_seconds
+            <= max(60, self.settings.polymarket_book_snapshot_interval_seconds * 2)
+        )
+        add(
+            "POLYMARKET_TAKER_FEES",
+            "Current Polymarket taker-fee parameters",
+            fee_parameters_current,
+            ", ".join(
+                f"{code}={self._polymarket_fee_parameters.get(code)}"
+                for code in ("INC25", "INC50PLUS")
+            )
+            + f"; age={fee_age_seconds}",
+            "==",
+            "current parameters loaded for both hedge markets",
+            "current Polymarket taker-fee parameters are unavailable",
+        )
+        entry_commission = snapshot.margin_preview.commission
+        commission = conservative_ibkr_round_trip_commission(
+            contracts=self.settings.ibkr_zq_child_order_quantity,
+            configured_per_contract=self.settings.ibkr_commission_estimate,
+            entry_preview_commission=entry_commission,
+        )
+        configured_commission = self.settings.ibkr_commission_estimate * Decimal(
+            self.settings.ibkr_zq_child_order_quantity
+        )
+        add(
+            "IBKR_COMMISSION_ESTIMATE",
+            "Conservative IBKR BUY-10 round-trip commission",
+            commission >= configured_commission,
+            f"{commission} (entry what-if={entry_commission})",
+            ">=",
+            f"configured floor {configured_commission} USD",
+            "IBKR round-trip commission is below the configured floor",
+            unit="USD",
+        )
         for code, label, book in (
             ("INC25_YES_BOOK", "INC25 YES hedge book", long_book_25),
             ("INC50PLUS_YES_BOOK", "INC50PLUS YES hedge book", long_book_50),
@@ -857,6 +1080,14 @@ class EngineRuntime:
                 f"{label} is unavailable or WebSocket-unsynchronized",
             )
         return tuple(checks)
+
+    def _polymarket_taker_fee(self, code: str, shares: Decimal, price: Decimal) -> Decimal:
+        parameters = self._polymarket_fee_parameters.get(code)
+        if parameters is None:
+            return Decimal("0")
+        rate = parameters["rate"]
+        exponent = parameters["exponent"]
+        return shares * rate * ((price * (Decimal("1") - price)) ** exponent)
 
     def _qualify_quote(self, quote: Quote, *, generation: int) -> Quote:
         role = quote.role
@@ -947,9 +1178,7 @@ class EngineRuntime:
             if preview.projected_excess_liquidity is not None:
                 projected_excess = preview.projected_excess_liquidity
             elif snapshot.account.full_excess_liquidity is not None:
-                projected_excess = (
-                    snapshot.account.full_excess_liquidity - next_batch_margin
-                )
+                projected_excess = snapshot.account.full_excess_liquidity - next_batch_margin
         projected_cushion = None
         if (
             projected_excess is not None
@@ -969,14 +1198,12 @@ class EngineRuntime:
             target_subscription_qualified=target_subscription_qualified,
             effr_qualified=effr_qualified,
             cross_venue_snapshot_qualified=(
-                target_subscription_qualified
-                and effr_qualified
-                and books_fresh
+                target_subscription_qualified and effr_qualified and books_fresh
             ),
             contract_verified=contract_verified,
             full_hedge_depth_available=bool(opportunity.hedge_depth)
             and all(
-                depth.sufficient and depth.maker_price is not None
+                depth.sufficient and depth.marketable_limit_price is not None
                 for depth in opportunity.hedge_depth
             ),
             margin_preview_available=margin_available,
@@ -1016,18 +1243,16 @@ class EngineRuntime:
             and preview.quantity == self.settings.ibkr_zq_child_order_quantity
             and preview.side.value == "BUY"
             and target is not None
-            and target.ask is not None
-            and preview.limit_price == target.ask
+            and target.bid is not None
+            and preview.limit_price == target.bid
         )
-        fresh = bool(
-            age is not None and age <= self.settings.ibkr_margin_preview_max_age_seconds
-        )
+        fresh = bool(age is not None and age <= self.settings.ibkr_margin_preview_max_age_seconds)
         available = preview.available and matches and fresh and not preview.warning_text
         actual = (
             f"raw-status={preview.status.value}; order={preview.order_id or 'none'}; "
             f"month={preview.contract_month or 'none'}; qty={preview.quantity or 'none'}; "
             f"side={preview.side.value}; age={age if age is not None else 'unavailable'}s; "
-            f"limit={preview.limit_price}; target-limit={target.ask if target else None}; "
+            f"limit={preview.limit_price}; target-limit={target.bid if target else None}; "
             f"initial-margin-change={preview.init_margin_change}"
         )
         if available:
@@ -1047,8 +1272,7 @@ class EngineRuntime:
                     if preview.status is MarginPreviewStatus.PENDING
                     else "REFRESH_REQUIRED; " + actual
                 ),
-                preview.error
-                or "IBKR BUY-10 ZQ what-if preview has not completed",
+                preview.error or "IBKR BUY-10 ZQ what-if preview has not completed",
                 None,
             )
         reasons: list[str] = []
@@ -1064,11 +1288,7 @@ class EngineRuntime:
             )
         if preview.warning_text:
             reasons.append(f"IBKR warning: {preview.warning_text}")
-        status = (
-            "FAILED"
-            if preview.status is MarginPreviewStatus.FAILED
-            else "REFRESH_REQUIRED"
-        )
+        status = "FAILED" if preview.status is MarginPreviewStatus.FAILED else "REFRESH_REQUIRED"
         return False, f"{status}; {actual}", "; ".join(reasons), None
 
     def _margin_preview_view(
@@ -1097,9 +1317,7 @@ class EngineRuntime:
             }
         )
 
-    def _book(
-        self, snapshot: EngineSnapshot, leg_code: str, *, yes: bool
-    ) -> OrderBook | None:
+    def _book(self, snapshot: EngineSnapshot, leg_code: str, *, yes: bool) -> OrderBook | None:
         for leg in self.settings.market_legs:
             if leg.code == leg_code:
                 return snapshot.books.get(leg.yes_token_id if yes else leg.no_token_id)
@@ -1160,12 +1378,7 @@ class EngineRuntime:
     ) -> StrategyRiskView:
         current = (await self.state.get()).strategy_risk
         timestamp = valued_at or utc_now()
-        equity = (
-            current.allocated_capital
-            + cumulative_realized_pnl
-            + unrealized_pnl
-            - fees
-        )
+        equity = current.allocated_capital + cumulative_realized_pnl + unrealized_pnl - fees
         high_water_mark = max(current.high_water_mark, equity)
         risk = StrategyRiskView(
             allocated_capital=current.allocated_capital,

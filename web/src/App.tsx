@@ -4,6 +4,7 @@ import type { AlertView, EngineSnapshot } from './types'
 import { Header } from './components/Header'
 import { ProbabilityPanel } from './components/ProbabilityPanel'
 import { OpportunityPanel } from './components/OpportunityPanel'
+import { PortfolioPanel } from './components/PortfolioPanel'
 import { ExecutionPanel } from './components/ExecutionPanel'
 import { RiskPanel } from './components/RiskPanel'
 import { HealthPanel } from './components/HealthPanel'
@@ -50,5 +51,5 @@ export default function App() {
     catch (error) { setControlError(error instanceof Error ? error.message : 'Control request failed') }
   }
   const openControl = (action: string) => { setSelectedAction(action); setControlError('') }
-  return <div className="app"><Header state={state} onControl={openControl} />{emergency && <EmergencyBanner alert={emergency} acknowledge={() => openControl('ACKNOWLEDGE_ALERT')} />}<main className="dashboard"><ProbabilityPanel state={state} /><OpportunityPanel opportunities={state.opportunities} /><ExecutionPanel batch={state.active_batch} /><RiskPanel account={state.account} preview={state.margin_preview} reconciliation={state.reconciliation} strategyRisk={state.strategy_risk} onControl={openControl} /><HealthPanel state={state} /></main><footer><span>Snapshot #{state.snapshot_id}</span><span>Generated {new Date(state.generated_at).toLocaleString()}</span><span>All prices and decisions originate from backend snapshot {state.snapshot_id}.</span></footer>{selectedAction && <ControlDialog action={selectedAction} close={() => setSelectedAction(null)} error={controlError} submit={(reason, secret) => void submitControl(reason, secret, selectedAction === 'ACKNOWLEDGE_ALERT' ? emergency : undefined)} />}</div>
+  return <div className="app"><Header state={state} onControl={openControl} />{emergency && <EmergencyBanner alert={emergency} acknowledge={() => openControl('ACKNOWLEDGE_ALERT')} />}<main className="dashboard"><ProbabilityPanel state={state} /><OpportunityPanel opportunities={state.opportunities} /><PortfolioPanel portfolio={state.portfolio} /><ExecutionPanel batch={state.active_batch} /><RiskPanel account={state.account} preview={state.margin_preview} reconciliation={state.reconciliation} strategyRisk={state.strategy_risk} onControl={openControl} /><HealthPanel state={state} /></main><footer><span>Snapshot #{state.snapshot_id}</span><span>Generated {new Date(state.generated_at).toLocaleString()}</span><span>All prices and decisions originate from backend snapshot {state.snapshot_id}.</span></footer>{selectedAction && <ControlDialog action={selectedAction} close={() => setSelectedAction(null)} error={controlError} submit={(reason, secret) => void submitControl(reason, secret, selectedAction === 'ACKNOWLEDGE_ALERT' ? emergency : undefined)} />}</div>
 }

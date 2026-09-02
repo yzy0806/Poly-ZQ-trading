@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,18 @@ def test_live_mode_rejects_zero_reserves(settings: Settings) -> None:
         Settings.model_validate(payload)
 
 
+def test_live_mode_requires_an_explicit_ibkr_account(settings: Settings) -> None:
+    configured = settings.model_copy(
+        update={
+            "ibkr_account_id": SecretStr("REPLACE_IN_LOCAL_ENV"),
+            "model_risk_reserve_usd": 1,
+            "operational_risk_reserve_usd": 1,
+            "effr_basis_reserve_usd": 1,
+        }
+    )
+    assert "IBKR_ACCOUNT_ID is absent" in configured.live_readiness_errors()
+
+
 def test_subscription_months_are_target_plus_two_diagnostics(
     settings: Settings,
 ) -> None:
@@ -55,12 +68,17 @@ def test_manual_effr_is_percentage_points_and_range_checked(settings: Settings) 
 
 
 def test_unknown_and_duplicate_env_keys_are_rejected(tmp_path: Path) -> None:
-    example = tmp_path / ".env.example"
     actual = tmp_path / ".env"
-    example.write_text("KNOWN=value\n", encoding="utf-8")
-    actual.write_text("KNOWN=one\nKNOWN=two\nUNKNOWN=three\n", encoding="utf-8")
+    actual.write_text(
+        "RUN_MODE=one\nRUN_MODE=two\nUNKNOWN=three\n",
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match=r"duplicate variables.*unknown variables"):
-        validate_environment_schema(actual, example)
+        validate_environment_schema(actual)
+
+
+def test_commission_estimate_is_round_trip_per_contract(settings: Settings) -> None:
+    assert settings.ibkr_commission_estimate == Decimal("3.64")
 
 
 def test_recursive_secret_redaction() -> None:
