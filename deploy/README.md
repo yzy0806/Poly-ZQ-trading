@@ -22,6 +22,10 @@ The script creates `/etc/zq-arb/zq-arb.env` once, generates independent dashboar
 the SQLite and backup directories, and enables the online-backup timer. It never overwrites an
 existing environment file.
 
+The Cloudflare Tunnel token is stored only at `/etc/cloudflared/trade.token` with mode `0600`.
+The hardened `cloudflared-trade.service` loads it through systemd credentials, so the token is not
+placed in the service command line or the repository.
+
 ## Immutable rollout
 
 Authenticate Docker to `ghcr.io` with a credential limited to `read:packages`, then deploy the

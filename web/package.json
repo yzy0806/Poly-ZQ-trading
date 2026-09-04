@@ -19,6 +19,7 @@
     "@eslint/js": "latest",
     "@testing-library/jest-dom": "latest",
     "@testing-library/react": "latest",
+    "@types/node": "24.13.3",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "eslint": "latest",

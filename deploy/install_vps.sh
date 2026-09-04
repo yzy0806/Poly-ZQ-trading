@@ -30,6 +30,8 @@ install -m 0644 "$ROOT_DIR/deploy/systemd/zq-arb-backup.service" \
     /etc/systemd/system/zq-arb-backup.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/zq-arb-backup.timer" \
     /etc/systemd/system/zq-arb-backup.timer
+install -m 0644 "$ROOT_DIR/deploy/systemd/cloudflared-trade.service" \
+    /etc/systemd/system/cloudflared-trade.service
 
 docker network inspect ib-gateway_default >/dev/null
 systemctl daemon-reload

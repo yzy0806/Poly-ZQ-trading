@@ -1,0 +1,30 @@
+[Unit]
+Description=Cloudflare Tunnel for trade.cardiuscapital.com
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=notify
+DynamicUser=yes
+LoadCredential=tunnel-token:/etc/cloudflared/trade.token
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token-file %d/tunnel-token
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
