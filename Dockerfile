@@ -21,17 +21,17 @@ RUN uv sync --locked --no-dev --no-install-project
 
 FROM debian:bookworm-slim AS ibapi-source
 
-ARG IBKR_API_COMMIT=f397cc931feb691394b725ed44f5f327503bf05f
+ARG IBKR_API_URL=https://interactivebrokers.github.io/downloads/twsapi_macunix.1050.01.zip
+ARG IBKR_API_SHA256=aa065722ca732a41aab202c7bb72932e179b86e7ec51cefa063eb1983fe9f597
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && apt-get install --yes --no-install-recommends ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/* \
-    && git init /source \
-    && git -C /source remote add origin https://github.com/InteractiveBrokers/tws-api.git \
-    && git -C /source fetch --depth 1 origin "${IBKR_API_COMMIT}" \
-    && git -C /source checkout --detach FETCH_HEAD \
-    && test -f /source/source/pythonclient/ibapi/client.py \
-    && test -f /source/source/pythonclient/ibapi/order_cancel.py \
-    && rm -rf /source/.git
+    && curl --fail --show-error --silent --location "${IBKR_API_URL}" --output /tmp/twsapi.zip \
+    && echo "${IBKR_API_SHA256}  /tmp/twsapi.zip" | sha256sum --check --strict \
+    && unzip -q /tmp/twsapi.zip -d /source \
+    && test -f /source/IBJts/source/pythonclient/ibapi/client.py \
+    && test -f /source/IBJts/source/pythonclient/ibapi/order_cancel.py \
+    && rm -f /tmp/twsapi.zip
 
 
 FROM python:3.12-slim-bookworm AS runtime
@@ -54,7 +54,7 @@ RUN groupadd --gid 10001 zqarb \
 
 WORKDIR /app
 COPY --from=python-deps /app/.venv /app/.venv
-COPY --from=ibapi-source /source/source/pythonclient /opt/ibapi
+COPY --from=ibapi-source /source/IBJts/source/pythonclient /opt/ibapi
 COPY src/ /app/src/
 COPY --from=dashboard-build /build/web/dist /app/web/dist
 
