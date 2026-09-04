@@ -339,22 +339,14 @@ class ScenarioPnl(StrictModel):
     inc50plus_pnl: Decimal
     polymarket_pnl: Decimal
     gross_pnl: Decimal
-    costs: Decimal
-    reserves: Decimal
-    net_pnl: Decimal
+    costs: Decimal | None
+    net_pnl: Decimal | None
 
 
 class OpportunityCostBreakdown(StrictModel):
     ibkr_commission: Decimal
-    polymarket_fees: Decimal
-    zq_slippage_reserve: Decimal
-    polymarket_slippage_reserve: Decimal
-    rounding_reserve: Decimal
-    explicit_costs: Decimal
-    model_reserve: Decimal
-    operational_reserve: Decimal
-    effr_basis_reserve: Decimal
-    reserves: Decimal
+    polymarket_fees: Decimal | None
+    explicit_costs: Decimal | None
 
 
 class OpportunityCalculation(StrictModel):
@@ -464,20 +456,6 @@ class ReconciliationStatusView(StrictModel):
     invalidated_at: datetime | None = None
 
 
-class StrategyRiskView(StrictModel):
-    allocated_capital: Decimal = Decimal("0")
-    cumulative_realized_pnl: Decimal = Decimal("0")
-    unrealized_pnl: Decimal = Decimal("0")
-    fees: Decimal = Decimal("0")
-    equity: Decimal = Decimal("0")
-    high_water_mark: Decimal = Decimal("0")
-    drawdown: Decimal = Decimal("0")
-    daily_pnl: Decimal = Decimal("0")
-    trading_day: str | None = None
-    source: str = "PERSISTED_STRATEGY_LEDGER"
-    valued_at: datetime = Field(default_factory=utc_now)
-
-
 class PortfolioPositionView(StrictModel):
     venue: Literal["IBKR", "POLYMARKET"]
     instrument: str
@@ -544,7 +522,6 @@ class EngineSnapshot(StrictModel):
     account: AccountMetrics = Field(default_factory=AccountMetrics)
     margin_preview: MarginPreview = Field(default_factory=MarginPreview)
     reconciliation: ReconciliationStatusView = Field(default_factory=ReconciliationStatusView)
-    strategy_risk: StrategyRiskView = Field(default_factory=StrategyRiskView)
     portfolio: PortfolioView = Field(default_factory=PortfolioView)
     probabilities: ProbabilitySnapshot = Field(default_factory=ProbabilitySnapshot)
     probability_comparisons: tuple[MarketProbabilityComparison, ...] = ()

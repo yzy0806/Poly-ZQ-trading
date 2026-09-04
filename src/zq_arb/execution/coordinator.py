@@ -92,6 +92,7 @@ class ExecutionCoordinator:
         """Restore dashboard state and replay only already-signed outbox intents."""
 
         async with self._lock:
+            await self.repository.normalize_active_batch_state()
             await self._publish()
             if not self._polymarket_routing_enabled():
                 return
@@ -247,11 +248,14 @@ class ExecutionCoordinator:
             or target.bid != opportunity.zq_price
         ):
             return
+        if (
+            opportunity.calculation is None
+            or opportunity.calculation.costs.polymarket_fees is None
+        ):
+            return
         required_cash = (
             opportunity.calculation.emergency_hedge_cash
             + opportunity.calculation.costs.polymarket_fees
-            if opportunity.calculation is not None
-            else Decimal("0")
         )
         await self.polymarket.trading_preflight(required_cash)
         rechecked = await self.state.get()
@@ -406,6 +410,7 @@ class ExecutionCoordinator:
         ):
             return
         batch = await self.repository.active_batch_view()
+        unresolved_hedges = await self.repository.unresolved_hedge_obligation_count()
         differences: dict[str, Any] = {}
         expected_zq_position = await self.repository.strategy_zq_quantity(
             self.settings.ibkr_zq_contract_month
@@ -458,6 +463,8 @@ class ExecutionCoordinator:
         ]
         if obligations_without_orders:
             differences["unrouted_obligations"] = obligations_without_orders
+        if unresolved_hedges > 0:
+            differences["unresolved_hedge_obligations"] = unresolved_hedges
         clean = not differences
         signature = (
             batch.batch_id,
@@ -465,6 +472,7 @@ class ExecutionCoordinator:
             str(expected_zq_position),
             str(observed_zq_position),
             tuple(sorted(expected_polymarket_orders)),
+            unresolved_hedges,
             repr(differences),
             clean,
         )
@@ -480,6 +488,7 @@ class ExecutionCoordinator:
             "unresolved_obligations": [
                 item.obligation_id for item in batch.obligations if item.deficit_shares > 0
             ],
+            "unresolved_hedge_obligation_count": unresolved_hedges,
         }
         observed = {
             "ibkr_open_order_ids": sorted(self._ibkr_open_order_ids),
@@ -788,9 +797,6 @@ class ExecutionCoordinator:
                     ),
                 ),
                 polymarket_fees=polymarket_fees,
-                model_reserve=self.settings.model_risk_reserve_usd * scale,
-                operational_reserve=self.settings.operational_risk_reserve_usd * scale,
-                effr_basis_reserve=self.settings.effr_basis_reserve_usd * scale,
             ),
             incremental_margin=margin * scale if margin is not None else None,
             emergency_cash_reserve=Decimal("0"),
@@ -933,13 +939,19 @@ class ExecutionCoordinator:
                 ),
             ),
         )
-        await self.state.set_execution_state(batch, portfolio)
+        unresolved_hedges = await self.repository.unresolved_hedge_obligation_count()
+        await self.state.set_execution_state(batch, portfolio, unresolved_hedges)
 
     def _new_entry_authorized(self, snapshot: EngineSnapshot) -> bool:
         return (
             snapshot.armed
             and not snapshot.paused
             and not snapshot.kill_switch
+            and int(snapshot.metadata.get("unresolved_hedge_obligations") or 0) == 0
+            and not any(
+                obligation.deficit_shares > 0
+                for obligation in snapshot.active_batch.obligations
+            )
             and self.settings.ibkr_order_submission_enabled
             and self._polymarket_routing_enabled()
             and (

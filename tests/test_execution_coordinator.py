@@ -13,7 +13,17 @@ from zq_arb.adapters.events import VenueEvent
 from zq_arb.adapters.polymarket import PolymarketAdapter
 from zq_arb.config import Settings
 from zq_arb.domain.enums import BatchState, MarginPreviewStatus, RunMode
-from zq_arb.domain.models import BatchView, BookLevel, EffrObservation, MarginPreview, OrderBook
+from zq_arb.domain.models import (
+    BatchView,
+    BookLevel,
+    EffrObservation,
+    MarginPreview,
+    Opportunity,
+    OpportunityCalculation,
+    OpportunityCostBreakdown,
+    OrderBook,
+    Quote,
+)
 from zq_arb.execution.coordinator import ExecutionCoordinator
 from zq_arb.persistence.database import Database
 from zq_arb.persistence.models import ExecutionRecord, HedgeObligationRecord, OrderRecord
@@ -39,6 +49,74 @@ def hedge_book(token_id: str, ask: str) -> OrderBook:
 
 
 @pytest.mark.asyncio
+async def test_new_entry_waits_for_every_persisted_hedge_deficit(settings: Settings) -> None:
+    configured = settings.model_copy(
+        update={
+            "run_mode": RunMode.PAPER,
+            "ibkr_order_submission_enabled": True,
+            "polymarket_order_submission_enabled": True,
+        }
+    )
+    state = StateStore(configured)
+    coordinator = ExecutionCoordinator(
+        settings=configured,
+        repository=MagicMock(),
+        state=state,
+        ibkr=MagicMock(),
+        polymarket=MagicMock(),
+    )
+    snapshot = (await state.get()).model_copy(
+        update={
+            "armed": True,
+            "metadata": {
+                **(await state.get()).metadata,
+                "unresolved_hedge_obligations": 1,
+            },
+        }
+    )
+
+    assert not coordinator._new_entry_authorized(snapshot)
+    assert coordinator._new_entry_authorized(
+        snapshot.model_copy(
+            update={
+                "metadata": {
+                    **snapshot.metadata,
+                    "unresolved_hedge_obligations": 0,
+                }
+            }
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_armed_waiting_does_not_submit_without_a_tradeable_opportunity(
+    settings: Settings,
+) -> None:
+    configured = settings.model_copy(
+        update={
+            "run_mode": RunMode.PAPER,
+            "ibkr_order_submission_enabled": True,
+            "polymarket_order_submission_enabled": True,
+        }
+    )
+    repository = MagicMock()
+    repository.active_batch_view = AsyncMock(return_value=BatchView())
+    coordinator = ExecutionCoordinator(
+        settings=configured,
+        repository=repository,
+        state=StateStore(configured),
+        ibkr=MagicMock(),
+        polymarket=MagicMock(),
+    )
+    coordinator._publish = AsyncMock()
+    snapshot = (await coordinator.state.get()).model_copy(update={"armed": True})
+
+    await coordinator.cycle(snapshot)
+
+    coordinator.ibkr.submit_zq_limit_day.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late_fills(
     tmp_path: Path,
     settings: Settings,
@@ -48,6 +126,7 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
         update={
             "database_url": f"sqlite+aiosqlite:///{database_path.as_posix()}",
             "run_mode": RunMode.PAPER,
+            "ibkr_order_submission_enabled": True,
             "polymarket_order_submission_enabled": True,
             "simulate_polymarket_fills": True,
         }
@@ -264,6 +343,72 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
         )
     )
     assert (await repository.active_batch_view()).state is BatchState.IDLE
+
+    await coordinator.begin_ibkr_reconciliation()
+    for venue_event in (
+        VenueEvent(
+            venue="IBKR",
+            kind="position",
+            payload={
+                "account_fingerprint": "account",
+                "symbol": "ZQ",
+                "security_type": "FUT",
+                "contract_month": configured.ibkr_zq_contract_month,
+                "contract_id": 123,
+                "position": "5",
+            },
+        ),
+        VenueEvent(venue="IBKR", kind="open_order_end", payload={}),
+        VenueEvent(venue="IBKR", kind="execution_end", payload={}),
+        VenueEvent(venue="IBKR", kind="position_end", payload={}),
+    ):
+        await coordinator.handle_ibkr_event(venue_event)
+    assert (await state.get()).reconciliation.clean
+
+    ibkr.reserve_order_id.return_value = 43
+    await state.set_operating_state(armed=True, paused=False)
+    opportunity = Opportunity(
+        contracts=10,
+        zq_price=Decimal("96.31"),
+        tradeable=True,
+        calculation=OpportunityCalculation(
+            inc25_shares_per_contract=Decimal("486.15"),
+            inc50plus_shares_per_contract=Decimal("972.30"),
+            inc25_emergency_hedge_cash=Decimal("2041.83"),
+            inc50plus_emergency_hedge_cash=Decimal("58.34"),
+            emergency_hedge_cash=Decimal("2100.17"),
+            incremental_initial_margin=Decimal("2587.52"),
+            emergency_cash_reserve=Decimal("0"),
+            committed_capital=Decimal("4687.69"),
+            costs=OpportunityCostBreakdown(
+                ibkr_commission=Decimal("36.40"),
+                polymarket_fees=Decimal("62.11"),
+                explicit_costs=Decimal("98.51"),
+            ),
+        ),
+    )
+    waiting = await state.get()
+    await state.replace(
+        waiting.model_copy(
+            update={
+                "opportunities": (opportunity,),
+                "quotes": {
+                    configured.ibkr_zq_contract_month: Quote(
+                        instrument=configured.ibkr_zq_contract_month,
+                        bid=Decimal("96.31"),
+                    )
+                },
+            }
+        )
+    )
+
+    await coordinator.cycle(await state.get())
+
+    replacement = await repository.active_batch_view()
+    assert replacement.batch_id is not None
+    assert replacement.original_quantity == 10
+    assert replacement.limit_price == Decimal("96.31")
+    ibkr.submit_zq_limit_day.assert_called_once()
 
     await polymarket.close()
     await database.close()

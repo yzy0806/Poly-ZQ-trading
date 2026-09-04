@@ -35,7 +35,6 @@ from zq_arb.domain.models import (
     PortfolioView,
     Quote,
     ReconciliationStatusView,
-    StrategyRiskView,
     VenueHealth,
     utc_now,
 )
@@ -89,15 +88,10 @@ class StateStore:
                 "ibkr_resubscribe_required": False,
                 "zq_position": 0,
                 "active_batches": 0,
+                "unresolved_hedge_obligations": 0,
                 "reconciliation_clean": False,
                 "ibkr_connectivity_recovery_pending": False,
-                "drawdown_halt_active": False,
             },
-            strategy_risk=StrategyRiskView(
-                allocated_capital=settings.strategy_allocated_capital_usd,
-                equity=settings.strategy_allocated_capital_usd,
-                high_water_mark=settings.strategy_allocated_capital_usd,
-            ),
         )
         self._subscribers: set[asyncio.Queue[EngineSnapshot]] = set()
         self._account_values: dict[str, Decimal] = {}
@@ -959,7 +953,12 @@ class StateStore:
 
         await self.update(apply)
 
-    async def set_execution_state(self, batch: BatchView, portfolio: PortfolioView) -> None:
+    async def set_execution_state(
+        self,
+        batch: BatchView,
+        portfolio: PortfolioView,
+        unresolved_hedge_obligations: int,
+    ) -> None:
         """Publish one consistent batch-and-portfolio ledger snapshot."""
 
         active = 0 if batch.state in {BatchState.IDLE, BatchState.COMPLETE} else 1
@@ -967,17 +966,12 @@ class StateStore:
         def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
             metadata = deepcopy(snapshot.metadata)
             metadata["active_batches"] = active
+            metadata["unresolved_hedge_obligations"] = unresolved_hedge_obligations
             return snapshot.model_copy(
                 update={"active_batch": batch, "portfolio": portfolio, "metadata": metadata}
             )
 
         await self.update(apply)
-
-    async def set_strategy_risk(self, risk: StrategyRiskView) -> None:
-        await self.update(lambda snapshot: snapshot.model_copy(update={"strategy_risk": risk}))
-
-    async def set_drawdown_halt(self, active: bool) -> None:
-        await self._set_metadata_values(drawdown_halt_active=active)
 
     async def set_zq_position(self, quantity: Decimal) -> None:
         """Publish the authenticated aggregate IBKR position used by the risk gate."""

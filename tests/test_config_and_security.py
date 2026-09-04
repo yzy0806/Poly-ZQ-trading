@@ -24,32 +24,9 @@ def test_child_quantity_safety_invariant(settings: Settings) -> None:
         Settings.model_validate(payload)
 
 
-def test_live_mode_rejects_zero_reserves(settings: Settings) -> None:
-    payload = settings_payload(settings)
-    payload.update(
-        {
-            "run_mode": "LIVE_ARMED",
-            "live_trading_enabled": True,
-            "ibkr_order_submission_enabled": True,
-            "polymarket_order_submission_enabled": True,
-            "operator_approval_id": "approval",
-            "polymarket_api_key": SecretStr("configured"),
-            "polymarket_api_secret": SecretStr("configured"),
-            "polymarket_api_passphrase": SecretStr("configured"),
-        }
-    )
-    with pytest.raises(ValidationError, match="must be positive"):
-        Settings.model_validate(payload)
-
-
 def test_live_mode_requires_an_explicit_ibkr_account(settings: Settings) -> None:
     configured = settings.model_copy(
-        update={
-            "ibkr_account_id": SecretStr("REPLACE_IN_LOCAL_ENV"),
-            "model_risk_reserve_usd": 1,
-            "operational_risk_reserve_usd": 1,
-            "effr_basis_reserve_usd": 1,
-        }
+        update={"ibkr_account_id": SecretStr("REPLACE_IN_LOCAL_ENV")}
     )
     assert "IBKR_ACCOUNT_ID is absent" in configured.live_readiness_errors()
 

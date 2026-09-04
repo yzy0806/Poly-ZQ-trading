@@ -119,7 +119,7 @@ def test_three_state_profit_contains_every_approved_state() -> None:
     )
     assert first.polymarket_pnl == first.inc25_pnl + first.inc50plus_pnl
     assert first.gross_pnl == first.futures_pnl + first.polymarket_pnl
-    assert first.net_pnl == first.gross_pnl - first.costs - first.reserves
+    assert first.net_pnl == first.gross_pnl - first.costs
 
 
 def test_order_book_reports_aggregated_best_level_sizes() -> None:

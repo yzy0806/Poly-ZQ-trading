@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import type { AccountMetrics, MarginPreview, ReconciliationStatus, StrategyRisk } from '../types'
+import type { AccountMetrics, MarginPreview, ReconciliationStatus } from '../types'
 import { RiskPanel } from './RiskPanel'
 
 describe('RiskPanel', () => {
@@ -27,20 +27,11 @@ describe('RiskPanel', () => {
       method: 'NOT_CONFIRMED',
       reason: 'manual venue reconciliation has not been confirmed',
     } as ReconciliationStatus
-    const strategyRisk = {
-      allocated_capital: '100000',
-      equity: '100000',
-      high_water_mark: '100000',
-      drawdown: '0',
-      daily_pnl: '0',
-    } as StrategyRisk
-
     render(
       <RiskPanel
         account={account}
         preview={preview}
         reconciliation={reconciliation}
-        strategyRisk={strategyRisk}
         onControl={onControl}
       />,
     )

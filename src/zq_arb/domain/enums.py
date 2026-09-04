@@ -11,10 +11,6 @@ class RunMode(StrEnum):
     LIVE_ARMED = "LIVE_ARMED"
 
     @property
-    def permits_zero_reserves(self) -> bool:
-        return self in {self.READ_ONLY, self.PAPER, self.SHADOW}
-
-    @property
     def is_live(self) -> bool:
         return self in {self.LIMITED_LIVE, self.LIVE_ARMED}
 
@@ -110,4 +106,3 @@ class ControlAction(StrEnum):
     EMERGENCY_HALT = "EMERGENCY_HALT"
     ACKNOWLEDGE_ALERT = "ACKNOWLEDGE_ALERT"
     CONFIRM_RECONCILED = "CONFIRM_RECONCILED"
-    RESET_STRATEGY_RISK = "RESET_STRATEGY_RISK"

@@ -11,10 +11,24 @@ export function Header({ state, onControl }: { state: EngineSnapshot; onControl:
   const requiredQuotes = Object.values(state.quotes).filter((quote) => quote.role === 'TARGET')
   const eventTimes = requiredQuotes.flatMap((quote) => quote.last_market_data_event_at ? [quote.last_market_data_event_at] : [])
   const oldestEvent = eventTimes.length ? eventTimes.reduce((oldest, value) => new Date(value).getTime() < new Date(oldest).getTime() ? value : oldest) : null
+  const activeBatch = state.active_batch.batch_id !== null && !['IDLE', 'COMPLETE'].includes(state.active_batch.state)
+  const qualified = state.opportunities.some((opportunity) => opportunity.tradeable)
+  const operatingStatus = state.kill_switch
+    ? { label: 'HALTED', tone: 'red' }
+    : state.armed
+      ? activeBatch
+        ? { label: 'ARMED · WORKING', tone: 'green' }
+        : qualified
+          ? { label: 'ARMED · READY', tone: 'green' }
+          : { label: 'ARMED · WAITING', tone: 'amber' }
+      : state.paused
+        ? { label: 'PAUSED', tone: 'amber' }
+        : { label: 'DISARMED', tone: 'neutral' }
   return <header className="topbar">
     <div className="brand"><div className="mark">ZQ</div><div><h1>Cross-Venue Arbitrage</h1><span>FOMC September 2026 · control terminal</span></div></div>
     <div className="top-status">
       <Pill tone={state.run_mode === 'READ_ONLY' ? 'amber' : 'blue'}>{state.run_mode}</Pill>
+      <Pill tone={operatingStatus.tone}>{operatingStatus.label}</Pill>
       <Status label="IBKR" value={state.ibkr.status} good={state.ibkr.status === 'CONNECTED'} />
       <Status label="POLY" value={state.polymarket.status} good={state.polymarket.status === 'CONNECTED'} />
       <Status label="RULES" value={state.mapping.verified ? 'VERIFIED' : 'BLOCKED'} good={state.mapping.verified} />

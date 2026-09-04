@@ -185,38 +185,6 @@ class MarginSnapshotRecord(Base, TimestampMixin):
     projected_values: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
-class PnlSnapshotRecord(Base, TimestampMixin):
-    __tablename__ = "pnl_snapshots"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    ibkr_pnl: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
-    polymarket_pnl: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
-    combined_pnl: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
-    terminal_pnl: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
-    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-
-
-class StrategyRiskRecord(Base, TimestampMixin):
-    __tablename__ = "strategy_risk_state"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    allocated_capital: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    cumulative_realized_pnl: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    fees: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    equity: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    high_water_mark: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    drawdown: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    daily_pnl: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
-    trading_day: Mapped[str | None] = mapped_column(String(10))
-    source: Mapped[str] = mapped_column(String(80), nullable=False)
-    valued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
-    )
-
-
 class ReconciliationRecord(Base, TimestampMixin):
     __tablename__ = "reconciliations"
 

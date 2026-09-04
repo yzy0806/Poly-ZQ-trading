@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    env_file_version: int = 8
+    env_file_version: int = 9
     app_env: str = "development"
     run_mode: RunMode = RunMode.READ_ONLY
     live_trading_enabled: bool = False
@@ -187,22 +187,9 @@ class Settings(BaseSettings):
     min_return_on_capital_bps: Decimal
     max_zq_position: int
     max_open_batches: int
-    max_unhedged_zq_contracts: int
-    max_unhedged_seconds: int
-    max_zq_slippage_ticks: int
-    max_polymarket_price_slippage: Decimal
     min_full_excess_liquidity_usd: Decimal
     min_excess_liquidity_margin_multiplier: Decimal
     min_margin_cushion_ratio: Decimal
-    max_daily_loss_usd: Decimal
-    max_strategy_drawdown_usd: Decimal
-    strategy_allocated_capital_usd: Decimal
-    tail_loss_gate_enabled: bool
-    max_tail_loss_usd: Decimal | None = None
-    max_clock_drift_ms: int
-    model_risk_reserve_usd: Decimal
-    operational_risk_reserve_usd: Decimal
-    effr_basis_reserve_usd: Decimal
 
     effr_source: str = "NYFED_API"
     nyfed_effr_api_url: str = "https://markets.newyorkfed.org/api/rates/all/latest.json"
@@ -254,7 +241,6 @@ class Settings(BaseSettings):
         return normalized
 
     @field_validator(
-        "max_tail_loss_usd",
         "fomc_trading_resume_utc",
         "recorded_market_data_path",
         "pre_meeting_effr_percent",
@@ -267,8 +253,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def enforce_safety_invariants(self) -> Self:
         errors: list[str] = []
-        if self.env_file_version != 8:
-            errors.append("ENV_FILE_VERSION must be 8")
+        if self.env_file_version != 9:
+            errors.append("ENV_FILE_VERSION must be 9")
         if self.api_workers != 1:
             errors.append("API_WORKERS must be 1 for deterministic state ownership")
         if self.ibkr_zq_child_order_quantity != 10:
@@ -293,8 +279,6 @@ class Settings(BaseSettings):
             )
         if self.ibkr_commission_estimate <= 0:
             errors.append("IBKR_COMMISSION_ESTIMATE must be positive")
-        if self.strategy_allocated_capital_usd <= 0:
-            errors.append("STRATEGY_ALLOCATED_CAPITAL_USD must be positive")
         if self.nyfed_effr_refresh_seconds < 60:
             errors.append("NYFED_EFFR_REFRESH_SECONDS cannot be below 60")
         if self.nyfed_effr_timeout_seconds < 1:
@@ -429,12 +413,6 @@ class Settings(BaseSettings):
             self.polymarket_private_key
         ):
             errors.append("wallet classification cannot run without a protected signing key")
-        reserves = {
-            "MODEL_RISK_RESERVE_USD": self.model_risk_reserve_usd,
-            "OPERATIONAL_RISK_RESERVE_USD": self.operational_risk_reserve_usd,
-            "EFFR_BASIS_RESERVE_USD": self.effr_basis_reserve_usd,
-        }
-        errors.extend(f"{name} must be positive" for name, value in reserves.items() if value <= 0)
         return errors
 
 

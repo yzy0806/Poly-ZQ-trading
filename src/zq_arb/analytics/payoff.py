@@ -34,27 +34,13 @@ class DepthCost:
 @dataclass(frozen=True, slots=True)
 class CostInputs:
     ibkr_commission: Decimal = Decimal("0")
-    polymarket_fees: Decimal = Decimal("0")
-    zq_slippage_reserve: Decimal = Decimal("0")
-    polymarket_slippage_reserve: Decimal = Decimal("0")
-    rounding_reserve: Decimal = Decimal("0")
-    model_reserve: Decimal = Decimal("0")
-    operational_reserve: Decimal = Decimal("0")
-    effr_basis_reserve: Decimal = Decimal("0")
+    polymarket_fees: Decimal | None = Decimal("0")
 
     @property
-    def explicit_costs(self) -> Decimal:
-        return (
-            self.ibkr_commission
-            + self.polymarket_fees
-            + self.zq_slippage_reserve
-            + self.polymarket_slippage_reserve
-            + self.rounding_reserve
-        )
-
-    @property
-    def reserves(self) -> Decimal:
-        return self.model_reserve + self.operational_reserve + self.effr_basis_reserve
+    def explicit_costs(self) -> Decimal | None:
+        if self.polymarket_fees is None:
+            return None
+        return self.ibkr_commission + self.polymarket_fees
 
 
 def conservative_ibkr_round_trip_commission(
@@ -254,6 +240,7 @@ def build_three_state_opportunity(
 
     def scenario_matrix(price25: Decimal, price50: Decimal) -> tuple[ScenarioPnl, ...]:
         scenarios: list[ScenarioPnl] = []
+        explicit_costs = cost_inputs.explicit_costs
         for move in APPROVED_SCENARIOS:
             settlement = theoretical_settlement(pre_meeting_effr, Decimal(move))
             futures_price_change = settlement - zq_price
@@ -283,18 +270,30 @@ def build_three_state_opportunity(
                     inc50plus_pnl=inc50plus_pnl,
                     polymarket_pnl=polymarket_pnl,
                     gross_pnl=gross_pnl,
-                    costs=cost_inputs.explicit_costs,
-                    reserves=cost_inputs.reserves,
-                    net_pnl=(gross_pnl - cost_inputs.explicit_costs - cost_inputs.reserves),
+                    costs=explicit_costs,
+                    net_pnl=(
+                        gross_pnl - explicit_costs if explicit_costs is not None else None
+                    ),
                 )
             )
         return tuple(scenarios)
 
     passive_scenarios = scenario_matrix(post25, post50)
     emergency_scenarios = scenario_matrix(depth25.vwap, depth50.vwap)
-    passive_minimum = min(scenario.net_pnl for scenario in passive_scenarios)
-    emergency_minimum = min(scenario.net_pnl for scenario in emergency_scenarios)
-    minimum = min(passive_minimum, emergency_minimum)
+    if cost_inputs.explicit_costs is None:
+        passive_minimum = None
+        emergency_minimum = None
+        minimum = None
+    else:
+        passive_net_values = [
+            scenario.net_pnl for scenario in passive_scenarios if scenario.net_pnl is not None
+        ]
+        emergency_net_values = [
+            scenario.net_pnl for scenario in emergency_scenarios if scenario.net_pnl is not None
+        ]
+        passive_minimum = min(passive_net_values)
+        emergency_minimum = min(emergency_net_values)
+        minimum = min(passive_minimum, emergency_minimum)
     emergency_hedge_cash = depth25.total_cost + depth50.total_cost
     committed_capital = (
         emergency_hedge_cash + incremental_margin + emergency_cash_reserve
@@ -303,7 +302,7 @@ def build_three_state_opportunity(
     )
     return_bps = (
         minimum / committed_capital * Decimal("10000")
-        if committed_capital is not None and committed_capital > 0
+        if minimum is not None and committed_capital is not None and committed_capital > 0
         else None
     )
     calculation = OpportunityCalculation(
@@ -318,14 +317,7 @@ def build_three_state_opportunity(
         costs=OpportunityCostBreakdown(
             ibkr_commission=cost_inputs.ibkr_commission,
             polymarket_fees=cost_inputs.polymarket_fees,
-            zq_slippage_reserve=cost_inputs.zq_slippage_reserve,
-            polymarket_slippage_reserve=cost_inputs.polymarket_slippage_reserve,
-            rounding_reserve=cost_inputs.rounding_reserve,
             explicit_costs=cost_inputs.explicit_costs,
-            model_reserve=cost_inputs.model_reserve,
-            operational_reserve=cost_inputs.operational_reserve,
-            effr_basis_reserve=cost_inputs.effr_basis_reserve,
-            reserves=cost_inputs.reserves,
         ),
     )
     return Opportunity(

@@ -41,8 +41,6 @@ def clear_context() -> GateContext:
         critical_alert_active=False,
         paused=False,
         kill_switch=False,
-        strategy_daily_pnl=Decimal("0"),
-        strategy_drawdown=Decimal("0"),
     )
 
 
@@ -78,13 +76,6 @@ def test_any_single_hard_gate_blocks(settings: Settings) -> None:
     result = RiskEngine(paper).qualify(profitable_opportunity(), blocked)
     assert not result.tradeable
     assert "hedge deficit is unresolved" in result.reasons
-
-
-def test_daily_loss_limit_is_inclusive(settings: Settings) -> None:
-    paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
-    blocked = clear_context().model_copy(update={"strategy_daily_pnl": Decimal("-500")})
-    result = RiskEngine(paper).qualify(profitable_opportunity(), blocked)
-    assert "daily strategy loss limit reached" in result.reasons
 
 
 @pytest.mark.parametrize(
@@ -136,7 +127,6 @@ def test_daily_loss_limit_is_inclusive(settings: Settings) -> None:
         ({"critical_alert_active": True}, "critical alert is active"),
         ({"paused": True}, "new trades are paused"),
         ({"kill_switch": True}, "kill switch is active"),
-        ({"strategy_drawdown": Decimal("2000")}, "strategy drawdown limit reached"),
     ],
 )
 def test_each_hard_gate_fails_independently(

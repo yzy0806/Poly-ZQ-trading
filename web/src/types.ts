@@ -165,21 +165,13 @@ export interface ScenarioPnl {
   polymarket_pnl: DecimalValue
   gross_pnl: DecimalValue
   costs: DecimalValue
-  reserves: DecimalValue
   net_pnl: DecimalValue
 }
 
 export interface OpportunityCostBreakdown {
   ibkr_commission: DecimalValue
   polymarket_fees: DecimalValue
-  zq_slippage_reserve: DecimalValue
-  polymarket_slippage_reserve: DecimalValue
-  rounding_reserve: DecimalValue
   explicit_costs: DecimalValue
-  model_reserve: DecimalValue
-  operational_reserve: DecimalValue
-  effr_basis_reserve: DecimalValue
-  reserves: DecimalValue
 }
 
 export interface OpportunityCalculation {
@@ -288,20 +280,6 @@ export interface ReconciliationStatus {
   invalidated_at: string | null
 }
 
-export interface StrategyRisk {
-  allocated_capital: DecimalValue
-  cumulative_realized_pnl: DecimalValue
-  unrealized_pnl: DecimalValue
-  fees: DecimalValue
-  equity: DecimalValue
-  high_water_mark: DecimalValue
-  drawdown: DecimalValue
-  daily_pnl: DecimalValue
-  trading_day: string | null
-  source: string
-  valued_at: string
-}
-
 export interface PortfolioPosition {
   venue: 'IBKR' | 'POLYMARKET'
   instrument: string
@@ -404,7 +382,6 @@ export interface EngineSnapshot {
   account: AccountMetrics
   margin_preview: MarginPreview
   reconciliation: ReconciliationStatus
-  strategy_risk: StrategyRisk
   portfolio: PortfolioView
   probabilities: ProbabilitySnapshot
   probability_comparisons: MarketProbabilityComparison[]

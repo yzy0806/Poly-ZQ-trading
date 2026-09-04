@@ -51,7 +51,6 @@ from zq_arb.domain.models import (
     OrderBook,
     ProbabilitySnapshot,
     Quote,
-    StrategyRiskView,
     utc_now,
 )
 from zq_arb.execution.coordinator import ExecutionCoordinator
@@ -102,9 +101,6 @@ class EngineRuntime:
     async def start(self) -> None:
         await self.database.initialize()
         await self.repository.ensure_config_version(self.settings)
-        await self.state.set_strategy_risk(
-            await self.repository.load_or_create_strategy_risk(self.settings)
-        )
         await self.execution.recover()
         await self.repository.audit(
             actor="SYSTEM",
@@ -125,6 +121,10 @@ class EngineRuntime:
                 asyncio.create_task(self._process_events(), name="venue-event-processor"),
                 asyncio.create_task(self._analytics_loop(), name="analytics-loop"),
                 asyncio.create_task(self._polymarket_reference_loop(), name="polymarket-reference"),
+                asyncio.create_task(
+                    self._polymarket_fee_parameter_loop(),
+                    name="polymarket-fee-parameters",
+                ),
                 asyncio.create_task(self._polymarket_stream_loop(), name="polymarket-stream"),
                 asyncio.create_task(self._ibkr_connection_loop(), name="ibkr-connection"),
                 asyncio.create_task(
@@ -414,8 +414,6 @@ class EngineRuntime:
                         "polymarket_book_reconciliation_mismatch",
                         mismatch_count=len(mismatches),
                     )
-                self._polymarket_fee_parameters = await self.polymarket.fetch_hedge_fee_parameters()
-                self._polymarket_fee_parameters_at = utc_now()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -423,6 +421,34 @@ class EngineRuntime:
             try:
                 await asyncio.wait_for(
                     self._polymarket_resync_requested.wait(),
+                    timeout=self.settings.polymarket_book_snapshot_interval_seconds,
+                )
+            except TimeoutError:
+                pass
+
+    async def _refresh_polymarket_fee_parameters(self) -> None:
+        parameters = await self.polymarket.fetch_hedge_fee_parameters()
+        required_codes = {"INC25", "INC50PLUS"}
+        missing_codes = required_codes.difference(parameters)
+        if missing_codes:
+            raise PolymarketProtocolError(
+                "CLOB fee response omitted required hedge markets: "
+                + ", ".join(sorted(missing_codes))
+            )
+        self._polymarket_fee_parameters = parameters
+        self._polymarket_fee_parameters_at = utc_now()
+
+    async def _polymarket_fee_parameter_loop(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                await self._refresh_polymarket_fee_parameters()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("polymarket_fee_parameter_refresh_failed", error=str(exc))
+            try:
+                await asyncio.wait_for(
+                    self._stopping.wait(),
                     timeout=self.settings.polymarket_book_snapshot_interval_seconds,
                 )
             except TimeoutError:
@@ -607,7 +633,6 @@ class EngineRuntime:
         while not self._stopping.is_set():
             try:
                 updated = await self.state.update(self._calculate)
-                await self._enforce_strategy_drawdown(updated)
                 await self.execution.cycle(updated)
             except asyncio.CancelledError:
                 raise
@@ -750,8 +775,15 @@ class EngineRuntime:
         q50 = round_shares_up(
             hedge_shares_per_contract(50) * Decimal(self.settings.ibkr_zq_child_order_quantity)
         )
-        polymarket_fees = Decimal("0")
-        if long_book_25 is not None and long_book_25.best_ask is not None:
+        fee_parameters_current, _ = self._polymarket_fee_parameter_status(now)
+        polymarket_fees: Decimal | None = (
+            Decimal("0") if fee_parameters_current else None
+        )
+        if (
+            polymarket_fees is not None
+            and long_book_25 is not None
+            and long_book_25.best_ask is not None
+        ):
             emergency25 = walk_asks(
                 long_book_25.asks,
                 q25,
@@ -763,7 +795,11 @@ class EngineRuntime:
             polymarket_fees += max(
                 self._polymarket_taker_fee("INC25", q25, value) for value in fee_prices25
             )
-        if long_book_50 is not None and long_book_50.best_ask is not None:
+        if (
+            polymarket_fees is not None
+            and long_book_50 is not None
+            and long_book_50.best_ask is not None
+        ):
             emergency50 = walk_asks(
                 long_book_50.asks,
                 q50,
@@ -784,9 +820,6 @@ class EngineRuntime:
                 ),
             ),
             polymarket_fees=polymarket_fees,
-            model_reserve=self.settings.model_risk_reserve_usd,
-            operational_reserve=self.settings.operational_risk_reserve_usd,
-            effr_basis_reserve=self.settings.effr_basis_reserve_usd,
         )
         if probabilities.pre_meeting_effr is not None and books_available:
             price = target_quote.bid
@@ -836,6 +869,8 @@ class EngineRuntime:
             health.append(f"EFFR not qualified: {effr.reason}")
         if not books_fresh:
             health.append("Polymarket hedge books are unavailable or WebSocket-unsynchronized")
+        if not fee_parameters_current:
+            health.append("Current Polymarket taker-fee parameters are unavailable")
         if not probabilities.valid:
             health.append(probabilities.reason)
         if snapshot.mapping.errors:
@@ -1013,19 +1048,7 @@ class EngineRuntime:
             ConnectionStatus.CONNECTED.value,
             "Polymarket market WebSocket is not connected",
         )
-        fee_parameters_available = all(
-            code in self._polymarket_fee_parameters for code in ("INC25", "INC50PLUS")
-        )
-        fee_age_seconds = (
-            (now - self._polymarket_fee_parameters_at).total_seconds()
-            if self._polymarket_fee_parameters_at is not None
-            else None
-        )
-        fee_parameters_current = fee_parameters_available and (
-            fee_age_seconds is not None
-            and fee_age_seconds
-            <= max(60, self.settings.polymarket_book_snapshot_interval_seconds * 2)
-        )
+        fee_parameters_current, fee_age_seconds = self._polymarket_fee_parameter_status(now)
         add(
             "POLYMARKET_TAKER_FEES",
             "Current Polymarket taker-fee parameters",
@@ -1084,10 +1107,28 @@ class EngineRuntime:
     def _polymarket_taker_fee(self, code: str, shares: Decimal, price: Decimal) -> Decimal:
         parameters = self._polymarket_fee_parameters.get(code)
         if parameters is None:
-            return Decimal("0")
+            raise RuntimeError(f"Polymarket taker-fee parameters are unavailable for {code}")
         rate = parameters["rate"]
         exponent = parameters["exponent"]
         return shares * rate * ((price * (Decimal("1") - price)) ** exponent)
+
+    def _polymarket_fee_parameter_status(
+        self, now: datetime
+    ) -> tuple[bool, float | None]:
+        available = all(
+            code in self._polymarket_fee_parameters for code in ("INC25", "INC50PLUS")
+        )
+        age_seconds = (
+            (now - self._polymarket_fee_parameters_at).total_seconds()
+            if self._polymarket_fee_parameters_at is not None
+            else None
+        )
+        current = available and (
+            age_seconds is not None
+            and age_seconds
+            <= max(60, self.settings.polymarket_book_snapshot_interval_seconds * 2)
+        )
+        return current, age_seconds
 
     def _qualify_quote(self, quote: Quote, *, generation: int) -> Quote:
         role = quote.role
@@ -1214,8 +1255,12 @@ class EngineRuntime:
             next_batch_initial_margin=next_batch_margin,
             current_zq_position=int(snapshot.metadata.get("zq_position") or 0),
             active_batches=int(snapshot.metadata.get("active_batches") or 0),
-            unresolved_hedge=any(
-                obligation.deficit_shares > 0 for obligation in snapshot.active_batch.obligations
+            unresolved_hedge=(
+                int(snapshot.metadata.get("unresolved_hedge_obligations") or 0) > 0
+                or any(
+                    obligation.deficit_shares > 0
+                    for obligation in snapshot.active_batch.obligations
+                )
             ),
             reconciliation_clean=snapshot.reconciliation.clean,
             reconciliation_detail=snapshot.reconciliation.reason,
@@ -1227,8 +1272,6 @@ class EngineRuntime:
             ),
             paused=snapshot.paused,
             kill_switch=snapshot.kill_switch,
-            strategy_daily_pnl=snapshot.strategy_risk.daily_pnl,
-            strategy_drawdown=snapshot.strategy_risk.drawdown,
             cross_venue_checks=cross_venue_checks,
         )
 
@@ -1341,7 +1384,8 @@ class EngineRuntime:
             raise ValueError("Polymarket must be connected before reconciliation can be confirmed")
         if snapshot.active_batch.state not in {BatchState.IDLE, BatchState.COMPLETE}:
             raise ValueError("the active batch must be terminal before reconciliation")
-        if any(obligation.deficit_shares > 0 for obligation in snapshot.active_batch.obligations):
+        unresolved_hedges = await self.repository.unresolved_hedge_obligation_count()
+        if unresolved_hedges > 0:
             raise ValueError("hedge obligations remain unresolved")
         observed = {
             "snapshot_id": snapshot.snapshot_id,
@@ -1349,6 +1393,7 @@ class EngineRuntime:
             "polymarket_status": snapshot.polymarket.status.value,
             "zq_position": int(snapshot.metadata.get("zq_position") or 0),
             "active_batches": int(snapshot.metadata.get("active_batches") or 0),
+            "unresolved_hedge_obligations": unresolved_hedges,
             "active_batch": snapshot.active_batch.model_dump(mode="json"),
             "synchronized_polymarket_books": sum(
                 1 for book in snapshot.books.values() if book.stream_synchronized
@@ -1364,109 +1409,6 @@ class EngineRuntime:
             actor=actor,
             reason=reason,
             snapshot_id=snapshot.snapshot_id,
-        )
-
-    async def record_strategy_valuation(
-        self,
-        *,
-        cumulative_realized_pnl: Decimal,
-        unrealized_pnl: Decimal,
-        fees: Decimal,
-        daily_pnl: Decimal,
-        source: str,
-        valued_at: datetime | None = None,
-    ) -> StrategyRiskView:
-        current = (await self.state.get()).strategy_risk
-        timestamp = valued_at or utc_now()
-        equity = current.allocated_capital + cumulative_realized_pnl + unrealized_pnl - fees
-        high_water_mark = max(current.high_water_mark, equity)
-        risk = StrategyRiskView(
-            allocated_capital=current.allocated_capital,
-            cumulative_realized_pnl=cumulative_realized_pnl,
-            unrealized_pnl=unrealized_pnl,
-            fees=fees,
-            equity=equity,
-            high_water_mark=high_water_mark,
-            drawdown=max(Decimal("0"), high_water_mark - equity),
-            daily_pnl=daily_pnl,
-            trading_day=timestamp.date().isoformat(),
-            source=source,
-            valued_at=timestamp,
-        )
-        await self.repository.save_strategy_risk(risk)
-        await self.state.set_strategy_risk(risk)
-        await self._enforce_strategy_drawdown(await self.state.get())
-        return risk
-
-    async def reset_strategy_risk(self, actor: str, reason: str) -> None:
-        snapshot = await self.state.get()
-        if not snapshot.reconciliation.clean:
-            raise ValueError("venue reconciliation must be clean before a strategy-risk reset")
-        if snapshot.active_batch.state not in {BatchState.IDLE, BatchState.COMPLETE}:
-            raise ValueError("the active batch must be terminal before a strategy-risk reset")
-        current = snapshot.strategy_risk
-        reset = current.model_copy(
-            update={
-                "high_water_mark": current.equity,
-                "drawdown": Decimal("0"),
-                "source": "MANUAL_AUDITED_RISK_RESET",
-                "valued_at": utc_now(),
-            }
-        )
-        await self.repository.save_strategy_risk(reset)
-        await self.state.set_strategy_risk(reset)
-        await self.state.set_drawdown_halt(False)
-        await self.state.resolve_alerts("STRATEGY_DRAWDOWN_LIMIT")
-        await self.repository.audit(
-            actor=actor,
-            action="RESET_STRATEGY_RISK",
-            reason=reason,
-            details={
-                "equity": reset.equity,
-                "new_high_water_mark": reset.high_water_mark,
-            },
-        )
-
-    async def _enforce_strategy_drawdown(self, snapshot: EngineSnapshot) -> None:
-        risk = snapshot.strategy_risk
-        if risk.drawdown < self.settings.max_strategy_drawdown_usd:
-            return
-        if bool(snapshot.metadata.get("drawdown_halt_active")):
-            return
-        cancel_error: str | None = None
-        if (
-            snapshot.active_batch.zq_order_id is not None
-            and snapshot.active_batch.remaining_quantity > 0
-        ):
-            try:
-                self.ibkr.cancel_order(snapshot.active_batch.zq_order_id)
-            except Exception as exc:
-                cancel_error = f"{type(exc).__name__}: {exc}"
-                LOGGER.exception("drawdown_cancel_unfilled_failed", error=cancel_error)
-        await self.state.set_operating_state(paused=True, armed=False)
-        await self.state.set_drawdown_halt(True)
-        await self.state.add_alert(
-            AlertSeverity.CRITICAL,
-            "STRATEGY_DRAWDOWN_LIMIT",
-            (
-                f"Strategy drawdown {risk.drawdown} USD reached the "
-                f"{self.settings.max_strategy_drawdown_usd} USD limit. "
-                "Unfilled ZQ was cancelled where possible; filled positions were preserved."
-            ),
-            flashing=True,
-        )
-        await self.repository.audit(
-            actor="SYSTEM",
-            action="STRATEGY_DRAWDOWN_HALT",
-            reason="strategy drawdown limit reached",
-            details={
-                "drawdown": risk.drawdown,
-                "limit": self.settings.max_strategy_drawdown_usd,
-                "zq_order_id": snapshot.active_batch.zq_order_id,
-                "remaining_quantity": snapshot.active_batch.remaining_quantity,
-                "cancel_error": cancel_error,
-                "filled_positions_preserved": True,
-            },
         )
 
     async def audit_control(self, actor: str, action: str, reason: str) -> None:

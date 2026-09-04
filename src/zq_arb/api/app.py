@@ -250,18 +250,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if payload.action is ControlAction.ARM:
             if configured.run_mode is RunMode.READ_ONLY:
                 raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT, detail="READ_ONLY cannot arm"
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="cannot arm: RUN_MODE is READ_ONLY",
                 )
-            if not any(opportunity.tradeable for opportunity in snapshot.opportunities):
-                runtime.request_margin_preview_refresh()
+            if configured.run_mode is RunMode.SHADOW:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        "no opportunity passes every hard gate; a current IBKR margin "
-                        "preview has been requested"
-                    ),
+                    detail="cannot arm: RUN_MODE is SHADOW and order routing is disabled",
                 )
-            await runtime.state.set_operating_state(armed=True)
+            if snapshot.kill_switch:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="cannot arm: the emergency halt is active",
+                )
+            if not configured.ibkr_order_submission_enabled:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="cannot arm: IBKR_ORDER_SUBMISSION_ENABLED is false",
+                )
+            if not configured.polymarket_order_submission_enabled:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="cannot arm: POLYMARKET_ORDER_SUBMISSION_ENABLED is false",
+                )
+            if configured.run_mode.is_live and not configured.live_trading_enabled:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="cannot arm: LIVE_TRADING_ENABLED is false",
+                )
+            runtime.request_margin_preview_refresh()
+            await runtime.state.set_operating_state(armed=True, paused=False)
         elif payload.action is ControlAction.DISARM:
             await runtime.state.set_operating_state(armed=False)
         elif payload.action is ControlAction.PAUSE_NEW_TRADES:
@@ -283,14 +301,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif payload.action is ControlAction.CONFIRM_RECONCILED:
             try:
                 await runtime.confirm_reconciliation(identity.username, payload.reason)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=str(exc),
-                ) from exc
-        elif payload.action is ControlAction.RESET_STRATEGY_RISK:
-            try:
-                await runtime.reset_strategy_risk(identity.username, payload.reason)
             except ValueError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,

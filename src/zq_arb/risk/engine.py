@@ -41,8 +41,6 @@ class GateContext(BaseModel):
     critical_alert_active: bool
     paused: bool
     kill_switch: bool
-    strategy_daily_pnl: Decimal | None
-    strategy_drawdown: Decimal | None
     cross_venue_checks: tuple[GateCheck, ...] = ()
 
 
@@ -441,42 +439,6 @@ class RiskEngine:
             "kill switch is active",
         )
 
-        daily_passed = (
-            context.strategy_daily_pnl > -settings.max_daily_loss_usd
-            if context.strategy_daily_pnl is not None
-            else None
-        )
-        add(
-            "DAILY_STRATEGY_PNL",
-            "LOSS_LIMIT",
-            "Daily strategy P&L",
-            daily_passed,
-            context.strategy_daily_pnl,
-            ">",
-            -settings.max_daily_loss_usd,
-            "daily strategy P&L unavailable"
-            if context.strategy_daily_pnl is None
-            else "daily strategy loss limit reached",
-            unit="USD",
-        )
-        drawdown_passed = (
-            context.strategy_drawdown < settings.max_strategy_drawdown_usd
-            if context.strategy_drawdown is not None
-            else None
-        )
-        add(
-            "STRATEGY_DRAWDOWN",
-            "LOSS_LIMIT",
-            "Peak-to-trough strategy drawdown",
-            drawdown_passed,
-            context.strategy_drawdown,
-            "<",
-            settings.max_strategy_drawdown_usd,
-            "strategy drawdown unavailable"
-            if context.strategy_drawdown is None
-            else "strategy drawdown limit reached",
-            unit="USD",
-        )
         add(
             "FOMC_CUTOFF",
             "TIME",

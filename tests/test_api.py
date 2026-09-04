@@ -10,7 +10,7 @@ from pydantic import SecretStr
 
 from zq_arb.api.app import create_app, dashboard_snapshot
 from zq_arb.config import Settings
-from zq_arb.domain.enums import ConnectionStatus, DataQuality
+from zq_arb.domain.enums import ConnectionStatus, DataQuality, RunMode
 from zq_arb.domain.models import (
     BookLevel,
     EligibilityStatus,
@@ -40,6 +40,7 @@ def test_dashboard_snapshot_bounds_depth() -> None:
 async def test_login_state_and_read_only_control(tmp_path: Path, settings: Settings) -> None:
     configured = settings.model_copy(
         update={
+            "run_mode": RunMode.READ_ONLY,
             "runtime_data_dir": tmp_path,
             "database_url": f"sqlite+aiosqlite:///{(tmp_path / 'api.db').as_posix()}",
             "log_dir": tmp_path / "logs",
@@ -54,7 +55,6 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
     runtime = app.state.runtime
     runtime.repository.audit = AsyncMock(return_value="event")
     runtime.confirm_reconciliation = AsyncMock(return_value=None)
-    runtime.reset_strategy_risk = AsyncMock(return_value=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         health = await client.get("/healthz")
@@ -85,6 +85,7 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
             },
         )
         assert arm.status_code == 409
+        assert arm.json()["detail"] == "cannot arm: RUN_MODE is READ_ONLY"
         bad_csrf = await client.post(
             "/api/v1/control",
             headers={"X-CSRF-Token": "wrong"},
@@ -106,17 +107,77 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
         )
         assert reconciled.status_code == 200
         runtime.confirm_reconciliation.assert_awaited_once()
-        risk_reset = await client.post(
+    await runtime.polymarket.close()
+    await runtime.database.close()
+
+
+@pytest.mark.asyncio
+async def test_paper_arm_enters_waiting_state_without_a_tradeable_opportunity(
+    tmp_path: Path,
+    settings: Settings,
+) -> None:
+    configured = settings.model_copy(
+        update={
+            "run_mode": RunMode.PAPER,
+            "ibkr_order_submission_enabled": True,
+            "polymarket_order_submission_enabled": True,
+            "runtime_data_dir": tmp_path,
+            "database_url": f"sqlite+aiosqlite:///{(tmp_path / 'paper-arm.db').as_posix()}",
+            "log_dir": tmp_path / "logs",
+            "audit_export_dir": tmp_path / "audit",
+            "dashboard_username": "operator",
+            "dashboard_password": SecretStr("password"),
+            "session_signing_key": SecretStr("session-signing-key-for-tests"),
+            "control_confirmation_secret": SecretStr("control-secret"),
+        }
+    )
+    app = create_app(configured)
+    runtime = app.state.runtime
+    runtime.repository.audit = AsyncMock(return_value="event")
+    await runtime.state.set_operating_state(paused=True)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        authenticated = await client.post(
+            "/api/v1/session/login",
+            json={"username": "operator", "password": "password"},
+        )
+        assert authenticated.status_code == 200
+        csrf = client.cookies.get("zq_arb_csrf")
+        assert csrf is not None
+
+        armed = await client.post(
             "/api/v1/control",
             headers={"X-CSRF-Token": csrf},
             json={
-                "action": "RESET_STRATEGY_RISK",
-                "reason": "approved post-review high-water reset",
+                "action": "ARM",
+                "reason": "wait for a qualified opportunity",
                 "confirmation_secret": "control-secret",
             },
         )
-        assert risk_reset.status_code == 200
-        runtime.reset_strategy_risk.assert_awaited_once()
+        assert armed.status_code == 200
+        waiting = await runtime.state.get()
+        assert waiting.armed
+        assert not waiting.paused
+        assert waiting.opportunities == ()
+        assert runtime._margin_preview_refresh_requested.is_set()
+
+        await runtime.state.set_operating_state(
+            kill_switch=True,
+            paused=True,
+            armed=False,
+        )
+        halted = await client.post(
+            "/api/v1/control",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "action": "ARM",
+                "reason": "must not clear emergency halt",
+                "confirmation_secret": "control-secret",
+            },
+        )
+        assert halted.status_code == 409
+        assert halted.json()["detail"] == "cannot arm: the emergency halt is active"
+
     await runtime.polymarket.close()
     await runtime.database.close()
 

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from zq_arb.config import Settings
 from zq_arb.domain.enums import BatchState
@@ -15,7 +15,6 @@ from zq_arb.domain.models import (
     BatchView,
     HedgeObligationView,
     PortfolioPositionView,
-    StrategyRiskView,
 )
 from zq_arb.persistence.database import Database
 from zq_arb.persistence.models import (
@@ -26,7 +25,6 @@ from zq_arb.persistence.models import (
     HedgeObligationRecord,
     OrderRecord,
     ReconciliationRecord,
-    StrategyRiskRecord,
 )
 
 
@@ -62,11 +60,6 @@ class Repository:
             "max_zq_position": settings.max_zq_position,
             "min_profit": settings.min_net_profit_usd,
             "min_return_bps": settings.min_return_on_capital_bps,
-            "reserve_values": {
-                "model": settings.model_risk_reserve_usd,
-                "operational": settings.operational_risk_reserve_usd,
-                "effr_basis": settings.effr_basis_reserve_usd,
-            },
         }
         async with self.database.session() as session:
             existing = await session.scalar(
@@ -635,8 +628,7 @@ class Repository:
                 details["reported_filled_quantity"] = str(filled)
             batch.details = details
             batch.updated_at = datetime.now(UTC)
-            if status.upper() in {"CANCELLED", "CANCELED", "APICANCELLED", "INACTIVE"}:
-                await self._refresh_batch_state(session, batch.batch_id)
+            await self._refresh_batch_state(session, batch.batch_id)
 
     async def set_batch_cancel_pending(
         self,
@@ -743,6 +735,30 @@ class Repository:
         view = await self.active_batch_view()
         return tuple(item for item in view.obligations if item.deficit_shares > 0)
 
+    async def unresolved_hedge_obligation_count(self) -> int:
+        """Count every durable hedge deficit, not only those on the displayed batch."""
+
+        async with self.database.session() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(HedgeObligationRecord)
+                .where(HedgeObligationRecord.confirmed_shares < HedgeObligationRecord.due_shares)
+            )
+        return int(count or 0)
+
+    async def normalize_active_batch_state(self) -> None:
+        """Recompute the latest incomplete batch from its durable terminal evidence."""
+
+        async with self.database.session() as session:
+            batch = await session.scalar(
+                select(BatchRecord)
+                .where(BatchRecord.state != BatchState.COMPLETE.value)
+                .order_by(BatchRecord.created_at.desc())
+                .limit(1)
+            )
+            if batch is not None:
+                await self._refresh_batch_state(session, batch.batch_id)
+
     async def _refresh_batch_state(self, session: Any, batch_id: str) -> None:
         batch = await session.scalar(select(BatchRecord).where(BatchRecord.batch_id == batch_id))
         if batch is None:
@@ -811,53 +827,6 @@ class Repository:
             )
         return event_id
 
-    async def load_or_create_strategy_risk(self, settings: Settings) -> StrategyRiskView:
-        async with self.database.session() as session:
-            record = await session.get(StrategyRiskRecord, 1)
-            if record is None:
-                now = datetime.now(UTC)
-                capital = settings.strategy_allocated_capital_usd
-                record = StrategyRiskRecord(
-                    id=1,
-                    allocated_capital=capital,
-                    cumulative_realized_pnl=Decimal("0"),
-                    unrealized_pnl=Decimal("0"),
-                    fees=Decimal("0"),
-                    equity=capital,
-                    high_water_mark=capital,
-                    drawdown=Decimal("0"),
-                    daily_pnl=Decimal("0"),
-                    trading_day=now.date().isoformat(),
-                    source="PERSISTED_STRATEGY_LEDGER",
-                    valued_at=now,
-                )
-                session.add(record)
-                await session.flush()
-            elif record.allocated_capital != settings.strategy_allocated_capital_usd:
-                raise RuntimeError(
-                    "configured strategy capital differs from the persisted risk ledger; "
-                    "an audited capital reset is required"
-                )
-            return self._strategy_risk_view(record)
-
-    async def save_strategy_risk(self, risk: StrategyRiskView) -> None:
-        async with self.database.session() as session:
-            record = await session.get(StrategyRiskRecord, 1)
-            if record is None:
-                record = StrategyRiskRecord(id=1)
-                session.add(record)
-            record.allocated_capital = risk.allocated_capital
-            record.cumulative_realized_pnl = risk.cumulative_realized_pnl
-            record.unrealized_pnl = risk.unrealized_pnl
-            record.fees = risk.fees
-            record.equity = risk.equity
-            record.high_water_mark = risk.high_water_mark
-            record.drawdown = risk.drawdown
-            record.daily_pnl = risk.daily_pnl
-            record.trading_day = risk.trading_day
-            record.source = risk.source
-            record.valued_at = risk.valued_at
-
     async def record_reconciliation(
         self,
         *,
@@ -899,22 +868,3 @@ class Repository:
                 )
             )
         return reconciliation_id
-
-    @staticmethod
-    def _strategy_risk_view(record: StrategyRiskRecord) -> StrategyRiskView:
-        valued_at = record.valued_at
-        if valued_at.tzinfo is None:
-            valued_at = valued_at.replace(tzinfo=UTC)
-        return StrategyRiskView(
-            allocated_capital=record.allocated_capital,
-            cumulative_realized_pnl=record.cumulative_realized_pnl,
-            unrealized_pnl=record.unrealized_pnl,
-            fees=record.fees,
-            equity=record.equity,
-            high_water_mark=record.high_water_mark,
-            drawdown=record.drawdown,
-            daily_pnl=record.daily_pnl,
-            trading_day=record.trading_day,
-            source=record.source,
-            valued_at=valued_at,
-        )

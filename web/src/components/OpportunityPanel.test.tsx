@@ -81,7 +81,6 @@ describe('OpportunityPanel', () => {
       polymarket_pnl: '-2537.703',
       gross_pnl: '327.1095',
       costs: '0',
-      reserves: '0',
       net_pnl: '327.1095',
     }
     opportunity.token_prices = { INC25: '0.51', INC50PLUS: '0.006' }
@@ -114,14 +113,7 @@ describe('OpportunityPanel', () => {
       costs: {
         ibkr_commission: '0',
         polymarket_fees: '0',
-        zq_slippage_reserve: '0',
-        polymarket_slippage_reserve: '0',
-        rounding_reserve: '0',
         explicit_costs: '0',
-        model_reserve: '0',
-        operational_reserve: '0',
-        effr_basis_reserve: '0',
-        reserves: '0',
       },
     }
 
@@ -132,5 +124,54 @@ describe('OpportunityPanel', () => {
     expect(screen.getByText(/4,861.5 × \(0 payout − 0.51 paid\)/)).toBeTruthy()
     expect(screen.getAllByText('Return on capital').length).toBeGreaterThanOrEqual(2)
     expect(screen.getAllByText('3.16%').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('marks fee-dependent economics unavailable instead of showing a zero fee', () => {
+    const opportunity = opportunityFixture()
+    const unavailableScenario = {
+      move_bps: 0,
+      settlement_price: '96.36875',
+      zq_entry_price: '96.30',
+      contracts: 10,
+      futures_point_value: '4167',
+      futures_price_change: '0.06875',
+      futures_pnl: '2864.8125',
+      inc25_shares: '4861.50',
+      inc25_entry_price: '0.51',
+      inc25_payout: '0',
+      inc25_pnl: '-2479.365',
+      inc50plus_shares: '9723.00',
+      inc50plus_entry_price: '0.006',
+      inc50plus_payout: '0',
+      inc50plus_pnl: '-58.338',
+      polymarket_pnl: '-2537.703',
+      gross_pnl: '327.1095',
+      costs: null,
+      net_pnl: null,
+    }
+    opportunity.token_prices = { INC25: '0.51', INC50PLUS: '0.006' }
+    opportunity.emergency_token_prices = { INC25: '0.51', INC50PLUS: '0.006' }
+    opportunity.scenarios = [unavailableScenario]
+    opportunity.emergency_scenarios = [unavailableScenario]
+    opportunity.calculation = {
+      inc25_shares_per_contract: '486.15',
+      inc50plus_shares_per_contract: '972.30',
+      inc25_emergency_hedge_cash: '2479.365',
+      inc50plus_emergency_hedge_cash: '58.338',
+      emergency_hedge_cash: '2537.703',
+      incremental_initial_margin: '5922.959',
+      emergency_cash_reserve: '0',
+      committed_capital: '8460.662',
+      costs: {
+        ibkr_commission: '36.40',
+        polymarket_fees: null,
+        explicit_costs: null,
+      },
+    }
+
+    render(<OpportunityPanel opportunities={[opportunity]} />)
+
+    expect(screen.getByText(/Poly fees unavailable/)).toBeTruthy()
+    expect(screen.getAllByText('Unavailable until current fee parameters load')).toHaveLength(2)
   })
 })
