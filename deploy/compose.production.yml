@@ -1,0 +1,50 @@
+name: zq-arb
+
+services:
+  engine:
+    image: ${ZQ_ARB_IMAGE:?Set ZQ_ARB_IMAGE to an immutable ghcr.io image digest}
+    container_name: zq-arb-engine
+    restart: unless-stopped
+    init: true
+    env_file:
+      - /etc/zq-arb/zq-arb.env
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - /var/lib/zq-arb:/var/lib/zq-arb
+    networks:
+      - private
+      - ib_gateway
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 384m
+    cpus: 0.75
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  private:
+    internal: true
+  ib_gateway:
+    external: true
+    name: ib-gateway_default

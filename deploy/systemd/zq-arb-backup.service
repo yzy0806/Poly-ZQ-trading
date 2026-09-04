@@ -1,0 +1,18 @@
+[Unit]
+Description=Online backup of the ZQ arbitrage SQLite database
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /opt/zq-arb/deploy/backup_sqlite.py
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/zq-arb
+ReadWritePaths=/var/backups/zq-arb
+NoNewPrivileges=true

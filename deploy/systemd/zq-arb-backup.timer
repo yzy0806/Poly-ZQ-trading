@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily ZQ arbitrage database backup during the CME maintenance break
+
+[Timer]
+OnCalendar=*-*-* 16:20:00 America/Chicago
+Persistent=true
+RandomizedDelaySec=120
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

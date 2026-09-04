@@ -130,3 +130,9 @@ Before starting the operator terminal, fill the still-required local values for 
 ## Operational TODO
 
 1. Implement out-of-band critical-alert delivery through an approved webhook, email, or paging channel. `ALERT_WEBHOOK_URL` and `ALERT_EMAIL_TO` are reserved configuration fields only; the current implementation exposes alerts on the dashboard but does not send them externally.
+
+## VPS deployment
+
+The production container, immutable GHCR workflow, loopback-only Compose service, fail-closed
+environment template, and SQLite backup timer are documented in `deploy/README.md`. The initial VPS
+release remains `READ_ONLY`; deployment does not authorize paper or live order submission.
