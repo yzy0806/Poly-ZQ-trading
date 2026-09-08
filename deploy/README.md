@@ -40,19 +40,35 @@ Do not deploy mutable tags such as `latest` or `staging` directly.
 
 ## Configuration and verification
 
-Edit `/etc/zq-arb/zq-arb.env` only on the VPS. Keep it mode `0600`. After editing, validate that the
-three order gates remain false, restart the container, and check both endpoints:
+On the active VPS **78.142.195.87**, edit `/etc/zq-arb/zq-arb.env` and keep it mode `0600`.
+Saving this file does not reload it automatically, and `docker restart` keeps the old environment.
+After editing, retain `READ_ONLY` and the three false order gates, validate Compose, and recreate
+the engine to load the saved values (including `IBKR_ACCOUNT_ID`):
 
 ```sh
-docker compose --env-file /etc/zq-arb/deployment.env \
-  -f /opt/zq-arb/deploy/compose.production.yml up --detach
-curl --fail http://127.0.0.1:8765/healthz
-curl --silent http://127.0.0.1:8765/readyz
+sudo docker compose --env-file /etc/zq-arb/deployment.env \
+  -f /opt/zq-arb/deploy/compose.production.yml config --quiet && \
+sudo docker compose --env-file /etc/zq-arb/deployment.env \
+  -f /opt/zq-arb/deploy/compose.production.yml \
+  up -d --no-deps --force-recreate --pull never engine
 ```
 
-`healthz` proves the process is running. `readyz` is expected to return HTTP 503 until all external
-market-data and account prerequisites are satisfied; it must not be used as a container liveness
-probe.
+After startup, check the process and public health/readiness endpoints:
+
+```sh
+sudo docker ps --filter name=zq-arb-engine
+curl --fail --max-time 5 http://127.0.0.1:8765/healthz
+curl --silent --show-error --max-time 5 http://127.0.0.1:8765/readyz
+```
+
+Recreation briefly interrupts the dashboard and engine connections, retains the database and
+installed image, and leaves Gateway and Cloudflare Tunnel running. `healthz` checks process
+liveness. `readyz` may return HTTP 503 for the separate geographic-eligibility block and does not
+cover all account or margin prerequisites; it must not be used as a container liveness probe.
+
+Gateway credentials in `/opt/ib-gateway/.env` use a separate automatic watcher. Detailed steps,
+including checking that an account ID was loaded without displaying it, are in
+[Section 5.3 of CURRENT_DEPLOYMENT_AND_SECURITY.md](CURRENT_DEPLOYMENT_AND_SECURITY.md#53-configuration-changes).
 
 ## Backup and rollback
 
