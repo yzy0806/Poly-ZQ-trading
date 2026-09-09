@@ -18,7 +18,7 @@ from zq_arb import manual_order_test as manual
 from zq_arb.adapters.polymarket import PolymarketAdapter
 from zq_arb.config import Settings
 from zq_arb.domain.enums import RunMode
-from zq_arb.domain.models import BookLevel, OrderBook
+from zq_arb.domain.models import BookLevel, EligibilityStatus, OrderBook
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +63,7 @@ def args(tmp_path: Path) -> argparse.Namespace:
 
 @pytest.fixture
 def venue(monkeypatch: pytest.MonkeyPatch, live_settings: Settings) -> SimpleNamespace:
+    check_eligibility = PolymarketAdapter.check_eligibility
     signed = SignedOrder(
         builder="0x" + "00" * 32,
         expiration=0,
@@ -95,7 +96,11 @@ def venue(monkeypatch: pytest.MonkeyPatch, live_settings: Settings) -> SimpleNam
     monkeypatch.setattr(
         PolymarketAdapter,
         "check_eligibility",
-        AsyncMock(return_value=SimpleNamespace(permitted_for_live=True)),
+        AsyncMock(
+            return_value=EligibilityStatus(
+                checked=True, blocked=False, country="HK", permitted_for_live=True
+            )
+        ),
     )
     monkeypatch.setattr(
         PolymarketAdapter,
@@ -112,7 +117,42 @@ def venue(monkeypatch: pytest.MonkeyPatch, live_settings: Settings) -> SimpleNam
     monkeypatch.setattr(PolymarketAdapter, "fetch_book", fetch)
     auth = AsyncMock(return_value={"test_2": {"status": "PASS"}, "test_3": {"status": "PASS"}})
     monkeypatch.setattr(manual, "check_auth", auth)
-    return SimpleNamespace(client=client, fetch=fetch, auth=auth, book=book)
+    return SimpleNamespace(
+        client=client, fetch=fetch, auth=auth, book=book, check_eligibility=check_eligibility
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "country,expected", [("HK", True), ("NL", True), ("US", False), (None, False)]
+)
+@pytest.mark.parametrize("blocked", [True, False, None])
+async def test_order_uses_country_policy_and_journals_raw_eligibility(
+    args: argparse.Namespace,
+    live_settings: Settings,
+    venue: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    country: str | None,
+    expected: bool,
+    blocked: bool | None,
+) -> None:
+    monkeypatch.setattr(PolymarketAdapter, "check_eligibility", venue.check_eligibility)
+    monkeypatch.setattr(
+        PolymarketAdapter, "_get", AsyncMock(return_value={"country": country, "blocked": blocked})
+    )
+    report = await manual.run(live_settings, args)
+    assert report["status"] == ("VENUE_ACCEPTED" if expected else "NOT_SUBMITTED")
+    assert report["eligibility"]["blocked"] is blocked
+    assert report["eligibility"]["country"] == country
+    assert report["eligibility"]["permitted_for_live"] is expected
+    journal = json.loads((args.output_dir / "five-shares.json").read_text())
+    assert journal["eligibility"] == report["eligibility"]
+    if expected:
+        venue.client.post_order.assert_awaited_once()
+    else:
+        venue.client.post_order.assert_not_awaited()
+        venue.auth.assert_not_awaited()
+        assert report["eligibility"]["reason"] in report["error"]
 
 
 @pytest.mark.asyncio

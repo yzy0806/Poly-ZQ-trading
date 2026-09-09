@@ -115,15 +115,17 @@ def test_leg_mismatch_is_explicit(settings: Settings) -> None:
         ({"blocked": False, "country": "HK"}, True, "HK"),
         ({"blocked": False, "country": "NL"}, True, "NL"),
         ({"blocked": False, "countryCode": " nl "}, True, "NL"),
-        ({"blocked": True, "country": "NL"}, False, "NL"),
-        ({"country": "NL"}, False, "NL"),
-        ({"blocked": "false", "country": "NL"}, False, "NL"),
-        ({"blocked": 0, "country": "NL"}, False, "NL"),
+        ({"blocked": True, "country": "NL"}, True, "NL"),
+        ({"blocked": True, "country": "HK"}, True, "HK"),
+        ({"country": "NL"}, True, "NL"),
+        ({"blocked": "false", "country": "NL"}, True, "NL"),
+        ({"blocked": 0, "country": "NL"}, True, "NL"),
+        ({"blocked": True, "country": "US"}, False, "US"),
         ({"blocked": False, "country": "US"}, False, "US"),
         ({"blocked": False}, False, None),
     ],
 )
-async def test_supported_countries_still_require_unblocked_venue(
+async def test_eligibility_uses_country_and_keeps_blocked_as_information(
     settings: Settings, payload: dict[str, object], expected: bool, country: str | None
 ) -> None:
     adapter = PolymarketAdapter(settings)
@@ -135,9 +137,34 @@ async def test_supported_countries_still_require_unblocked_venue(
         result = await adapter.check_eligibility()
         assert result.permitted_for_live is expected
         assert result.country == country
-        assert (result.reason == "opening orders permitted") is expected
+        raw = payload.get("blocked")
+        assert result.blocked is (raw if isinstance(raw, bool) else None)
+        assert ("blocked flag is informational" in result.reason) is expected
     finally:
         await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "http_error", "invalid_json", "invalid_object"])
+async def test_failed_eligibility_request_never_grants_permission(
+    settings: Settings, failure: str
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if failure == "timeout":
+            raise httpx.ReadTimeout("test timeout", request=request)
+        if failure == "http_error":
+            return httpx.Response(403, json={"country": "NL", "blocked": False})
+        if failure == "invalid_json":
+            return httpx.Response(200, text="not json")
+        return httpx.Response(200, json=[{"country": "NL"}])
+
+    async with PolymarketAdapter(settings) as adapter:
+        await adapter._http.aclose()
+        adapter._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        result = await adapter.check_eligibility()
+        assert not result.permitted_for_live
+        assert not result.checked
+        assert result.country is None
 
 
 def test_market_websocket_snapshot_and_delta_update_the_authoritative_book() -> None:

@@ -199,9 +199,25 @@ async def test_paper_arm_enters_waiting_state_without_a_tradeable_opportunity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "country,blocked,checked,expected_ready",
+    [
+        ("HK", False, True, True),
+        ("HK", True, True, True),
+        ("NL", True, True, True),
+        ("NL", None, True, True),
+        ("NL", False, False, False),
+        ("US", False, True, False),
+        (None, False, True, False),
+    ],
+)
 async def test_ready_requires_and_accepts_complete_fresh_data(
     tmp_path: Path,
     settings: Settings,
+    country: str | None,
+    blocked: bool | None,
+    checked: bool,
+    expected_ready: bool,
 ) -> None:
     configured = settings.model_copy(
         update={
@@ -238,14 +254,14 @@ async def test_ready_requires_and_accepts_complete_fresh_data(
                 "quotes": quotes,
                 "books": books,
                 "mapping": MarketMappingStatus(verified=True),
-                "eligibility": EligibilityStatus(checked=True, blocked=False),
+                "eligibility": EligibilityStatus(checked=checked, blocked=blocked, country=country),
             }
         )
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         ready = await client.get("/readyz")
-        assert ready.status_code == 200
-        assert ready.json()["ready"] is True
+        assert ready.status_code == (200 if expected_ready else 503)
+        assert ready.json()["ready"] is expected_ready
     await runtime.polymarket.close()
     await runtime.database.close()

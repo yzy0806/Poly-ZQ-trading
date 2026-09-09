@@ -111,7 +111,7 @@ Before starting the operator terminal, fill the still-required local values for 
 
 7. Filled ZQ is never automatically flattened.
 
-8. `LIMITED_LIVE` and `LIVE_ARMED` require a deployment country of Hong Kong (`HK`) or the Netherlands (`NL`) and an explicit unblocked venue eligibility result. They reject failed CLOB authentication, failed wallet classification, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
+8. `LIMITED_LIVE` and `LIVE_ARMED` require a successful geographic eligibility request identifying Hong Kong (`HK`) or the Netherlands (`NL`). The venue's `blocked` flag is retained for diagnostics and does not gate submission. Failed requests and missing or unsupported countries still block submission. The modes reject failed CLOB authentication, failed wallet classification, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
 
 9. Credentials and account identifiers are redacted before logging and are never serialized into browser state or persistence payloads.
 

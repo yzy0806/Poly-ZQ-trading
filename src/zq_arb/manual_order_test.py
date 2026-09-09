@@ -173,9 +173,10 @@ async def run(settings: Settings, args: argparse.Namespace) -> dict[str, Any]:
                     report["status"] = "PREVIEW_ONLY"
                     return report
                 eligibility = await adapter.check_eligibility()
+                report["eligibility"] = eligibility.model_dump(mode="json")
                 if not eligibility.permitted_for_live:
                     raise PermissionError(
-                        "The adapter's existing location/eligibility check failed."
+                        "The adapter's location/eligibility check failed: " + eligibility.reason
                     )
 
             # Reuse the credential diagnostic to verify the existing wallet before

@@ -16,8 +16,8 @@ import structlog
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.config import MarketLegConfig, Settings
 from zq_arb.domain.eligibility import (
-    SUPPORTED_LIVE_COUNTRIES,
     SUPPORTED_LIVE_COUNTRIES_LABEL,
+    polymarket_api_opening_permitted,
 )
 from zq_arb.domain.models import (
     BookLevel,
@@ -316,24 +316,22 @@ class PolymarketAdapter:
                 str(payload.get("country") or payload.get("countryCode") or "").strip().upper()
                 or None
             )
-            country_supported = country in SUPPORTED_LIVE_COUNTRIES
+            permitted = polymarket_api_opening_permitted(checked=True, country=country)
             return EligibilityStatus(
                 checked=True,
                 blocked=blocked,
                 country=country,
-                permitted_for_live=blocked is False and country_supported,
+                permitted_for_live=permitted,
                 checked_at=checked_at,
-                reason="opening orders permitted"
-                if blocked is False and country_supported
-                else "blocked or indeterminate"
-                if blocked is not False
+                reason="deployment country permitted; venue blocked flag is informational"
+                if permitted
                 else f"deployment country {country or 'unknown'} is outside "
                 f"{SUPPORTED_LIVE_COUNTRIES_LABEL}",
             )
         except Exception as exc:
             LOGGER.warning("polymarket_geoblock_failed", error=str(exc))
             return EligibilityStatus(
-                checked=True,
+                checked=False,
                 blocked=None,
                 checked_at=checked_at,
                 reason=f"geoblock check failed: {type(exc).__name__}",

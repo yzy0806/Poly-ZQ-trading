@@ -78,8 +78,25 @@ def test_live_country_gate_supports_hong_kong_and_netherlands(
     assert gate.required_value == "HK, NL"
 
 
-@pytest.mark.parametrize("blocked,checked", [(True, True), (None, True), (False, False)])
-def test_netherlands_does_not_override_blocked_or_unknown_eligibility(
+@pytest.mark.parametrize("blocked", [True, False, None])
+@pytest.mark.parametrize("country", ["HK", "NL"])
+def test_supported_country_ignores_blocked_flag(
+    settings: Settings, blocked: bool | None, country: str
+) -> None:
+    paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
+    context = clear_context().model_copy(
+        update={"eligibility_country": country, "eligibility_blocked": blocked}
+    )
+    result = RiskEngine(paper).qualify(profitable_opportunity(), context)
+    assert result.tradeable
+    gate = next(item for item in result.checks if item.code == "ELIGIBILITY_OPENING")
+    assert gate.passed
+    assert gate.actual_value == "OPEN"
+    assert "blocked flag is informational" in gate.detail
+
+
+@pytest.mark.parametrize("blocked,checked", [(True, False), (None, False), (False, False)])
+def test_netherlands_still_requires_completed_eligibility_check(
     settings: Settings, blocked: bool | None, checked: bool
 ) -> None:
     live = settings.model_copy(update={"run_mode": RunMode.LIMITED_LIVE})
@@ -123,7 +140,10 @@ def test_any_single_hard_gate_blocks(settings: Settings) -> None:
         ({"polymarket_connected": False}, "Polymarket disconnected"),
         ({"mapping_verified": False}, "Polymarket mapping or rule hash unverified"),
         ({"eligibility_checked": False}, "geographic eligibility not checked"),
-        ({"eligibility_blocked": True}, "geographic eligibility is blocked or indeterminate"),
+        (
+            {"eligibility_country": "US"},
+            "geographic eligibility is unchecked or the deployment country is unsupported",
+        ),
         (
             {"polymarket_books_synchronized": False},
             "Polymarket hedge books are WebSocket-unsynchronized",
@@ -224,7 +244,7 @@ def test_opportunity_schema_rejects_every_short_zq_candidate() -> None:
 
 def test_indeterminate_eligibility_is_reported_honestly(settings: Settings) -> None:
     paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
-    context = clear_context().model_copy(update={"eligibility_blocked": None})
+    context = clear_context().model_copy(update={"eligibility_country": None})
     result = RiskEngine(paper).qualify(profitable_opportunity(), context)
 
     check = next(item for item in result.checks if item.code == "ELIGIBILITY_OPENING")

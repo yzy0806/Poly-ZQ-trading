@@ -10,6 +10,7 @@ from zq_arb.config import Settings
 from zq_arb.domain.eligibility import (
     SUPPORTED_LIVE_COUNTRIES,
     SUPPORTED_LIVE_COUNTRIES_LABEL,
+    polymarket_api_opening_permitted,
 )
 from zq_arb.domain.enums import ConnectionStatus, GateStatus, RunMode, Side
 from zq_arb.domain.models import GateCheck, Opportunity
@@ -156,22 +157,30 @@ class RiskEngine:
             "CHECKED",
             "geographic eligibility not checked",
         )
+        api_opening_permitted = polymarket_api_opening_permitted(
+            checked=context.eligibility_checked,
+            country=context.eligibility_country,
+        )
         eligibility_actual = (
-            "BLOCKED"
-            if context.eligibility_blocked is True
-            else "OPEN"
-            if context.eligibility_blocked is False
+            "OPEN"
+            if api_opening_permitted
+            else "UNSUPPORTED_COUNTRY"
+            if context.eligibility_checked and context.eligibility_country is not None
             else "INDETERMINATE"
         )
         add(
             "ELIGIBILITY_OPENING",
             "ELIGIBILITY",
             "Opening-order eligibility",
-            context.eligibility_blocked is False if context.eligibility_checked else None,
+            api_opening_permitted if context.eligibility_checked else None,
             eligibility_actual,
             "==",
             "OPEN",
-            "geographic eligibility is blocked or indeterminate",
+            "geographic eligibility is unchecked or the deployment country is unsupported",
+            pass_detail=(
+                f"deployment country {context.eligibility_country} permitted; "
+                "venue blocked flag is informational"
+            ),
             applicable=context.eligibility_checked,
         )
         add(

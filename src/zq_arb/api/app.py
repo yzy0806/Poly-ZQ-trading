@@ -30,6 +30,7 @@ from zq_arb.api.security import (
     SessionManager,
 )
 from zq_arb.config import Settings, get_settings
+from zq_arb.domain.eligibility import polymarket_api_opening_permitted
 from zq_arb.domain.enums import ControlAction, RunMode
 from zq_arb.domain.models import EngineSnapshot
 from zq_arb.observability import configure_logging, ensure_runtime_directories
@@ -156,8 +157,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reasons.append("Polymarket books are not synchronized to the market WebSocket")
         if not snapshot.mapping.verified:
             reasons.append("Polymarket market mapping is unverified")
-        if snapshot.eligibility.blocked is not False:
-            reasons.append("geographic eligibility is blocked or indeterminate")
+        if not polymarket_api_opening_permitted(
+            checked=snapshot.eligibility.checked,
+            country=snapshot.eligibility.country,
+        ):
+            reasons.append(
+                "geographic eligibility is unchecked or the deployment country is unsupported"
+            )
         ready = not reasons
         return JSONResponse(
             status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,

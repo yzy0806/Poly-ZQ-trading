@@ -54,16 +54,20 @@ Only run this command yourself when you intend to submit a real order:
 
 Placement keeps the adapter's market mapping, eligibility, price cap, collateral
 and authorization checks. The eligibility policy supports Hong Kong (`HK`) and
-the Netherlands (`NL`), and requires the live venue response to say `blocked=false`.
-Blocked, missing or indeterminate responses still stop placement. The script
+the Netherlands (`NL`). A successful eligibility request must identify one of
+these countries. The venue's `blocked` field is informational: `true`, `false`,
+or an absent/invalid flag does not affect submission. Failed requests, invalid
+response objects, and missing or unsupported countries still stop placement. The script
 checks the current tick size and minimum size.
 If the venue requires more than five shares, it stops; it never raises the size.
 The price cap is per share and excludes any venue fees. The balance check and
 reported maximum order notional use five times the selected limit price.
 
-Polymarket's geographic-restrictions documentation, checked on 2026-09-09, lists
+Polymarket's geographic-restrictions documentation, checked on 2026-09-10, lists
 the Netherlands as close-only on the frontend while stating that the API is not
-restricted. The application does not override a blocked live eligibility response.
+restricted. The operator-selected application policy treats the `blocked` flag as
+informational for all supported deployment countries; this is not a guarantee
+that the venue will accept an order. Venue rejections remain failures.
 Source: [Polymarket geographic restrictions](https://docs.polymarket.com/api-reference/geoblock).
 
 The order is GTC. A limit at the observed best ask may fill immediately; if the
@@ -88,6 +92,7 @@ Cancellation cannot reverse fills that already occurred.
 Each mutation requires a unique `--test-id`. Its JSON journal is stored under
 `runtime/manual-order-tests/`; existing IDs cannot be reused. Journals contain
 the selected order details, authentication responses with credentials redacted,
+the eligibility country, raw parsed `blocked` value and decision reason,
 and the normalized adapter result. Signed order payloads are never logged.
 SDK HTTP rejections also include the HTTP status, venue code and message with
 credentials/signatures redacted. The failed phase identifies whether preparation

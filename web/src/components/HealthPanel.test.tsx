@@ -1,8 +1,10 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import type { EngineSnapshot } from '../types'
 import { HealthPanel } from './HealthPanel'
+
+afterEach(cleanup)
 
 function stateFixture(): EngineSnapshot {
   return {
@@ -98,6 +100,28 @@ function stateFixture(): EngineSnapshot {
 }
 
 describe('HealthPanel', () => {
+  it.each(['HK', 'NL'])('shows API eligibility for %s despite the raw blocked flag', (country) => {
+    const state = stateFixture()
+    state.eligibility = {
+      checked: true, blocked: true, country, permitted_for_live: true,
+      reason: 'deployment country permitted; venue blocked flag is informational',
+    }
+    render(<HealthPanel state={state} />)
+    expect(screen.getByText(country)).toBeTruthy()
+    expect(screen.queryByText('BLOCKED / UNKNOWN')).toBeNull()
+    expect(screen.getByText(state.eligibility.reason)).toBeTruthy()
+  })
+
+  it('shows an unsuccessful eligibility decision even when the raw flag is false', () => {
+    const state = stateFixture()
+    state.eligibility = {
+      checked: true, blocked: false, country: 'US', permitted_for_live: false,
+      reason: 'deployment country US is outside HK, NL',
+    }
+    render(<HealthPanel state={state} />)
+    expect(screen.getByText('BLOCKED / UNKNOWN')).toBeTruthy()
+  })
+
   it('separates farm and subscription health and labels recovered alerts', () => {
     render(<HealthPanel state={stateFixture()} />)
 
