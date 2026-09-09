@@ -63,6 +63,44 @@ def test_every_clear_gate_allows_paper_qualification(settings: Settings) -> None
     assert result.reasons == ()
 
 
+@pytest.mark.parametrize(
+    "country,allowed", [("HK", True), ("NL", True), ("US", False), (None, False)]
+)
+def test_live_country_gate_supports_hong_kong_and_netherlands(
+    settings: Settings, country: str | None, allowed: bool
+) -> None:
+    live = settings.model_copy(update={"run_mode": RunMode.LIMITED_LIVE})
+    context = clear_context().model_copy(update={"eligibility_country": country})
+    result = RiskEngine(live).qualify(profitable_opportunity(), context)
+    gate = next(item for item in result.checks if item.code == "LIVE_COUNTRY")
+    assert gate.passed is allowed
+    assert gate.operator == "IN"
+    assert gate.required_value == "HK, NL"
+
+
+@pytest.mark.parametrize("blocked,checked", [(True, True), (None, True), (False, False)])
+def test_netherlands_does_not_override_blocked_or_unknown_eligibility(
+    settings: Settings, blocked: bool | None, checked: bool
+) -> None:
+    live = settings.model_copy(update={"run_mode": RunMode.LIMITED_LIVE})
+    context = clear_context().model_copy(
+        update={
+            "eligibility_country": "NL",
+            "eligibility_blocked": blocked,
+            "eligibility_checked": checked,
+        }
+    )
+    result = RiskEngine(live).qualify(profitable_opportunity(), context)
+    assert not result.tradeable
+    country = next(item for item in result.checks if item.code == "LIVE_COUNTRY")
+    assert country.passed
+    assert any(
+        item.blocking and not item.passed
+        for item in result.checks
+        if item.code in {"ELIGIBILITY_CHECKED", "ELIGIBILITY_OPENING"}
+    )
+
+
 def test_read_only_always_prohibits_orders(settings: Settings) -> None:
     read_only = settings.model_copy(update={"run_mode": RunMode.READ_ONLY})
     result = RiskEngine(read_only).qualify(profitable_opportunity(), clear_context())

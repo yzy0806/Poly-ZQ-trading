@@ -111,7 +111,7 @@ Before starting the operator terminal, fill the still-required local values for 
 
 7. Filled ZQ is never automatically flattened.
 
-8. `LIMITED_LIVE` and `LIVE_ARMED` reject failed CLOB authentication, failed wallet classification, non-Hong-Kong geoblock results, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
+8. `LIMITED_LIVE` and `LIVE_ARMED` require a deployment country of Hong Kong (`HK`) or the Netherlands (`NL`) and an explicit unblocked venue eligibility result. They reject failed CLOB authentication, failed wallet classification, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
 
 9. Credentials and account identifiers are redacted before logging and are never serialized into browser state or persistence payloads.
 
@@ -152,3 +152,40 @@ The September 2026 overflow remedy, safety boundaries, authenticated event diagn
 4. Builder credentials are unnecessary for this configuration. Remove obsolete `POLYMARKET_BUILDER_API_KEY`, `POLYMARKET_BUILDER_API_SECRET`, `POLYMARKET_BUILDER_API_PASSPHRASE`, `POLYMARKET_BUILDER_CODE`, `POLYMARKET_RELAYER_HOST`, and `POLYMARKET_RELAYER_TX_TYPE` from environment files when adopting this version. They were previously declared but unused. The official SDK selects its relayer endpoint and wallet transaction type. Unknown environment variables remain rejected to catch configuration mistakes.
 
 5. The integration follows the [official Python SDK](https://docs.polymarket.com/getting-started/python) and [wallet authentication documentation](https://docs.polymarket.com/trading/wallets-auth). Automated authentication tests replace the SDK network boundary; they do not create live credentials or submit wallet transactions.
+# Local Polymarket credential diagnostic
+
+For an operator-run five-share real-order test, see
+[Manual Polymarket order test](docs/manual-polymarket-order-test.md). The script
+provides preview, placement and cancellation commands; it does not start the engine.
+
+From the repository directory, run in PowerShell:
+
+```powershell
+$env:PYTHONPATH='src'
+.venv/Scripts/python.exe scripts/check_polymarket_auth.py
+```
+
+This uses the local `.env` to check that the private key matches the configured signer,
+that the funder is a supported wallet for that signer, and that a contract wallet is
+already deployed. It then validates CLOB authentication through active API keys,
+the first page of open orders, and collateral balance/allowances. It does not start
+the trading engine or connect to IBKR. An absent CLOB override uses the installed
+SDK's create-or-derive credential flow; its only POST is `/auth/api-key`.
+Explicit credentials are tested as supplied, without silently replacing them.
+
+The command prints and saves HTTP statuses and JSON response bodies to
+`runtime/polymarket-auth-check.json`, with credentials/signatures redacted. Exit 0
+means both checks passed; exit 1 indicates failure or incomplete verification.
+Network failures are local errors, not venue responses. Non-JSON response bodies
+are withheld because they cannot be safely redacted. The report can contain wallet
+addresses, balances and open orders, so it stays in the ignored runtime directory.
+Use `--env-file` and `--output` to select different local paths.
+Add `--include-history` to test authenticated CLOB trade history (first page) and
+public Polymarket wallet activity (latest 20 records, including transaction hashes).
+The latter is Polymarket's indexed activity feed, not a complete blockchain audit,
+and does not validate relayer credentials. These checks also affect the exit status.
+
+No order submission, fund transfer, wallet deployment or approval endpoint is
+permitted. Passing confirms wallet/authentication checks, not order acceptance,
+execution or relayer credential validity. The API's funder identifies the wallet
+backing orders; use the application's deposit instructions when adding funds.

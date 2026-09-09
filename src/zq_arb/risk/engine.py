@@ -7,6 +7,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from zq_arb.config import Settings
+from zq_arb.domain.eligibility import (
+    SUPPORTED_LIVE_COUNTRIES,
+    SUPPORTED_LIVE_COUNTRIES_LABEL,
+)
 from zq_arb.domain.enums import ConnectionStatus, GateStatus, RunMode, Side
 from zq_arb.domain.models import GateCheck, Opportunity
 
@@ -174,11 +178,11 @@ class RiskEngine:
             "LIVE_COUNTRY",
             "ELIGIBILITY",
             "Live deployment country",
-            context.eligibility_country == "HK",
+            context.eligibility_country in SUPPORTED_LIVE_COUNTRIES,
             context.eligibility_country,
-            "==",
-            "HK",
-            "live deployment country is not HK",
+            "IN",
+            SUPPORTED_LIVE_COUNTRIES_LABEL,
+            f"live deployment country is outside {SUPPORTED_LIVE_COUNTRIES_LABEL}",
             applicable=settings.run_mode.is_live,
         )
 

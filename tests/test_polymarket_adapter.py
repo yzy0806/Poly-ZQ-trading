@@ -108,6 +108,38 @@ def test_leg_mismatch_is_explicit(settings: Settings) -> None:
     assert f"{leg.code}: condition id mismatch" in errors
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload,expected,country",
+    [
+        ({"blocked": False, "country": "HK"}, True, "HK"),
+        ({"blocked": False, "country": "NL"}, True, "NL"),
+        ({"blocked": False, "countryCode": " nl "}, True, "NL"),
+        ({"blocked": True, "country": "NL"}, False, "NL"),
+        ({"country": "NL"}, False, "NL"),
+        ({"blocked": "false", "country": "NL"}, False, "NL"),
+        ({"blocked": 0, "country": "NL"}, False, "NL"),
+        ({"blocked": False, "country": "US"}, False, "US"),
+        ({"blocked": False}, False, None),
+    ],
+)
+async def test_supported_countries_still_require_unblocked_venue(
+    settings: Settings, payload: dict[str, object], expected: bool, country: str | None
+) -> None:
+    adapter = PolymarketAdapter(settings)
+    await adapter._http.aclose()
+    adapter._http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    )
+    try:
+        result = await adapter.check_eligibility()
+        assert result.permitted_for_live is expected
+        assert result.country == country
+        assert (result.reason == "opening orders permitted") is expected
+    finally:
+        await adapter.close()
+
+
 def test_market_websocket_snapshot_and_delta_update_the_authoritative_book() -> None:
     snapshot_event = VenueEvent(
         venue="POLYMARKET",

@@ -15,6 +15,10 @@ import structlog
 
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.config import MarketLegConfig, Settings
+from zq_arb.domain.eligibility import (
+    SUPPORTED_LIVE_COUNTRIES,
+    SUPPORTED_LIVE_COUNTRIES_LABEL,
+)
 from zq_arb.domain.models import (
     BookLevel,
     EligibilityStatus,
@@ -308,16 +312,23 @@ class PolymarketAdapter:
                 raise PolymarketProtocolError("geoblock response is not an object")
             blocked_raw = payload.get("blocked")
             blocked = blocked_raw if isinstance(blocked_raw, bool) else None
-            country = str(payload.get("country") or payload.get("countryCode") or "") or None
+            country = (
+                str(payload.get("country") or payload.get("countryCode") or "").strip().upper()
+                or None
+            )
+            country_supported = country in SUPPORTED_LIVE_COUNTRIES
             return EligibilityStatus(
                 checked=True,
                 blocked=blocked,
                 country=country,
-                permitted_for_live=blocked is False and country == "HK",
+                permitted_for_live=blocked is False and country_supported,
                 checked_at=checked_at,
                 reason="opening orders permitted"
-                if blocked is False
-                else "blocked or indeterminate",
+                if blocked is False and country_supported
+                else "blocked or indeterminate"
+                if blocked is not False
+                else f"deployment country {country or 'unknown'} is outside "
+                f"{SUPPORTED_LIVE_COUNTRIES_LABEL}",
             )
         except Exception as exc:
             LOGGER.warning("polymarket_geoblock_failed", error=str(exc))
