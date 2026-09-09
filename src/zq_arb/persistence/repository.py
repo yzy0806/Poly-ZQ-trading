@@ -173,9 +173,9 @@ class Repository:
                 item.venue_order_id: item for item in orders if item.venue == "POLYMARKET"
             }
 
-        token_labels = {
-            leg.yes_token_id: f"{leg.code} YES" for leg in settings.market_legs
-        } | {leg.no_token_id: f"{leg.code} NO" for leg in settings.market_legs}
+        token_labels = {leg.yes_token_id: f"{leg.code} YES" for leg in settings.market_legs} | {
+            leg.no_token_id: f"{leg.code} NO" for leg in settings.market_legs
+        }
         aggregates: dict[tuple[str, str], dict[str, Any]] = {}
         for execution in executions:
             if bool(execution.details.get("terminal_failed")):
@@ -235,6 +235,29 @@ class Repository:
                 )
             )
         return tuple(positions)
+
+    async def abandon_zq_intent(self, batch_id: str, reason: str) -> None:
+        """Terminalize an unsent entry only; never cancel an order that was sent."""
+        async with self.database.session() as session:
+            batch = await session.scalar(
+                select(BatchRecord).where(BatchRecord.batch_id == batch_id)
+            )
+            order = await session.scalar(
+                select(OrderRecord).where(
+                    OrderRecord.batch_id == batch_id, OrderRecord.venue == "IBKR"
+                )
+            )
+            if batch is None or order is None or order.state != "INTENT":
+                raise RuntimeError("cannot abandon an entry that is not an unsent intent")
+            order.state = "ABORTED"
+            order.details = {**order.details, "abort_reason": reason}
+            batch.state = BatchState.COMPLETE.value
+            batch.details = {
+                **batch.details,
+                "zq_order_status": "ABORTED",
+                "remaining_quantity": "0",
+                "abort_reason": reason,
+            }
 
     async def mark_zq_submitted(self, batch_id: str) -> None:
         async with self.database.session() as session:

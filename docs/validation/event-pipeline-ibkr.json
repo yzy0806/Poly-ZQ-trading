@@ -1,0 +1,46 @@
+{
+  "passed": true,
+  "collected_utc": "2026-09-08T15:09:23.462053+00:00",
+  "environment": "Windows-11-10.0.26200-SP0 Python 3.13.12",
+  "mode": "ibkr",
+  "events_per_venue": 30000,
+  "target_rate_per_venue": 10000,
+  "producer_burst": 100,
+  "books": 10,
+  "levels_per_side": 100,
+  "dashboard_readers": 2,
+  "database": "in-memory SQLite",
+  "network": "none; simulated hedge transport",
+  "elapsed_seconds": 3.027,
+  "sent": {
+    "IBKR_quotes": 30000
+  },
+  "processed_events_per_second": 9911.9,
+  "critical_callbacks_verified_in_order": 6,
+  "duplicate_and_late_fill_quantity": "5.00000000",
+  "unresolved_hedges": 0,
+  "final_quotes_and_books_correct": true,
+  "dashboard_views": 24,
+  "diagnostics": {
+    "queue_depth": 0,
+    "queue_capacity": 10000,
+    "queue_high_water": 800,
+    "maximum_event_wait_ms": 75.177,
+    "maximum_handler_ms": 56.905,
+    "maximum_event_loop_lag_ms": 11.792,
+    "processed": {
+      "IBKR": 30006
+    },
+    "skipped": {},
+    "failed": {},
+    "ibkr_ingress": {
+      "received": 30006,
+      "enqueued": 30006,
+      "pending": 0,
+      "capacity": 10000,
+      "high_water": 299,
+      "overflowed": false
+    },
+    "consumer_running": true
+  }
+}

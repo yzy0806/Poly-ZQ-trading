@@ -32,8 +32,14 @@ def test_dashboard_snapshot_bounds_depth() -> None:
         books={asset_id: OrderBook(token_id=asset_id, bids=levels, asks=levels)},
     )
     view = dashboard_snapshot(snapshot)
-    assert len(view.books[asset_id].bids) == 10
+    assert len(view.books[asset_id].bids) == 5
     assert len(snapshot.books[asset_id].bids) == 29
+    assert [level.price for level in view.books[asset_id].bids] == sorted(
+        (level.price for level in levels), reverse=True
+    )[:5]
+    assert [level.price for level in view.books[asset_id].asks] == sorted(
+        level.price for level in levels
+    )[:5]
 
 
 @pytest.mark.asyncio
@@ -62,6 +68,7 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
         not_ready = await client.get("/readyz")
         assert not_ready.status_code == 503
         assert "target ZQ quote is unavailable" in not_ready.json()["reasons"]
+        assert (await client.get("/api/v1/diagnostics/events")).status_code == 401
         unauthorized = await client.get("/api/v1/state")
         assert unauthorized.status_code == 401
         authenticated = await client.post(
@@ -69,6 +76,15 @@ async def test_login_state_and_read_only_control(tmp_path: Path, settings: Setti
             json={"username": "operator", "password": "password"},
         )
         assert authenticated.status_code == 200
+        diagnostics = await client.get("/api/v1/diagnostics/events")
+        assert diagnostics.status_code == 200
+        assert diagnostics.json()["queue_capacity"] == configured.event_queue_maxsize
+        assert "account" not in diagnostics.json()
+        runtime.ibkr._event_queue_overflowed = True
+        halted = await client.get("/readyz")
+        assert halted.status_code == 503
+        assert "engine safety halt is active" in halted.json()["reasons"]
+        runtime.ibkr._event_queue_overflowed = False
         state = await client.get("/api/v1/state")
         assert state.status_code == 200
         readiness = await client.get("/api/v1/readiness")

@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "collected_utc": "2026-09-08T15:07:59.134563+00:00",
+  "environment": "Windows-11-10.0.26200-SP0 Python 3.13.12",
+  "mode": "mixed",
+  "events_per_venue": 150000,
+  "target_rate_per_venue": 2500,
+  "producer_burst": 100,
+  "books": 10,
+  "levels_per_side": 100,
+  "dashboard_readers": 2,
+  "database": "in-memory SQLite",
+  "network": "none; simulated hedge transport",
+  "elapsed_seconds": 59.997,
+  "sent": {
+    "IBKR_quotes": 150000,
+    "POLYMARKET_deltas": 150000
+  },
+  "processed_events_per_second": 5000.3,
+  "critical_callbacks_verified_in_order": 6,
+  "duplicate_and_late_fill_quantity": "5.00000000",
+  "unresolved_hedges": 0,
+  "final_quotes_and_books_correct": true,
+  "dashboard_views": 462,
+  "diagnostics": {
+    "queue_depth": 0,
+    "queue_capacity": 10000,
+    "queue_high_water": 801,
+    "maximum_event_wait_ms": 158.882,
+    "maximum_handler_ms": 81.259,
+    "maximum_event_loop_lag_ms": 16.426,
+    "processed": {
+      "IBKR": 150006,
+      "POLYMARKET": 150000
+    },
+    "skipped": {},
+    "failed": {},
+    "ibkr_ingress": {
+      "received": 150006,
+      "enqueued": 150006,
+      "pending": 0,
+      "capacity": 10000,
+      "high_water": 378,
+      "overflowed": false
+    },
+    "consumer_running": true
+  }
+}

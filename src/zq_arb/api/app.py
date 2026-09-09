@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -41,7 +42,12 @@ def dashboard_snapshot(snapshot: EngineSnapshot) -> EngineSnapshot:
     """Bound the browser payload without changing the authoritative engine state."""
 
     books = {
-        token_id: book.model_copy(update={"bids": book.bids[:10], "asks": book.asks[:10]})
+        token_id: book.model_copy(
+            update={
+                "bids": tuple(sorted(book.bids, key=lambda level: level.price, reverse=True)[:5]),
+                "asks": tuple(sorted(book.asks, key=lambda level: level.price)[:5]),
+            }
+        )
         for token_id, book in snapshot.books.items()
     }
     return snapshot.model_copy(update={"books": books})
@@ -122,6 +128,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def readyz() -> JSONResponse:
         snapshot = await runtime.state.get()
         reasons: list[str] = []
+        if runtime.ibkr.event_queue_overflowed or snapshot.kill_switch:
+            reasons.append("engine safety halt is active")
+        if runtime._tasks and not runtime.event_diagnostics()["consumer_running"]:
+            reasons.append("venue event consumer is not running")
         if snapshot.ibkr.status.value != "CONNECTED":
             reasons.append("IBKR is not connected")
         if snapshot.polymarket.status.value != "CONNECTED":
@@ -157,6 +167,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "reasons": reasons,
             },
         )
+
+    @app.get("/api/v1/diagnostics/events")
+    async def event_diagnostics(
+        identity: Annotated[SessionIdentity, Depends(require_auth)],
+    ) -> dict[str, Any]:
+        return runtime.event_diagnostics()
 
     @app.post("/api/v1/session/login")
     async def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, Any]:
@@ -319,6 +335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             async for snapshot in runtime.state.subscribe():
                 await websocket.send_text(dashboard_snapshot(snapshot).model_dump_json())
+                await asyncio.sleep(max(0.25, configured.engine_state_publish_interval_ms / 1000))
         except WebSocketDisconnect:
             return
 

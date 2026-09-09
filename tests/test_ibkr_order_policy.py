@@ -114,6 +114,7 @@ def test_ibkr_cancellations_use_typed_order_cancel_payload(settings: Settings) -
     adapter._client = MagicMock()
     adapter._client.isConnected.return_value = True
 
+    adapter._event_queue_overflowed = True
     adapter.cancel_order(915)
     adapter.cancel_margin_preview(7001)
 

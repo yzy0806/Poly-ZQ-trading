@@ -136,3 +136,7 @@ Before starting the operator terminal, fill the still-required local values for 
 The production container, immutable GHCR workflow, loopback-only Compose service, fail-closed
 environment template, and SQLite backup timer are documented in `deploy/README.md`. The initial VPS
 release remains `READ_ONLY`; deployment does not authorize paper or live order submission.
+
+## Event pipeline performance and recovery
+
+The September 2026 overflow remedy, safety boundaries, authenticated event diagnostics, offline load-test commands, and validation evidence are documented in [event-pipeline-remedy.md](docs/event-pipeline-remedy.md).

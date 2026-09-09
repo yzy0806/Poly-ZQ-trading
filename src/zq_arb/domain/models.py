@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -116,11 +116,21 @@ class OrderBook(StrictModel):
     min_order_size: Decimal | None = None
     negative_risk: bool | None = None
     book_hash: str | None = None
+
     source: str = "REST"
     stream_synchronized: bool = False
     source_timestamp: datetime | None = None
     last_reconciled_at: datetime | None = None
     received_at: datetime = Field(default_factory=utc_now)
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        # Ladders contain frozen BookLevels with immutable Decimal fields.
+        # Copy the model itself so model_copy(deep=True, update=...) stays safe.
+        memo = {} if memo is None else memo
+        for levels in (self.bids, self.asks):
+            if isinstance(levels, tuple):
+                memo[id(levels)] = levels
+        return super().__deepcopy__(memo)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

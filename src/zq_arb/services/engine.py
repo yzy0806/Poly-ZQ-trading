@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
+from contextlib import aclosing
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
@@ -93,10 +95,19 @@ class EngineRuntime:
         self._tasks: list[asyncio.Task[None]] = []
         self._stopping = asyncio.Event()
         self._polymarket_resync_requested = asyncio.Event()
+        self._polymarket_stream_reset = asyncio.Event()
+        self._polymarket_stream_generation = 0
         self._margin_preview_refresh_requested = asyncio.Event()
         self._polymarket_fee_parameters: dict[str, dict[str, Decimal]] = {}
         self._polymarket_fee_parameters_at: datetime | None = None
         self._event_overflow_halted = False
+        self._event_counts: Counter[str] = Counter()
+        self._skipped_event_counts: Counter[str] = Counter()
+        self._failed_event_counts: Counter[str] = Counter()
+        self._max_event_wait_ms = 0.0
+        self._max_handler_ms = 0.0
+        self._max_event_loop_lag_ms = 0.0
+        self._queue_high_water = 0
 
     async def start(self) -> None:
         await self.database.initialize()
@@ -182,31 +193,74 @@ class EngineRuntime:
         await self.polymarket.close()
         await self.database.close()
 
+    def event_diagnostics(self) -> dict[str, Any]:
+        consumer = next(
+            (task for task in self._tasks if task.get_name() == "venue-event-processor"), None
+        )
+        return {
+            "queue_depth": self.events.qsize(),
+            "queue_capacity": self.events.maxsize,
+            "queue_high_water": self._queue_high_water,
+            "maximum_event_wait_ms": round(self._max_event_wait_ms, 3),
+            "maximum_handler_ms": round(self._max_handler_ms, 3),
+            "maximum_event_loop_lag_ms": round(self._max_event_loop_lag_ms, 3),
+            "processed": dict(self._event_counts),
+            "skipped": dict(self._skipped_event_counts),
+            "failed": dict(self._failed_event_counts),
+            "ibkr_ingress": self.ibkr.ingress_diagnostics(),
+            "consumer_running": consumer is not None and not consumer.done(),
+        }
+
     async def _process_events(self) -> None:
+        loop = asyncio.get_running_loop()
+        budget_started = loop.time()
+        handled = 0
         while not self._stopping.is_set():
             event = await self.events.get()
+            self._queue_high_water = max(self._queue_high_water, self.events.qsize() + 1)
+            started = loop.time()
+            self._max_event_wait_ms = max(
+                self._max_event_wait_ms, (utc_now() - event.received_at).total_seconds() * 1000
+            )
             try:
                 if event.venue == "IBKR":
+                    if not self.ibkr.is_current_market_event(event):
+                        self._skipped_event_counts[event.venue] += 1
+                        continue
                     await self.execution.handle_ibkr_event(event)
                     await self.state.apply_ibkr_event(event)
                     if event.kind in {"connection", "account_summary", "pnl"} or (
-                        event.kind in {"tick_price", "tick_size"}
+                        event.kind == "tick_price"
+                        and event.payload.get("tick_type") in {1, 66}
                         and str(event.payload.get("month") or "")
                         == self.settings.ibkr_zq_contract_month
                     ):
                         self._margin_preview_refresh_requested.set()
                 else:
+                    if not event.kind.startswith("user_") and (
+                        (
+                            event.stream_generation
+                            and event.stream_generation != self._polymarket_stream_generation
+                        )
+                        or self._polymarket_stream_reset.is_set()
+                    ):
+                        self._skipped_event_counts[event.venue] += 1
+                        continue
                     await self.execution.handle_polymarket_event(event)
                     await self.state.apply_polymarket_event(event)
+                self._event_counts[event.venue] += 1
             except PolymarketProtocolError as exc:
+                self._failed_event_counts[event.venue] += 1
                 LOGGER.warning("polymarket_book_resync_required", kind=event.kind, error=str(exc))
                 await self.state.mark_polymarket_books_unsynchronized()
                 await self.state.set_polymarket_health(
                     ConnectionStatus.DEGRADED,
-                    "market WebSocket book integrity failed; REST recovery requested",
+                    "market WebSocket book integrity failed; fresh stream snapshot required",
                 )
-                self._polymarket_resync_requested.set()
+                self._polymarket_stream_reset.set()
             except Exception:
+                self._failed_event_counts[event.venue] += 1
+                await self.state.set_operating_state(kill_switch=True, paused=True, armed=False)
                 LOGGER.exception(
                     "venue_event_processing_failed", venue=event.venue, kind=event.kind
                 )
@@ -217,7 +271,13 @@ class EngineRuntime:
                     flashing=True,
                 )
             finally:
+                self._max_handler_ms = max(self._max_handler_ms, (loop.time() - started) * 1000)
                 self.events.task_done()
+                handled += 1
+                if handled >= 64 or loop.time() - budget_started >= 0.005:
+                    await asyncio.sleep(0)
+                    handled = 0
+                    budget_started = loop.time()
 
     async def _ibkr_connection_loop(self) -> None:
         attempts = 0
@@ -264,7 +324,6 @@ class EngineRuntime:
         """Recreate current-generation streams after a socket or farm recovery."""
 
         while not self._stopping.is_set():
-            snapshot = await self.state.get()
             if self.ibkr.event_queue_overflowed and not self._event_overflow_halted:
                 self._event_overflow_halted = True
                 await self.state.set_operating_state(
@@ -279,6 +338,7 @@ class EngineRuntime:
                     "trading is halted pending restart and reconciliation",
                     flashing=True,
                 )
+            snapshot = await self.state.get()
             if self.ibkr.connected and snapshot.metadata.get("ibkr_resubscribe_required"):
                 try:
                     await self.state.begin_ibkr_subscriptions(
@@ -291,7 +351,12 @@ class EngineRuntime:
                     self._margin_preview_refresh_requested.set()
                 except Exception as exc:
                     LOGGER.warning("ibkr_market_data_resubscribe_failed", error=str(exc))
+            wake_at = asyncio.get_running_loop().time() + 0.25
             await asyncio.sleep(0.25)
+            self._max_event_loop_lag_ms = max(
+                self._max_event_loop_lag_ms,
+                (asyncio.get_running_loop().time() - wake_at) * 1000,
+            )
 
     async def _ibkr_margin_preview_loop(self) -> None:
         """Maintain a paced, non-routing BUY-10 ZQ margin preview."""
@@ -354,7 +419,7 @@ class EngineRuntime:
                 )
                 deadline = loop.time() + self.settings.ibkr_margin_preview_timeout_seconds
                 while loop.time() < deadline:
-                    preview = (await self.state.get()).margin_preview
+                    preview = await self.state.get_margin_preview()
                     if preview.order_id == order_id and preview.status in {
                         MarginPreviewStatus.AVAILABLE,
                         MarginPreviewStatus.FAILED,
@@ -407,9 +472,13 @@ class EngineRuntime:
                     await self.state.set_eligibility(eligibility)
                     last_eligibility = now
                     eligibility_due = False
+                generation = self._polymarket_stream_generation
                 books = await self.polymarket.snapshot_all_books()
+                if generation != self._polymarket_stream_generation:
+                    continue
                 mismatches = await self.state.reconcile_polymarket_books(books)
                 if mismatches:
+                    self._polymarket_stream_reset.set()
                     LOGGER.warning(
                         "polymarket_book_reconciliation_mismatch",
                         mismatch_count=len(mismatches),
@@ -519,6 +588,12 @@ class EngineRuntime:
             except TimeoutError:
                 pass
 
+    async def _pump_polymarket_generation(self, token_ids: list[str], generation: int) -> None:
+        async with aclosing(self.polymarket.public_market_stream(token_ids)) as stream:
+            async for event in stream:
+                await self.events.put(event.model_copy(update={"stream_generation": generation}))
+        raise ConnectionError("Polymarket market stream ended")
+
     async def _polymarket_stream_loop(self) -> None:
         token_ids = [
             token_id
@@ -533,11 +608,21 @@ class EngineRuntime:
                     ConnectionStatus.CONNECTING,
                     "connecting to Polymarket market WebSocket",
                 )
-                async for event in self.polymarket.public_market_stream(token_ids):
-                    if event.kind.lower() != "stream_connected":
-                        attempts = 0
-                    await self.events.put(event)
-                raise ConnectionError("Polymarket market stream ended")
+                self._polymarket_stream_generation += 1
+                self._polymarket_stream_reset.clear()
+                generation = self._polymarket_stream_generation
+                pump = asyncio.create_task(self._pump_polymarket_generation(token_ids, generation))
+                reset = asyncio.create_task(self._polymarket_stream_reset.wait())
+                try:
+                    done, _ = await asyncio.wait((pump, reset), return_when=asyncio.FIRST_COMPLETED)
+                    if pump in done:
+                        await pump
+                    attempts = 0
+                    raise ConnectionError("Polymarket stream snapshot recovery requested")
+                finally:
+                    pump.cancel()
+                    reset.cancel()
+                    await asyncio.gather(pump, reset, return_exceptions=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -656,9 +741,7 @@ class EngineRuntime:
             for month, quote in snapshot.quotes.items()
         }
         snapshot = snapshot.model_copy(update={"quotes": qualified_quotes})
-        snapshot = snapshot.model_copy(
-            update={"portfolio": value_strategy_portfolio(snapshot)}
-        )
+        snapshot = snapshot.model_copy(update={"portfolio": value_strategy_portfolio(snapshot)})
         snapshot = snapshot.model_copy(
             update={"margin_preview": self._margin_preview_view(snapshot, now)}
         )
@@ -776,9 +859,7 @@ class EngineRuntime:
             hedge_shares_per_contract(50) * Decimal(self.settings.ibkr_zq_child_order_quantity)
         )
         fee_parameters_current, _ = self._polymarket_fee_parameter_status(now)
-        polymarket_fees: Decimal | None = (
-            Decimal("0") if fee_parameters_current else None
-        )
+        polymarket_fees: Decimal | None = Decimal("0") if fee_parameters_current else None
         if (
             polymarket_fees is not None
             and long_book_25 is not None
@@ -1112,12 +1193,8 @@ class EngineRuntime:
         exponent = parameters["exponent"]
         return shares * rate * ((price * (Decimal("1") - price)) ** exponent)
 
-    def _polymarket_fee_parameter_status(
-        self, now: datetime
-    ) -> tuple[bool, float | None]:
-        available = all(
-            code in self._polymarket_fee_parameters for code in ("INC25", "INC50PLUS")
-        )
+    def _polymarket_fee_parameter_status(self, now: datetime) -> tuple[bool, float | None]:
+        available = all(code in self._polymarket_fee_parameters for code in ("INC25", "INC50PLUS"))
         age_seconds = (
             (now - self._polymarket_fee_parameters_at).total_seconds()
             if self._polymarket_fee_parameters_at is not None
@@ -1125,8 +1202,7 @@ class EngineRuntime:
         )
         current = available and (
             age_seconds is not None
-            and age_seconds
-            <= max(60, self.settings.polymarket_book_snapshot_interval_seconds * 2)
+            and age_seconds <= max(60, self.settings.polymarket_book_snapshot_interval_seconds * 2)
         )
         return current, age_seconds
 

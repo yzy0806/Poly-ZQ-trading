@@ -76,6 +76,7 @@ class ExecutionCoordinator:
         self.ibkr = ibkr
         self.polymarket = polymarket
         self._lock = asyncio.Lock()
+        self._last_reconciliation_check = float("-inf")
         self._order_sent_at: dict[str, datetime] = {}
         self._ibkr_open_order_ids: set[int] = set()
         self._ibkr_open_orders_complete = False
@@ -132,6 +133,10 @@ class ExecutionCoordinator:
 
     async def handle_ibkr_event(self, event: VenueEvent) -> None:
         async with self._lock:
+            # Retain the serialization barrier with order preparation, but do
+            # not query/rebuild the execution ledger for market-data ticks.
+            if event.kind in {"tick_price", "tick_size"}:
+                return
             if event.kind == "execution":
                 await self._handle_ibkr_execution(event)
             elif event.kind == "order_status":
@@ -167,12 +172,17 @@ class ExecutionCoordinator:
                         or "UNKNOWN"
                     ),
                 )
+            await self._attempt_automated_reconciliation()
             await self._publish()
 
     async def cycle(self, snapshot: EngineSnapshot) -> None:
         """Advance hedges, test residual economics, and submit a fresh qualified batch."""
 
         async with self._lock:
+            now = asyncio.get_running_loop().time()
+            if now - self._last_reconciliation_check >= 1:
+                await self._attempt_automated_reconciliation()
+                self._last_reconciliation_check = now
             batch = await self.repository.active_batch_view()
             if batch.batch_id is not None:
                 await self._route_pending_hedges(snapshot, batch.obligations)
@@ -277,7 +287,16 @@ class ExecutionCoordinator:
             strategy_version=self.settings.strategy_version,
             snapshot_id=snapshot.snapshot_id,
         )
-        await self._publish()
+        # No awaited operation may separate this final validation and sending.
+        final = await self.state.get()
+        if (
+            final.snapshot_id != rechecked.snapshot_id
+            or not self._new_entry_authorized(final)
+            or self.ibkr.event_queue_overflowed is True
+        ):
+            await self.repository.abandon_zq_intent(batch_id, "authorization changed before send")
+            await self._publish()
+            return
         self.ibkr.submit_zq_limit_day(
             month=self.settings.ibkr_zq_contract_month,
             limit_price=opportunity.zq_price,

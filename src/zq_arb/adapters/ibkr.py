@@ -5,7 +5,7 @@ import contextlib
 import importlib
 import sys
 import threading
-from collections import deque
+from collections import Counter, deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -80,6 +80,14 @@ class IbkrAdapter:
         self._stopped = False
         self._pnl_requested = False
         self._event_queue_overflowed = False
+        self._ingress: deque[VenueEvent] = deque()
+        self._ingress_lock = threading.Lock()
+        self._drain_scheduled = False
+        self._drain_handle: asyncio.Handle | None = None
+        self._ingress_capacity = max(1, settings.event_queue_maxsize)
+        self._callback_counts: Counter[str] = Counter()
+        self._ingress_high_water = 0
+        self._next_request_id = 10_000
 
     @property
     def connected(self) -> bool:
@@ -92,7 +100,10 @@ class IbkrAdapter:
     async def connect(self) -> None:
         if self.connected:
             return
+        self._stopped = False
         self._connected.clear()
+        self._request_to_month.clear()
+        self._stream_request_ids.clear()
         self._loop = asyncio.get_running_loop()
         self._api = _load_official_api(self.settings.ibkr_python_api_path)
         self._client = self._build_client()
@@ -396,13 +407,78 @@ class IbkrAdapter:
             payload=payload,
             source_timestamp=source_timestamp,
         )
-        self._loop.call_soon_threadsafe(self._enqueue, event)
+        # Filtering happens before queue admission, with separate accounting.
+        if kind in {"tick_price", "tick_size"}:
+            allowed = {1, 2, 4, 66, 67, 68} if kind == "tick_price" else {0, 3, 69, 70}
+            if payload.get("tick_type") not in allowed:
+                with self._ingress_lock:
+                    self._callback_counts["filtered_quote_ticks"] += 1
+                return
+        if not self.is_current_market_event(event):
+            with self._ingress_lock:
+                self._callback_counts["retired_subscription_events"] += 1
+            return
+        with self._ingress_lock:
+            self._callback_counts["received"] += 1
+            if len(self._ingress) >= self._ingress_capacity:
+                self._event_queue_overflowed = True
+                self._callback_counts["lost"] += 1
+                return
+            self._ingress.append(event)
+            self._ingress_high_water = max(self._ingress_high_water, len(self._ingress))
+            if self._drain_scheduled:
+                return
+            self._drain_scheduled = True
+        self._loop.call_soon_threadsafe(self._drain_ingress)
+
+    def is_current_market_event(self, event: VenueEvent) -> bool:
+        if event.kind not in {"tick_price", "tick_size", "market_data_type", "contract_details"}:
+            return True
+        request_id = event.payload.get("request_id")
+        return request_id is None or request_id in self._request_to_month
+
+    def ingress_diagnostics(self) -> dict[str, Any]:
+        with self._ingress_lock:
+            return {
+                **self._callback_counts,
+                "pending": len(self._ingress),
+                "capacity": self._ingress_capacity,
+                "high_water": self._ingress_high_water,
+                "overflowed": self._event_queue_overflowed,
+            }
+
+    def _drain_ingress(self) -> None:
+        # One bounded notification drains many callbacks without blocking the
+        # network thread. Queue backpressure never silently discards a callback.
+        with self._ingress_lock:
+            if self._stopped or self._loop is None:
+                self._ingress.clear()
+                self._drain_scheduled = False
+                return
+            for _ in range(64):
+                if not self._ingress or self.queue.full():
+                    break
+                event = self._ingress.popleft()
+                if self.is_current_market_event(event):
+                    self.queue.put_nowait(event)
+                    self._callback_counts["enqueued"] += 1
+                else:
+                    self._callback_counts["retired_subscription_events"] += 1
+            if not self._ingress:
+                self._drain_scheduled = False
+                return
+            if self.queue.full():
+                self._drain_handle = self._loop.call_later(0.001, self._drain_ingress)
+            else:
+                self._drain_handle = self._loop.call_soon(self._drain_ingress)
 
     def _enqueue(self, event: VenueEvent) -> None:
         try:
             self.queue.put_nowait(event)
         except asyncio.QueueFull:
             self._event_queue_overflowed = True
+            with self._ingress_lock:
+                self._callback_counts["lost"] += 1
             LOGGER.critical("venue_event_queue_overflow", venue="IBKR", kind=event.kind)
 
     def _new_zq_contract(self, month: str) -> Any:
@@ -455,9 +531,10 @@ class IbkrAdapter:
     def request_contracts_and_market_data(self) -> None:
         if not self.connected:
             raise IbkrAdapterError("TWS is not connected")
-        for index, month in enumerate(self.settings.subscription_contract_months, start=1):
-            detail_request_id = 1_000 + index
-            market_request_id = 2_000 + index
+        for month in self.settings.subscription_contract_months:
+            self._next_request_id += 2
+            detail_request_id = self._next_request_id
+            market_request_id = self._next_request_id + 1
             self._request_to_month[detail_request_id] = month
             self._request_to_month[market_request_id] = month
             self._stream_request_ids.add(market_request_id)
@@ -474,6 +551,7 @@ class IbkrAdapter:
             self._client.cancelMktData(request_id)
             self._request_to_month.pop(request_id, None)
         self._stream_request_ids.clear()
+        self._request_to_month.clear()
         self.request_contracts_and_market_data()
 
     def request_open_orders_and_executions(self) -> None:
@@ -511,6 +589,8 @@ class IbkrAdapter:
     ) -> int:
         """Submit a version-one long-ZQ entry; the strategy cannot create SELL orders."""
 
+        if self._event_queue_overflowed:
+            raise PermissionError("IBKR callback loss requires restart and reconciliation")
         if not self.settings.ibkr_order_submission_enabled:
             raise PermissionError("IBKR_ORDER_SUBMISSION_ENABLED is false")
         if not self.settings.ibkr_account_configured:
@@ -612,15 +692,19 @@ class IbkrAdapter:
 
     async def disconnect(self) -> None:
         self._stopped = True
+        if self._drain_handle is not None:
+            self._drain_handle.cancel()
+        with self._ingress_lock:
+            self._ingress.clear()
+            self._drain_scheduled = False
         if self._client is not None:
             with contextlib.suppress(Exception):
                 if self.connected:
                     self._client.cancelAccountSummary(9_001)
                     if self._pnl_requested:
                         self._client.cancelPnL(9_002)
-                    for request_id in tuple(self._request_to_month):
-                        if request_id >= 2_000:
-                            self._client.cancelMktData(request_id)
+                    for request_id in tuple(self._stream_request_ids):
+                        self._client.cancelMktData(request_id)
                     self._margin_preview_context.clear()
                     self._completed_margin_preview_ids.clear()
                     self._stream_request_ids.clear()

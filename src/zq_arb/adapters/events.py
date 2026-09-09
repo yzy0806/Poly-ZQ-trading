@@ -15,6 +15,7 @@ class VenueEvent(BaseModel):
 
     venue: Literal["IBKR", "POLYMARKET"]
     kind: str
+    stream_generation: int = 0
     payload: dict[str, Any] = Field(default_factory=dict)
     source_timestamp: datetime | None = None
     received_at: datetime = Field(default_factory=utc_now)

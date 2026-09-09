@@ -101,6 +101,21 @@ class StateStore:
         async with self._lock:
             return self._snapshot.model_copy(deep=True)
 
+    async def get_margin_preview(self) -> MarginPreview:
+        async with self._lock:
+            return self._snapshot.margin_preview.model_copy(deep=True)
+
+    async def _update_fields(self, updater: Callable[[EngineSnapshot], EngineSnapshot]) -> None:
+        """Internal copy-on-write updates; updaters must not mutate input fields."""
+        async with self._lock:
+            updated = updater(self._snapshot)
+            self._snapshot = updated.model_copy(
+                update={"snapshot_id": self._snapshot.snapshot_id + 1, "generated_at": utc_now()}
+            )
+            published = self._snapshot
+            subscribers = tuple(self._subscribers)
+        self._fan_out(published, subscribers)
+
     async def replace(self, snapshot: EngineSnapshot) -> EngineSnapshot:
         async with self._lock:
             self._snapshot = snapshot.model_copy(
@@ -113,7 +128,7 @@ class StateStore:
             subscribers = tuple(self._subscribers)
             published = self._snapshot
         self._fan_out(published, subscribers)
-        return published
+        return published.model_copy(deep=True)
 
     @staticmethod
     def _fan_out(
@@ -145,7 +160,7 @@ class StateStore:
             subscribers = tuple(self._subscribers)
             published = self._snapshot
         self._fan_out(published, subscribers)
-        return published
+        return published.model_copy(deep=True)
 
     async def subscribe(self) -> AsyncGenerator[EngineSnapshot, None]:
         queue: asyncio.Queue[EngineSnapshot] = asyncio.Queue(maxsize=1)
@@ -155,7 +170,8 @@ class StateStore:
         await queue.put(initial)
         try:
             while True:
-                yield await queue.get()
+                snapshot = await queue.get()
+                yield snapshot.model_copy(deep=True)
         finally:
             async with self._lock:
                 self._subscribers.discard(queue)
@@ -184,7 +200,7 @@ class StateStore:
                 }
             )
 
-        await self.update(apply)
+        await self._update_fields(apply)
 
     async def set_polymarket_health(
         self, status: ConnectionStatus, message: str, *, authenticated: bool = False
@@ -210,7 +226,7 @@ class StateStore:
                 }
             )
 
-        await self.update(apply)
+        await self._update_fields(apply)
 
     async def set_mapping(self, mapping: MarketMappingStatus) -> None:
         await self.update(lambda snapshot: snapshot.model_copy(update={"mapping": mapping}))
@@ -227,7 +243,7 @@ class StateStore:
             updated.update({book.token_id: book for book in books})
             return snapshot.model_copy(update={"books": updated})
 
-        await self.update(apply)
+        await self._update_fields(apply)
 
     async def mark_polymarket_books_unsynchronized(self) -> None:
         def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
@@ -237,7 +253,7 @@ class StateStore:
             }
             return snapshot.model_copy(update={"books": books})
 
-        await self.update(apply)
+        await self._update_fields(apply)
 
     async def reconcile_polymarket_books(
         self, rest_books: tuple[OrderBook, ...]
@@ -278,7 +294,11 @@ class StateStore:
                     )
                     continue
                 mismatches.append(rest_book.token_id)
-                updated[rest_book.token_id] = rest_book
+                # REST and WebSocket are not a sequenced joined feed. Do not
+                # overwrite the streaming ladder then replay older queued deltas.
+                updated[rest_book.token_id] = current.model_copy(
+                    update={"stream_synchronized": False}
+                )
             return snapshot.model_copy(update={"books": updated})
 
         await self.update(apply)
@@ -540,69 +560,69 @@ class StateStore:
         value = _decimal(event.payload.get("price") or event.payload.get("size"))
         if field is None or value is None or value < 0:
             return
-        current = await self.get()
-        existing = current.quotes.get(month)
-        data_type_value = (
-            self._month_data_types.get(month)
-            or (existing.market_data_type if existing else None)
-            or current.metadata.get("ibkr_market_data_type")
-        )
-        data_type = int(data_type_value) if data_type_value is not None else None
-        quality_by_type: dict[int, DataQuality] = {
-            1: DataQuality.LIVE,
-            2: DataQuality.FROZEN,
-            3: DataQuality.DELAYED,
-            4: DataQuality.FROZEN,
-        }
-        quality = quality_by_type.get(data_type or 0, DataQuality.UNKNOWN)
-        farm_status = self._zq_farm_status(current)
-        generation = int(current.metadata.get("ibkr_subscription_generation") or 0)
-        role = self._quote_role(month)
 
-        base = existing or Quote(instrument=month, role=role)
-        previous_value = getattr(base, field)
-        updates = {
-            field: value,
-            "received_at": event.received_at,
-            "source_timestamp": event.source_timestamp,
-            "last_market_data_event_at": event.received_at,
-            "market_data_type": data_type,
-            "quality": quality,
-            "role": role,
-            "subscription_generation": generation,
-            "farm_status": farm_status,
-            "subscription_status": (
-                base.subscription_status
-                if existing is not None
-                else SubscriptionStatus.PENDING_REVALIDATION
-            ),
-        }
-        if field in {"bid", "ask", "last"} and (
-            previous_value != value or base.last_price_change_at is None
-        ):
-            updates["last_price_change_at"] = event.received_at
-        quote = base.model_copy(update=updates)
-        valid = (
-            quality is DataQuality.LIVE
-            and farm_status is FarmStatus.CONNECTED
-            and quote.has_valid_two_sided_market
-        )
-        if valid:
-            quote = quote.model_copy(
-                update={
-                    "subscription_status": SubscriptionStatus.ACTIVE,
-                    "validation_reason": (
-                        "current-generation live subscription has a complete uncrossed bid/ask"
-                    ),
-                }
+        def apply(current: EngineSnapshot) -> EngineSnapshot:
+            existing = current.quotes.get(month)
+            data_type_value = (
+                self._month_data_types.get(month)
+                or (existing.market_data_type if existing else None)
+                or current.metadata.get("ibkr_market_data_type")
             )
+            data_type = int(data_type_value) if data_type_value is not None else None
+            quality_by_type: dict[int, DataQuality] = {
+                1: DataQuality.LIVE,
+                2: DataQuality.FROZEN,
+                3: DataQuality.DELAYED,
+                4: DataQuality.FROZEN,
+            }
+            quality = quality_by_type.get(data_type or 0, DataQuality.UNKNOWN)
+            farm_status = self._zq_farm_status(current)
+            generation = int(current.metadata.get("ibkr_subscription_generation") or 0)
+            role = self._quote_role(month)
 
-        def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
-            quotes = dict(snapshot.quotes)
+            base = existing or Quote(instrument=month, role=role)
+            previous_value = getattr(base, field)
+            updates = {
+                field: value,
+                "received_at": event.received_at,
+                "source_timestamp": event.source_timestamp,
+                "last_market_data_event_at": event.received_at,
+                "market_data_type": data_type,
+                "quality": quality,
+                "role": role,
+                "subscription_generation": generation,
+                "farm_status": farm_status,
+                "subscription_status": (
+                    base.subscription_status
+                    if existing is not None
+                    else SubscriptionStatus.PENDING_REVALIDATION
+                ),
+            }
+            if field in {"bid", "ask", "last"} and (
+                previous_value != value or base.last_price_change_at is None
+            ):
+                updates["last_price_change_at"] = event.received_at
+            quote = base.model_copy(update=updates)
+            valid = (
+                quality is DataQuality.LIVE
+                and farm_status is FarmStatus.CONNECTED
+                and quote.has_valid_two_sided_market
+            )
+            if valid:
+                quote = quote.model_copy(
+                    update={
+                        "subscription_status": SubscriptionStatus.ACTIVE,
+                        "validation_reason": (
+                            "current-generation live subscription has a complete uncrossed bid/ask"
+                        ),
+                    }
+                )
+
+            quotes = dict(current.quotes)
             quotes[month] = quote
-            return snapshot.model_copy(update={"quotes": quotes})
+            return current.model_copy(update={"quotes": quotes})
 
-        await self.update(apply)
+        await self._update_fields(apply)
 
     async def _set_margin_preview_pending(self, event: VenueEvent) -> None:
         preview = MarginPreview(
@@ -698,47 +718,53 @@ class StateStore:
         value = _decimal(event.payload.get("value"))
         if value is not None:
             self._account_values[tag] = value
-        current = await self.get()
-        fields = {
-            "net_liquidation": "NetLiquidation",
-            "total_cash_value": "TotalCashValue",
-            "init_margin": "InitMarginReq",
-            "maintenance_margin": "MaintMarginReq",
-            "available_funds": "AvailableFunds",
-            "excess_liquidity": "ExcessLiquidity",
-            "full_init_margin": "FullInitMarginReq",
-            "full_maintenance_margin": "FullMaintMarginReq",
-            "full_available_funds": "FullAvailableFunds",
-            "full_excess_liquidity": "FullExcessLiquidity",
-            "cushion": "Cushion",
-        }
-        updates: dict[str, Any] = {
-            field: self._account_values.get(account_tag) for field, account_tag in fields.items()
-        }
-        updates.update(
-            {
-                "account_fingerprint": event.payload.get("account_fingerprint"),
-                "daily_pnl": current.account.daily_pnl,
-                "unrealized_pnl": current.account.unrealized_pnl,
-                "realized_pnl": current.account.realized_pnl,
-                "futures_pnl": current.account.futures_pnl,
-                "received_at": event.received_at,
+
+        def apply(current: EngineSnapshot) -> EngineSnapshot:
+            fields = {
+                "net_liquidation": "NetLiquidation",
+                "total_cash_value": "TotalCashValue",
+                "init_margin": "InitMarginReq",
+                "maintenance_margin": "MaintMarginReq",
+                "available_funds": "AvailableFunds",
+                "excess_liquidity": "ExcessLiquidity",
+                "full_init_margin": "FullInitMarginReq",
+                "full_maintenance_margin": "FullMaintMarginReq",
+                "full_available_funds": "FullAvailableFunds",
+                "full_excess_liquidity": "FullExcessLiquidity",
+                "cushion": "Cushion",
             }
-        )
-        account = AccountMetrics(**updates)
-        await self.update(lambda snapshot: snapshot.model_copy(update={"account": account}))
+            updates: dict[str, Any] = {
+                field: self._account_values.get(account_tag)
+                for field, account_tag in fields.items()
+            }
+            updates.update(
+                {
+                    "account_fingerprint": event.payload.get("account_fingerprint"),
+                    "daily_pnl": current.account.daily_pnl,
+                    "unrealized_pnl": current.account.unrealized_pnl,
+                    "realized_pnl": current.account.realized_pnl,
+                    "futures_pnl": current.account.futures_pnl,
+                    "received_at": event.received_at,
+                }
+            )
+            account = AccountMetrics(**updates)
+            return current.model_copy(update={"account": account})
+
+        await self._update_fields(apply)
 
     async def _apply_pnl(self, event: VenueEvent) -> None:
-        current = await self.get()
-        account = current.account.model_copy(
-            update={
-                "daily_pnl": _decimal(event.payload.get("daily_pnl")),
-                "unrealized_pnl": _decimal(event.payload.get("unrealized_pnl")),
-                "realized_pnl": _decimal(event.payload.get("realized_pnl")),
-                "received_at": event.received_at,
-            }
-        )
-        await self.update(lambda snapshot: snapshot.model_copy(update={"account": account}))
+        def apply(current: EngineSnapshot) -> EngineSnapshot:
+            account = current.account.model_copy(
+                update={
+                    "daily_pnl": _decimal(event.payload.get("daily_pnl")),
+                    "unrealized_pnl": _decimal(event.payload.get("unrealized_pnl")),
+                    "realized_pnl": _decimal(event.payload.get("realized_pnl")),
+                    "received_at": event.received_at,
+                }
+            )
+            return current.model_copy(update={"account": account})
+
+        await self._update_fields(apply)
 
     async def _set_ibkr_farm(
         self,
@@ -914,15 +940,26 @@ class StateStore:
                 authenticated=False,
             )
             return
-        current = await self.get()
-        updated_books = update_books_from_stream_event(current.books, event)
-        if updated_books:
-            await self.set_books(updated_books)
-        await self.set_polymarket_health(
-            ConnectionStatus.CONNECTED,
-            f"market WebSocket: {event.kind}",
-            authenticated=False,
-        )
+
+        def apply(current: EngineSnapshot) -> EngineSnapshot:
+            updated_books = update_books_from_stream_event(current.books, event)
+            books = dict(current.books)
+            books.update({book.token_id: book for book in updated_books})
+            return current.model_copy(
+                update={
+                    "books": books,
+                    "polymarket": current.polymarket.model_copy(
+                        update={
+                            "status": ConnectionStatus.CONNECTED,
+                            "message": f"market WebSocket: {event.kind}",
+                            "last_message_at": event.received_at,
+                            "authenticated": False,
+                        }
+                    ),
+                }
+            )
+
+        await self._update_fields(apply)
 
     async def set_operating_state(
         self,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -191,48 +191,63 @@ def update_books_from_stream_event(
         raw_changes = _payload_value(payload, "price_changes", "priceChanges")
         if not isinstance(raw_changes, Sequence) or isinstance(raw_changes, str):
             raise PolymarketProtocolError("price-change event has no changes")
-        updated: dict[str, OrderBook] = {}
+        changed_sides: dict[tuple[str, str], dict[Decimal, BookLevel]] = {}
+        changed_hashes: dict[str, str | None] = {}
         for raw_change in raw_changes:
             if not isinstance(raw_change, Mapping):
-                continue
+                raise PolymarketProtocolError("price change is not an object")
             token_id = _stream_token_id(raw_change)
-            current = updated.get(token_id) or books.get(token_id)
+            current = books.get(token_id)
             if not token_id or current is None:
                 raise PolymarketProtocolError(
                     "price change arrived before a complete book snapshot"
                 )
+            if not current.stream_synchronized:
+                raise PolymarketProtocolError("price change cannot heal an unsynchronized book")
             price = _decimal(raw_change.get("price"))
             size = _decimal(raw_change.get("size"))
             side = str(raw_change.get("side") or "").upper()
-            if price is None or size is None or price <= 0 or price >= 1 or size < 0:
+            if (
+                price is None
+                or size is None
+                or not price.is_finite()
+                or not size.is_finite()
+                or price <= 0
+                or price >= 1
+                or size < 0
+            ):
                 raise PolymarketProtocolError("price change contains an invalid price or size")
             if side not in {"BUY", "SELL"}:
                 raise PolymarketProtocolError("price change contains an invalid side")
-            levels = {
-                level.price: level.size
-                for level in (current.bids if side == "BUY" else current.asks)
-            }
+            key = (token_id, side)
+            if key not in changed_sides:
+                changed_sides[key] = {
+                    level.price: level
+                    for level in (current.bids if side == "BUY" else current.asks)
+                }
+            levels = changed_sides[key]
             if size == 0:
                 levels.pop(price, None)
             else:
-                levels[price] = size
-            rebuilt = tuple(
-                BookLevel(price=level_price, size=level_size)
-                for level_price, level_size in sorted(
-                    levels.items(), key=lambda item: item[0], reverse=side == "BUY"
-                )
-            )
-            change_hash = str(raw_change.get("hash") or "") or current.book_hash
-            book_update = {
-                "bids" if side == "BUY" else "asks": rebuilt,
-                "book_hash": change_hash,
+                levels[price] = BookLevel(price=price, size=size)
+            changed_hashes[token_id] = str(raw_change.get("hash") or "") or current.book_hash
+        # Each message is an atomic batch: intermediate prices may cross while
+        # the same message removes/replaces the other side. Validate at commit.
+        updated: list[OrderBook] = []
+        for token_id, book_hash in changed_hashes.items():
+            current = books[token_id]
+            changes: dict[str, Any] = {
+                "book_hash": book_hash,
                 "source": "WEBSOCKET",
-                "stream_synchronized": True,
                 "source_timestamp": source_timestamp,
                 "received_at": event.received_at,
             }
-            updated[token_id] = _validate_book(current.model_copy(update=book_update))
-        return tuple(updated.values())
+            for side, field in (("BUY", "bids"), ("SELL", "asks")):
+                if (token_id, side) in changed_sides:
+                    levels = changed_sides[(token_id, side)]
+                    changes[field] = tuple(levels[p] for p in sorted(levels, reverse=side == "BUY"))
+            updated.append(_validate_book(current.model_copy(update=changes)))
+        return tuple(updated)
 
     if kind == "tick_size_change":
         token_id = _stream_token_id(payload)
@@ -245,7 +260,7 @@ def update_books_from_stream_event(
                 update={
                     "tick_size": tick_size,
                     "source": "WEBSOCKET",
-                    "stream_synchronized": True,
+                    "stream_synchronized": current.stream_synchronized,
                     "source_timestamp": source_timestamp,
                     "received_at": event.received_at,
                 }
@@ -474,7 +489,9 @@ class PolymarketAdapter:
             result[leg.code] = {"rate": rate, "exponent": exponent}
         return result
 
-    async def public_market_stream(self, token_ids: Sequence[str]) -> AsyncIterator[VenueEvent]:
+    async def public_market_stream(
+        self, token_ids: Sequence[str]
+    ) -> AsyncGenerator[VenueEvent, None]:
         """Use the official unified SDK; callers reconnect or fall back to REST snapshots."""
 
         try:
@@ -752,9 +769,7 @@ class PolymarketAdapter:
             for token_id in (leg.yes_token_id, leg.no_token_id)
         }
         return tuple(
-            dict(item)
-            for item in payload
-            if str(item.get("asset") or "") in approved_tokens
+            dict(item) for item in payload if str(item.get("asset") or "") in approved_tokens
         )
 
     async def send_order_heartbeat(self) -> str:
