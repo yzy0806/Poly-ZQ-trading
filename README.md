@@ -111,7 +111,7 @@ Before starting the operator terminal, fill the still-required local values for 
 
 7. Filled ZQ is never automatically flattened.
 
-8. `LIMITED_LIVE` and `LIVE_ARMED` reject absent L2 credentials, failed wallet classification, non-Hong-Kong geoblock results, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
+8. `LIMITED_LIVE` and `LIVE_ARMED` reject failed CLOB authentication, failed wallet classification, non-Hong-Kong geoblock results, delayed IBKR data, disconnected or unsynchronized Polymarket books, unresolved obligations, and missing operator approval.
 
 9. Credentials and account identifiers are redacted before logging and are never serialized into browser state or persistence payloads.
 
@@ -140,3 +140,15 @@ release remains `READ_ONLY`; deployment does not authorize paper or live order s
 ## Event pipeline performance and recovery
 
 The September 2026 overflow remedy, safety boundaries, authenticated event diagnostics, offline load-test commands, and validation evidence are documented in [event-pipeline-remedy.md](docs/event-pipeline-remedy.md).
+
+## Polymarket authentication configuration
+
+1. Configure `POLYMARKET_PRIVATE_KEY` and the existing account's `POLYMARKET_FUNDER_ADDRESS`. On first authenticated use, the official SDK creates or derives CLOB credentials using `POLYMARKET_CREDENTIAL_NONCE` (default zero). The client caches them in memory; the engine does not write derived credentials into the environment file. A missing funder is rejected rather than selecting a different wallet implicitly.
+
+2. Existing CLOB credentials remain an optional override: supply all of `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and `POLYMARKET_API_PASSPHRASE`, or omit all three. A partial set is rejected. When the complete override is supplied, the nonce is not passed to the SDK because that combination is unsupported.
+
+3. For SDK gasless wallet setup, set `POLYMARKET_RELAYER_ENABLED=true` and supply `POLYMARKET_RELAYER_API_KEY` plus `POLYMARKET_RELAYER_API_KEY_ADDRESS`. These use the SDK's `RelayerApiKey` authentication. The SDK may deploy an undeployed supported deposit wallet during initialization when this is enabled. The engine still does not automatically split, merge, redeem, or approve token allowances; trading preflight continues to require sufficient allowance and funds.
+
+4. Builder credentials are unnecessary for this configuration. Remove obsolete `POLYMARKET_BUILDER_API_KEY`, `POLYMARKET_BUILDER_API_SECRET`, `POLYMARKET_BUILDER_API_PASSPHRASE`, `POLYMARKET_BUILDER_CODE`, `POLYMARKET_RELAYER_HOST`, and `POLYMARKET_RELAYER_TX_TYPE` from environment files when adopting this version. They were previously declared but unused. The official SDK selects its relayer endpoint and wallet transaction type. Unknown environment variables remain rejected to catch configuration mistakes.
+
+5. The integration follows the [official Python SDK](https://docs.polymarket.com/getting-started/python) and [wallet authentication documentation](https://docs.polymarket.com/trading/wallets-auth). Automated authentication tests replace the SDK network boundary; they do not create live credentials or submit wallet transactions.

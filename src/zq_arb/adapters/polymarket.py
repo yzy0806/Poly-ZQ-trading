@@ -547,28 +547,47 @@ class PolymarketAdapter:
         async with self._secure_lock:
             if self._secure_client is not None:
                 return self._secure_client
-            if not self.settings.clob_credentials_configured:
-                raise PermissionError("CLOB L2 credentials are not configured")
+            auth_errors = self.settings.polymarket_auth_errors()
+            if auth_errors:
+                raise PermissionError("; ".join(auth_errors))
             private_key = self.settings.polymarket_private_key.get_secret_value()
             if not self.settings._is_configured(private_key):
                 raise PermissionError("Polymarket signing key is not configured")
+            wallet = self.settings.polymarket_funder_address.get_secret_value()
+            if not self.settings._is_configured(wallet):
+                raise PermissionError("Polymarket funder wallet is not configured")
             try:
                 from polymarket import AsyncSecureClient
+                from polymarket.auth import RelayerApiKey
                 from polymarket.models import ApiKeyCreds
             except ImportError as exc:
                 raise PolymarketProtocolError(
                     "official authenticated Polymarket SDK is unavailable"
                 ) from exc
-            credentials = ApiKeyCreds(
-                key=self.settings.polymarket_api_key.get_secret_value(),
-                secret=self.settings.polymarket_api_secret.get_secret_value(),
-                passphrase=self.settings.polymarket_api_passphrase.get_secret_value(),
-            )
-            self._secure_client = await AsyncSecureClient.create(
-                private_key=private_key,
-                wallet=self.settings.polymarket_funder_address.get_secret_value(),
-                credentials=credentials,
-            )
+            options: dict[str, Any] = {"private_key": private_key, "wallet": wallet}
+            if self.settings.clob_credentials_configured:
+                options["credentials"] = ApiKeyCreds(
+                    key=self.settings.polymarket_api_key.get_secret_value(),
+                    secret=self.settings.polymarket_api_secret.get_secret_value(),
+                    passphrase=self.settings.polymarket_api_passphrase.get_secret_value(),
+                )
+            else:
+                # The official SDK creates/derives L2 credentials from the signer.
+                # Keep credentials in the cached client; never write them to .env.
+                options["nonce"] = self.settings.polymarket_credential_nonce
+            try:
+                if self.settings.polymarket_relayer_enabled:
+                    options["api_key"] = RelayerApiKey(
+                        key=self.settings.polymarket_relayer_api_key.get_secret_value(),
+                        address=self.settings.polymarket_relayer_api_key_address.get_secret_value(),
+                    )
+                self._secure_client = await AsyncSecureClient.create(**options)
+            except Exception:
+                # SDK validation errors can include supplied signing material.
+                raise PolymarketProtocolError(
+                    "Polymarket authentication failed; check signer, wallet, credentials "
+                    "and venue connectivity"
+                ) from None
             return self._secure_client
 
     async def trading_preflight(self, required_cash: Decimal) -> dict[str, Any]:

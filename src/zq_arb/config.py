@@ -99,7 +99,6 @@ class Settings(BaseSettings):
     polymarket_clob_host: str
     polymarket_data_api_host: str
     polymarket_gamma_api_host: str
-    polymarket_relayer_host: str
     polymarket_market_ws_url: str
     polymarket_user_ws_url: str
     polymarket_geoblock_url: str
@@ -109,18 +108,13 @@ class Settings(BaseSettings):
     polymarket_signer_address: SecretStr
     polymarket_funder_address: SecretStr
     polymarket_signature_type: str
-    polymarket_credential_nonce: int
-    polymarket_api_key: SecretStr
-    polymarket_api_secret: SecretStr
-    polymarket_api_passphrase: SecretStr
-    polymarket_builder_code: str = ""
-    polymarket_builder_api_key: SecretStr = SecretStr("")
-    polymarket_builder_api_secret: SecretStr = SecretStr("")
-    polymarket_builder_api_passphrase: SecretStr = SecretStr("")
+    polymarket_credential_nonce: int = 0
+    polymarket_api_key: SecretStr = SecretStr("")
+    polymarket_api_secret: SecretStr = SecretStr("")
+    polymarket_api_passphrase: SecretStr = SecretStr("")
     polymarket_relayer_enabled: bool = False
     polymarket_relayer_api_key: SecretStr = SecretStr("")
     polymarket_relayer_api_key_address: SecretStr = SecretStr("")
-    polymarket_relayer_tx_type: str = ""
     polymarket_event_id: str
     polymarket_event_slug: str
     polymarket_event_title: str
@@ -301,6 +295,7 @@ class Settings(BaseSettings):
             errors.append("post-decision resumption is prohibited for version 1")
         if self.fomc_trading_cutoff_utc >= self.fomc_statement_utc:
             errors.append("FOMC cutoff must precede the statement")
+        errors.extend(self.polymarket_auth_errors())
         if self.run_mode.is_live:
             errors.extend(self.live_readiness_errors())
         if errors:
@@ -389,6 +384,32 @@ class Settings(BaseSettings):
             )
         )
 
+    def polymarket_auth_errors(self) -> list[str]:
+        errors: list[str] = []
+        supplied = sum(
+            self._is_configured(value)
+            for value in (
+                self.polymarket_api_key,
+                self.polymarket_api_secret,
+                self.polymarket_api_passphrase,
+            )
+        )
+        if supplied not in {0, 3}:
+            errors.append(
+                "supply all three CLOB credentials or leave all absent for automatic setup"
+            )
+        if self.polymarket_credential_nonce < 0:
+            errors.append("POLYMARKET_CREDENTIAL_NONCE must be nonnegative")
+        if self.polymarket_relayer_enabled and not all(
+            self._is_configured(value)
+            for value in (
+                self.polymarket_relayer_api_key,
+                self.polymarket_relayer_api_key_address,
+            )
+        ):
+            errors.append("enabled relayer requires its API key and API key address")
+        return errors
+
     def live_readiness_errors(self) -> list[str]:
         errors: list[str] = []
         if not self.live_trading_enabled:
@@ -401,8 +422,9 @@ class Settings(BaseSettings):
             errors.append("OPERATOR_APPROVAL_ID is absent")
         if not self.ibkr_account_configured:
             errors.append("IBKR_ACCOUNT_ID is absent")
-        if not self.clob_credentials_configured:
-            errors.append("CLOB L2 credentials are absent")
+        errors.extend(self.polymarket_auth_errors())
+        if not self._is_configured(self.polymarket_funder_address):
+            errors.append("POLYMARKET_FUNDER_ADDRESS is absent")
         if not self._is_configured(self.polymarket_private_key):
             errors.append("protected Polymarket signing key is absent")
         if self.simulate_polymarket_fills:
