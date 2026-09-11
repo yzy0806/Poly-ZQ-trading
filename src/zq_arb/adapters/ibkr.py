@@ -18,6 +18,7 @@ import structlog
 
 from zq_arb.adapters.events import VenueEvent
 from zq_arb.config import Settings
+from zq_arb.domain.identity import identity_fingerprint
 
 LOGGER = structlog.get_logger(__name__)
 
@@ -382,7 +383,7 @@ class IbkrAdapter:
                     "execution",
                     {
                         "request_id": reqId,
-                        "account_fingerprint": adapter._fingerprint_account(
+                        "account_fingerprint": identity_fingerprint(
                             str(getattr(execution, "acctNumber", ""))
                         )
                         if getattr(execution, "acctNumber", "")

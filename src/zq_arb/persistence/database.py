@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from zq_arb.config import Settings
+from zq_arb.domain.identity import identity_fingerprint
 from zq_arb.persistence.models import (
     Base,
     BatchRecord,
@@ -29,16 +29,17 @@ from zq_arb.persistence.models import (
 
 
 def execution_identity(settings: Settings) -> dict[str, str]:
-    def fingerprint(value: str) -> str:
-        return hashlib.sha256(value.strip().lower().encode()).hexdigest()
-
     return {
         "ibkr_mode": settings.ibkr_trading_mode.lower(),
         "ibkr_client_id": str(settings.ibkr_client_id),
-        "ibkr_account": fingerprint(settings.ibkr_account_id.get_secret_value()),
+        "ibkr_account": identity_fingerprint(settings.ibkr_account_id.get_secret_value()),
         "polymarket_mode": "SIMULATED" if settings.simulate_polymarket_fills else "REAL",
-        "polymarket_wallet": fingerprint(settings.polymarket_funder_address.get_secret_value()),
-        "polymarket_api_owner": fingerprint(settings.polymarket_api_key.get_secret_value()),
+        "polymarket_wallet": identity_fingerprint(
+            settings.polymarket_funder_address.get_secret_value()
+        ),
+        "polymarket_api_owner": identity_fingerprint(
+            settings.polymarket_api_key.get_secret_value()
+        ),
         "polymarket_host": settings.polymarket_clob_host.rstrip("/"),
         "polymarket_chain": str(settings.polymarket_chain_id),
     }

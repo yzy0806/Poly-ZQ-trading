@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from zq_arb.domain.enums import RunMode
@@ -32,6 +33,7 @@ async def opening(tmp_path, settings):
             "database_url": f"sqlite+aiosqlite:///{(tmp_path / 'opening.db').as_posix()}",
             "run_mode": RunMode.LIMITED_LIVE,
             "ibkr_trading_mode": "live",
+            "ibkr_account_id": SecretStr("U1234567"),
             "simulate_polymarket_fills": False,
             "ibkr_zq_child_order_quantity": 1,
             "max_zq_position": 25,

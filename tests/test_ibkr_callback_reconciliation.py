@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from test_opening_inventory import opening  # noqa: F401
 
 from zq_arb.adapters.events import VenueEvent
+from zq_arb.adapters.ibkr import IbkrAdapter
 from zq_arb.adapters.polymarket import PolymarketOrderResult, PreparedPolymarketOrder
 from zq_arb.domain.models import BookLevel, OrderBook, utc_now
 from zq_arb.execution.coordinator import ExecutionCoordinator
@@ -194,6 +195,68 @@ async def test_fill_callback_order_does_not_latch_pause(live_fill, ordering):
             == 1
         )
     h.ibkr.cancel_order.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "callback_account,accepted",
+    [("U1234567", True), (" u1234567 ", True), ("U7654567", False)],
+)
+async def test_real_execution_bridge_uses_ledger_account_identity(
+    live_fill, callback_account, accepted
+):
+    h = live_fill
+
+    class Client:
+        def __init__(self, wrapper):
+            self.wrapper = wrapper
+
+    adapter = IbkrAdapter(h.settings, asyncio.Queue())
+    adapter._api = SimpleNamespace(
+        wrapper=SimpleNamespace(EWrapper=type("Wrapper", (), {})),
+        client=SimpleNamespace(EClient=Client),
+    )
+    emitted = []
+    adapter._emit = lambda kind, payload: emitted.append(
+        VenueEvent(venue="IBKR", kind=kind, payload=payload)
+    )
+    bridge = adapter._build_client()
+    bridge.execDetails(
+        9001,
+        SimpleNamespace(
+            symbol="ZQ", lastTradeDateOrContractMonth=h.settings.ibkr_zq_contract_month, conId=123
+        ),
+        SimpleNamespace(
+            acctNumber=callback_account,
+            execId="fill-1",
+            orderId=166,
+            clientId=h.settings.ibkr_client_id,
+            permId=700,
+            side="BOT",
+            shares=Decimal(1),
+            price=96.3,
+            time=utc_now().isoformat(),
+        ),
+    )
+    callback = emitted.pop()
+    assert callback_account not in str(callback.payload)
+    if accepted:
+        assert callback.payload["account_fingerprint"] == h.repo.database.identity["ibkr_account"]
+    await h.c.handle_ibkr_event(event(h, "position"))
+    await h.c.handle_ibkr_event(callback)
+    if accepted:
+        await h.c.handle_ibkr_event(event(h, "order_status"))
+        await h.c.handle_ibkr_event(callback)  # Gateway history replay must remain idempotent.
+        await finish_hedges(h)
+        current = await h.state.get()
+        assert current.reconciliation.clean and current.armed and not current.paused
+        assert await h.repo.strategy_zq_quantity(h.settings.ibkr_zq_contract_month) == 24
+        assert len(await h.repo.all_hedge_obligations()) == 2
+    else:
+        # This different account has the same final four digits as the real account.
+        current = await h.state.get()
+        assert current.paused and not current.armed
+        assert await h.repo.strategy_zq_quantity(h.settings.ibkr_zq_contract_month) == 23
+        assert not await h.repo.all_hedge_obligations()
 
 
 async def test_terminal_open_callback_never_reopens_observed_order(live_fill):
