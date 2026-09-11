@@ -305,7 +305,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif payload.action is ControlAction.DISARM:
             await runtime.state.set_operating_state(armed=False)
         elif payload.action is ControlAction.PAUSE_NEW_TRADES:
-            await runtime.state.set_operating_state(paused=True, armed=False)
+            await runtime.state.set_operating_state(
+                paused=True,
+                armed=False,
+                pause_reason=f"Operator pause: {payload.reason}",
+            )
         elif payload.action is ControlAction.EMERGENCY_HALT:
             await runtime.execution.halt(payload.reason)
         elif payload.action is ControlAction.ACKNOWLEDGE_ALERT:

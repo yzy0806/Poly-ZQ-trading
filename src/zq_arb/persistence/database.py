@@ -22,6 +22,7 @@ from zq_arb.persistence.models import (
     ExecutionEnvironmentRecord,
     ExecutionRecord,
     HedgeObligationRecord,
+    OpeningInventoryRecord,
     OrderRecord,
     VenueEventRecord,
 )
@@ -115,6 +116,11 @@ class Database:
                 raise RuntimeError("Live execution requires the IBKR live environment")
             if self.settings.run_mode.is_live and self.settings.simulate_polymarket_fills:
                 raise RuntimeError("Live execution refuses simulated Polymarket state")
+            opening = await session.get(OpeningInventoryRecord, 1)
+            if opening is not None:
+                from zq_arb.persistence.opening_inventory import validate_opening_inventory
+
+                validate_opening_inventory(opening, self.settings, self.identity)
             orders = (await session.scalars(select(OrderRecord))).all()
             executions = (await session.scalars(select(ExecutionRecord))).all()
             rows: list[OrderRecord | ExecutionRecord] = [*orders, *executions]
@@ -154,6 +160,7 @@ class Database:
                     HedgeObligationRecord,
                     VenueEventRecord,
                     ExecutionEnvironmentRecord,
+                    OpeningInventoryRecord,
                 )
                 if any(
                     isinstance(item, models)

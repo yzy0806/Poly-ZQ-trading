@@ -13,9 +13,11 @@ from zq_arb.persistence.database import Database
 from zq_arb.persistence.models import (
     ExecutionRecord,
     HedgeObligationRecord,
+    OpeningInventoryRecord,
     OrderRecord,
     VenueEventRecord,
 )
+from zq_arb.persistence.opening_inventory import receipt_signature
 
 ZERO = Decimal("0")
 TERMINAL_ORDERS = frozenset({"CANCELLED", "FILLED", "MATCHED", "REJECTED", "EXPIRED"})
@@ -37,6 +39,18 @@ def safe_json(value: Any) -> Any:
 
 class HedgeLedger:
     database: Database
+
+    async def is_opening_inventory_receipt(self, venue: str, payload: dict[str, Any]) -> bool:
+        signature = receipt_signature(venue, payload)
+        if signature is None:
+            return False
+        async with self.database.session() as session:
+            record = await session.get(OpeningInventoryRecord, 1)
+            return bool(
+                record is not None
+                and record.identity == self.database.identity
+                and signature in record.snapshot["receipts"].get(venue, [])
+            )
 
     async def _refresh_batch_state(self, session: Any, batch_id: str) -> None:
         raise NotImplementedError

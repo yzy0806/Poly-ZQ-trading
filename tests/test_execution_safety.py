@@ -345,6 +345,17 @@ async def test_unknown_trade_is_durable_and_replayed_after_order_is_identified(l
     await receive(h, trade())
     assert len(await h.repo.pending_venue_receipts("POLYMARKET")) == 1
     await route(h)
+    assert not h.signed  # Unknown exposure blocks routing before account reads complete.
+    # Reconstruct an existing order identity without submitting new exposure.
+    await h.repo.create_hedge_order_intent(
+        obligation_id=h.obligation.obligation_id,
+        idempotency_key="recovered-poly-1",
+        shares=Decimal("100"),
+        limit_price=Decimal(".3"),
+        attempt=1,
+        signed_payload={"salt": 1},
+        order_id="poly-1",
+    )
     h.venue.get_order.side_effect = None
     h.venue.get_order.return_value = venue_order()
     h.venue.account_snapshot.return_value = PolymarketAccountSnapshot((), (), utc_now(), ())
@@ -381,6 +392,16 @@ async def test_all_owned_maker_fills_are_credited_and_unknown_legs_stay_durable(
         details={},
     )
     await h.execution._route_one_hedge(await h.state.get(), second[0])
+    assert len(h.signed) == 1
+    await h.repo.create_hedge_order_intent(
+        obligation_id=second[0].obligation_id,
+        idempotency_key="recovered-poly-2",
+        shares=Decimal("100"),
+        limit_price=Decimal(".3"),
+        attempt=1,
+        signed_payload={"salt": 2},
+        order_id="poly-2",
+    )
     await receive(h, payload)
     await receive(h, payload)
     assert not await h.repo.pending_venue_receipts("POLYMARKET")

@@ -967,6 +967,7 @@ class StateStore:
         paused: bool | None = None,
         kill_switch: bool | None = None,
         armed: bool | None = None,
+        pause_reason: str | None = None,
     ) -> None:
         def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
             updates: dict[str, Any] = {}
@@ -976,6 +977,15 @@ class StateStore:
                 updates["kill_switch"] = kill_switch
             if armed is not None:
                 updates["armed"] = armed and self.settings.run_mode is not RunMode.READ_ONLY
+            if pause_reason is not None or paused is False:
+                metadata = deepcopy(snapshot.metadata)
+                metadata["pause_reason"] = pause_reason if paused is not False else None
+                metadata["pause_triggered_at"] = (
+                    utc_now().isoformat()
+                    if pause_reason is not None and paused is not False
+                    else None
+                )
+                updates["metadata"] = metadata
             return snapshot.model_copy(update=updates)
 
         await self.update(apply)

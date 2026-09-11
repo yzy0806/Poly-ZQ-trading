@@ -102,8 +102,10 @@ def test_ibkr_recovery_requests_orders_executions_and_positions(settings: Settin
 
     adapter._client.reqAllOpenOrders.assert_called_once_with()
     adapter._client.reqCompletedOrders.assert_called_once_with(True)
-    adapter._client.reqExecutions.assert_called_once_with(9_003, execution_filter)
+    adapter._client.reqExecutions.assert_called_once_with(10_000, execution_filter)
     adapter._client.reqPositions.assert_called_once_with()
+    adapter.request_open_orders_and_executions()
+    assert adapter._client.reqExecutions.call_args.args[0] == 10_001
 
 
 def test_ibkr_cancellations_use_typed_order_cancel_payload(settings: Settings) -> None:

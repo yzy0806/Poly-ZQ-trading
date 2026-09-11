@@ -51,6 +51,17 @@ class ExecutionEnvironmentRecord(Base, TimestampMixin):
     identity: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
+class OpeningInventoryRecord(Base, TimestampMixin):
+    """Audited venue balances adopted before this engine began placing orders."""
+
+    __tablename__ = "opening_inventory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    identity: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class VenueEventRecord(Base, TimestampMixin):
     """Durable receipts, including events whose order has not been acknowledged yet."""
 

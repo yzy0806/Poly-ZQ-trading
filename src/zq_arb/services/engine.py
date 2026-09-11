@@ -331,6 +331,13 @@ class EngineRuntime:
                     handled = 0
                     budget_started = loop.time()
 
+    async def _refresh_ibkr_account(self) -> bool:
+        request_id = self.ibkr.reserve_reconciliation_request_id()
+        if not await self.execution.begin_ibkr_reconciliation(request_id):
+            return False
+        self.ibkr.request_open_orders_and_executions(request_id)
+        return True
+
     async def _ibkr_connection_loop(self) -> None:
         attempts = 0
         while not self._stopping.is_set():
@@ -340,30 +347,34 @@ class EngineRuntime:
                 await self.state.begin_ibkr_subscriptions()
                 self.ibkr.request_contracts_and_market_data()
                 await self.state.set_ibkr_resubscribe_required(False)
-                await self.execution.begin_ibkr_reconciliation()
-                self.ibkr.request_open_orders_and_executions()
+                await self._refresh_ibkr_account()
                 last_account_refresh = asyncio.get_running_loop().time()
                 self._margin_preview_refresh_requested.set()
                 attempts = 0
                 while self.ibkr.connected and not self._stopping.is_set():
+                    requested = False
                     try:
                         await asyncio.wait_for(
-                            self._stopping.wait(),
-                            timeout=self.settings.ibkr_heartbeat_seconds,
+                            self.execution.ibkr_refresh_requested.wait(),
+                            timeout=min(1, self.settings.ibkr_heartbeat_seconds),
                         )
+                        requested = True
+                        self.execution.ibkr_refresh_requested.clear()
                     except TimeoutError:
-                        if (
-                            asyncio.get_running_loop().time() - last_account_refresh
-                            >= self.settings.reconciliation_max_age_seconds / 2
-                        ):
-                            await self.execution.begin_ibkr_reconciliation()
-                            self.ibkr.request_open_orders_and_executions()
+                        pass
+                    await self.execution.check_ibkr_refresh_timeout()
+                    if requested or (
+                        asyncio.get_running_loop().time() - last_account_refresh
+                        >= self.settings.reconciliation_max_age_seconds / 2
+                    ):
+                        if await self._refresh_ibkr_account():
                             last_account_refresh = asyncio.get_running_loop().time()
                 if not self._stopping.is_set():
                     raise ConnectionError("TWS network loop stopped")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                await self.ibkr.disconnect()
                 attempts += 1
                 LOGGER.warning("ibkr_connection_failed", attempt=attempts, error=str(exc))
                 await self.state.set_ibkr_health(

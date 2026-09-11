@@ -63,6 +63,22 @@ def test_every_clear_gate_allows_paper_qualification(settings: Settings) -> None
     assert result.reasons == ()
 
 
+@pytest.mark.parametrize("held,allowed", [(23, True), (24, True), (25, False)])
+def test_one_contract_entry_respects_total_25_contract_cap(settings, held, allowed):
+    configured = settings.model_copy(
+        update={
+            "ibkr_zq_child_order_quantity": 1,
+            "max_zq_position": 25,
+        }
+    )
+    context = clear_context().model_copy(update={"current_zq_position": held})
+    result = RiskEngine(configured).qualify(profitable_opportunity(), context)
+    gate = next(item for item in result.checks if item.code == "MAX_ZQ_POSITION")
+    assert gate.passed is allowed
+    assert Decimal(str(gate.actual_value)) == held + 1
+    assert "BUY 1" in gate.label
+
+
 @pytest.mark.parametrize(
     "country,allowed", [("HK", True), ("NL", True), ("US", False), (None, False)]
 )

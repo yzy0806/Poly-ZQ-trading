@@ -100,6 +100,25 @@ function stateFixture(): EngineSnapshot {
 }
 
 describe('HealthPanel', () => {
+  it('keeps the pause cause visible after reconciliation becomes clean', () => {
+    const state = stateFixture()
+    state.paused = true
+    state.metadata = { pause_reason: 'Safety pause: IBKR callback deadline expired', pause_triggered_at: '2026-09-11T11:57:34Z' }
+    state.reconciliation = { status: 'CLEAN', clean: true, reason: 'Venue ledger agrees' } as EngineSnapshot['reconciliation']
+    render(<HealthPanel state={state} />)
+    expect(screen.getByText('Reconciliation: CLEAN')).toBeTruthy()
+    expect(screen.getByText('Safety pause: IBKR callback deadline expired')).toBeTruthy()
+  })
+
+  it('shows pending updates without labelling them an operator pause', () => {
+    const state = stateFixture()
+    state.paused = false
+    state.reconciliation = { status: 'UNKNOWN', clean: false, reason: 'Awaiting IBKR updates; new entries blocked' } as EngineSnapshot['reconciliation']
+    render(<HealthPanel state={state} />)
+    expect(screen.getByText('Awaiting IBKR updates; new entries blocked')).toBeTruthy()
+    expect(screen.queryByText('Trading paused')).toBeNull()
+  })
+
   it.each(['HK', 'NL'])('shows API eligibility for %s despite the raw blocked flag', (country) => {
     const state = stateFixture()
     state.eligibility = {

@@ -103,6 +103,7 @@ async def test_armed_waiting_does_not_submit_without_a_tradeable_opportunity(
     repository = MagicMock()
     repository.active_batch_view = AsyncMock(return_value=BatchView())
     repository.pending_obligations = AsyncMock(return_value=())
+    repository.hedge_safety_differences = AsyncMock(return_value={})
     coordinator = ExecutionCoordinator(
         settings=configured,
         repository=repository,

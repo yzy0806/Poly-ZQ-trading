@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     sqlite_wal_autocheckpoint_pages: int = 1_000
     execution_request_timeout_seconds: int = Field(ge=1, le=20)
     reconciliation_max_age_seconds: int = Field(ge=5, le=300)
+    ibkr_callback_settle_seconds: float = Field(gt=0, le=10)
     shutdown_drain_seconds: int = Field(ge=1, le=25)
     retention_days_quotes: int = 30
     retention_days_audit: int = 2_555
@@ -254,8 +255,8 @@ class Settings(BaseSettings):
             errors.append("ENV_FILE_VERSION must be 9")
         if self.api_workers != 1:
             errors.append("API_WORKERS must be 1 for deterministic state ownership")
-        if self.ibkr_zq_child_order_quantity != 10:
-            errors.append("IBKR_ZQ_CHILD_ORDER_QUANTITY must be exactly 10")
+        if self.ibkr_zq_child_order_quantity <= 0:
+            errors.append("IBKR_ZQ_CHILD_ORDER_QUANTITY must be a positive integer")
         if self.max_open_batches != 1:
             errors.append("MAX_OPEN_BATCHES must be exactly 1")
         if self.max_zq_position > 100:

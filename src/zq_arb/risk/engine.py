@@ -382,7 +382,7 @@ class RiskEngine:
         add(
             "MAX_ZQ_POSITION",
             "POSITION",
-            "Projected ZQ position after BUY 10",
+            f"Projected ZQ position after BUY {settings.ibkr_zq_child_order_quantity}",
             projected_position <= settings.max_zq_position,
             projected_position,
             "<=",
@@ -393,7 +393,7 @@ class RiskEngine:
         add(
             "ACTIVE_BATCH_LIMIT",
             "EXECUTION",
-            "Active 10-contract batches",
+            f"Active {settings.ibkr_zq_child_order_quantity}-contract batches",
             context.active_batches < settings.max_open_batches,
             context.active_batches,
             "<",

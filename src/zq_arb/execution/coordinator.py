@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import uuid4
@@ -89,6 +89,7 @@ class ExecutionCoordinator:
         self._cancel_requested_at: dict[int, float] = {}
         self._venue_revision = 0
         self._last_ledger_revision: int | None = None
+        self._last_reconciled_venue_revision: int | None = None
         self._polymarket_snapshot_at: datetime | None = None
         self._last_reconciliation_check = float("-inf")
         self._order_sent_at: dict[str, datetime] = {}
@@ -98,6 +99,8 @@ class ExecutionCoordinator:
         self._ibkr_snapshot_at: datetime | None = None
         self._ibkr_reconciliation_in_progress = False
         self._ibkr_foreign_orders: set[str] = set()
+        self._ibkr_unknown_orders: set[int] = set()
+        self._ibkr_identity_conflicts: set[str] = set()
         self._ibkr_executions_complete = False
         self._ibkr_positions: dict[str, Decimal] = {}
         self._ibkr_positions_complete = False
@@ -106,6 +109,19 @@ class ExecutionCoordinator:
         self._polymarket_positions_complete = False
         self._polymarket_snapshot_complete = False
         self._last_reconciliation_signature: tuple[Any, ...] | None = None
+        self.ibkr_refresh_requested = asyncio.Event()
+        self._ibkr_request_id: int | None = None
+        self._ibkr_refresh_started: float | None = None
+        self._ibkr_refresh_ambiguous = False
+        self._ibkr_refresh_serial = 0
+        self._ibkr_completed_refresh_serial = 0
+        self._ibkr_terminal_conflicts: set[int] = set()
+        self._ibkr_refresh_conflicts: set[int] = set()
+        self._ibkr_matched_zq: Decimal | None = None
+        self._ibkr_gap: dict[str, Any] | None = None
+        self._ibkr_gap_deadline: float | None = None
+        self._ibkr_gap_expired = False
+        self._ibkr_gap_watchdog: asyncio.Task[None] | None = None
 
     async def recover(self) -> None:
         """Validate provenance before any replay; startup stays blocked pending venue reads."""
@@ -116,11 +132,23 @@ class ExecutionCoordinator:
         await self.repository.normalize_active_batch_state()
         await self._publish()
 
-    async def begin_ibkr_reconciliation(self) -> None:
+    async def begin_ibkr_reconciliation(self, request_id: int | None = None) -> bool:
         async with self._lock:
+            if self._ibkr_refresh_ambiguous:
+                raise RuntimeError(
+                    "IBKR snapshot timed out; reconnect before another unscoped read"
+                )
+            if self._ibkr_reconciliation_in_progress:
+                return False
+            self.ibkr_refresh_requested.clear()
+            self._ibkr_request_id = request_id
+            self._ibkr_refresh_started = asyncio.get_running_loop().time()
+            self._ibkr_refresh_serial += 1
+            self._ibkr_refresh_conflicts.clear()
             await self.state.invalidate_reconciliation("IBKR reconciliation in progress")
             self._ibkr_open_order_ids.clear()
             self._ibkr_foreign_orders.clear()
+            self._ibkr_unknown_orders.clear()
             self._ibkr_open_orders_complete = False
             self._ibkr_completed_orders_complete = False
             self._ibkr_reconciliation_in_progress = True
@@ -129,6 +157,19 @@ class ExecutionCoordinator:
             self._ibkr_positions.clear()
             self._ibkr_positions_complete = False
             self._last_reconciliation_signature = None
+            return True
+
+    async def check_ibkr_refresh_timeout(self) -> None:
+        async with self._lock:
+            if self._ibkr_refresh_ambiguous:
+                raise TimeoutError("IBKR refresh completion is ambiguous; reconnect required")
+            if self._ibkr_refresh_started is not None and (
+                asyncio.get_running_loop().time() - self._ibkr_refresh_started
+                >= self.settings.execution_request_timeout_seconds
+            ):
+                self._ibkr_refresh_ambiguous = True
+                await self._attempt_automated_reconciliation()
+                raise TimeoutError("IBKR account snapshot incomplete; reconnect required")
 
     async def handle_ibkr_event(self, event: VenueEvent) -> None:
         async with self._lock:
@@ -137,12 +178,24 @@ class ExecutionCoordinator:
             if event.kind in {"tick_price", "tick_size"}:
                 return
             if event.kind == "connection" and event.payload.get("status") != "CONNECTED":
+                self._venue_revision += 1
                 self._recovery_ready = False
                 self._ibkr_open_orders_complete = False
                 self._ibkr_executions_complete = False
                 self._ibkr_positions_complete = False
                 self._ibkr_completed_orders_complete = False
-            if event.kind in {"execution", "order_status", "open_order", "position"}:
+                self._ibkr_reconciliation_in_progress = False
+                self._ibkr_refresh_started = None
+                self._ibkr_matched_zq = None
+                self._ibkr_refresh_ambiguous = False
+            if event.kind in {
+                "execution",
+                "order_status",
+                "open_order",
+                "position",
+                "completed_order",
+            }:
+                self._venue_revision += 1
                 await self.state.invalidate_reconciliation("IBKR execution state changed")
             if event.kind == "execution":
                 await self._handle_ibkr_execution(event)
@@ -157,7 +210,11 @@ class ExecutionCoordinator:
             elif event.kind == "open_order_end":
                 self._ibkr_open_orders_complete = True
             elif event.kind == "execution_end":
-                self._ibkr_executions_complete = True
+                if (
+                    self._ibkr_request_id is None
+                    or event.payload.get("request_id") == self._ibkr_request_id
+                ):
+                    self._ibkr_executions_complete = True
             elif event.kind == "position":
                 await self._handle_ibkr_position(event)
                 if self._ibkr_positions_complete:
@@ -174,6 +231,9 @@ class ExecutionCoordinator:
             ):
                 self._ibkr_snapshot_at = utc_now()
                 self._ibkr_reconciliation_in_progress = False
+                self._ibkr_refresh_started = None
+                self._ibkr_completed_refresh_serial = self._ibkr_refresh_serial
+                self._ibkr_terminal_conflicts = set(self._ibkr_refresh_conflicts)
             await self._attempt_automated_reconciliation()
             await self._publish()
 
@@ -291,7 +351,12 @@ class ExecutionCoordinator:
 
     async def halt(self, reason: str) -> None:
         self._halt_requested = True
-        await self.state.set_operating_state(kill_switch=True, paused=True, armed=False)
+        await self.state.set_operating_state(
+            kill_switch=True,
+            paused=True,
+            armed=False,
+            pause_reason=f"Emergency halt: {reason}",
+        )
         await self.repository.audit(actor="SYSTEM", action="EXECUTION_HALTED", reason=reason)
         await self.cancel_working_zq(reason)
 
@@ -346,6 +411,9 @@ class ExecutionCoordinator:
             await asyncio.gather(*tuple(self._hedge_tasks.values()))
 
     async def close(self) -> None:
+        if self._ibkr_gap_watchdog is not None:
+            self._ibkr_gap_watchdog.cancel()
+            await asyncio.gather(self._ibkr_gap_watchdog, return_exceptions=True)
         for task in tuple(self._hedge_tasks.values()):
             task.cancel()
         await asyncio.gather(*tuple(self._hedge_tasks.values()), return_exceptions=True)
@@ -453,6 +521,11 @@ class ExecutionCoordinator:
         ):
             return
         receipt = await self.repository.save_venue_receipt("IBKR", payload)
+        if not await self._ibkr_identity_valid(payload):
+            return
+        if await self.repository.is_opening_inventory_receipt("IBKR", payload):
+            await self.repository.finish_venue_receipt("IBKR", receipt)
+            return
         side = str(payload.get("side") or "").upper()
         if side not in {"BOT", "BUY"}:
             return
@@ -510,17 +583,17 @@ class ExecutionCoordinator:
             else:
                 self._ibkr_foreign_orders.add(identity)
             return
-        if status.upper() in IBKR_TERMINAL:
-            self._ibkr_open_order_ids.discard(int(order_id))
-        else:
-            self._ibkr_open_order_ids.add(int(order_id))
-        await self.repository.update_zq_order_status(
+        if not await self._ibkr_identity_valid(payload):
+            return
+        effective = await self.repository.update_zq_order_status(
             order_id=int(order_id),
             status=str(payload.get("status") or "UNKNOWN"),
             filled=_decimal(payload.get("filled")),
             remaining=_decimal(payload.get("remaining")),
             permanent_id=str(payload.get("perm_id") or "") or None,
         )
+
+        self._observe_ibkr_order(int(order_id), status, effective)
 
     async def _handle_ibkr_open_order(self, event: VenueEvent) -> None:
         payload = event.payload
@@ -530,12 +603,56 @@ class ExecutionCoordinator:
         if not self._ibkr_own_client(payload):
             self._ibkr_foreign_orders.add(f"{payload.get('client_id')}:{int(order_id)}")
             return
-        self._ibkr_open_order_ids.add(int(order_id))
-        await self.repository.update_zq_order_status(
+        if not await self._ibkr_identity_valid(payload):
+            return
+        status = str(payload.get("status") or "OPEN")
+        effective = await self.repository.update_zq_order_status(
             order_id=int(order_id),
-            status=str(payload.get("status") or "OPEN"),
+            status=status,
             permanent_id=str(payload.get("perm_id") or "") or None,
         )
+        self._observe_ibkr_order(int(order_id), status, effective)
+
+    def _observe_ibkr_order(self, order_id: int, status: str, effective: str | None) -> None:
+        if effective is None and status.upper() not in IBKR_TERMINAL:
+            self._ibkr_unknown_orders.add(order_id)
+        else:
+            self._ibkr_unknown_orders.discard(order_id)
+        if status.upper() in IBKR_TERMINAL or effective in IBKR_TERMINAL:
+            self._ibkr_open_order_ids.discard(order_id)
+        else:
+            self._ibkr_open_order_ids.add(order_id)
+        if effective in IBKR_TERMINAL and status.upper() not in IBKR_TERMINAL:
+            self._ibkr_terminal_conflicts.add(order_id)
+            if self._ibkr_reconciliation_in_progress:
+                self._ibkr_refresh_conflicts.add(order_id)
+        elif status.upper() in IBKR_TERMINAL:
+            self._ibkr_terminal_conflicts.discard(order_id)
+
+    async def _ibkr_identity_valid(self, payload: dict[str, Any]) -> bool:
+        order_id = str(payload.get("order_id") or "")
+        known = next(
+            (
+                p
+                for p in await self.repository.ledger_orders("IBKR")
+                if p.venue_order_id == order_id
+            ),
+            None,
+        )
+        account = payload.get("account_fingerprint")
+        conflict = bool(account and account != self.repository.database.identity["ibkr_account"])
+        if known is not None:
+            permanent_id = str(payload.get("perm_id") or "")
+            month = str(payload.get("contract_month") or "")
+            reference = str(payload.get("order_ref") or "")
+            conflict |= bool(
+                (known.permanent_id and permanent_id and known.permanent_id != permanent_id)
+                or (month and not month.startswith(self.settings.ibkr_zq_contract_month))
+                or (reference and reference != known.batch_id)
+            )
+        if conflict:
+            self._ibkr_identity_conflicts.add(order_id)
+        return not conflict
 
     def _ibkr_own_client(self, payload: dict[str, Any]) -> bool:
         client_id = payload.get("client_id")
@@ -569,6 +686,7 @@ class ExecutionCoordinator:
             permanent_id=permanent_id or None,
         )
         self._ibkr_open_order_ids.discard(int(match.venue_order_id))
+        self._ibkr_terminal_conflicts.discard(int(match.venue_order_id))
 
     async def _handle_ibkr_position(self, event: VenueEvent) -> None:
         payload = event.payload
@@ -596,8 +714,222 @@ class ExecutionCoordinator:
         async with self.repository.database.session():
             await self._reconcile_ledger_snapshot()
 
+    async def _latch_reconciliation_pause(self, reason: str) -> None:
+        current = await self.state.get()
+        if not current.metadata.get("pause_reason"):
+            await self.repository.audit(
+                actor="SYSTEM",
+                action="RECONCILIATION_SAFETY_PAUSE",
+                reason=reason,
+            )
+            await self.state.set_operating_state(paused=True, armed=False, pause_reason=reason)
+        else:
+            await self.state.set_operating_state(paused=True, armed=False)
+        await self.cancel_working_zq(reason)
+
+    async def _expire_ibkr_gap(self) -> None:
+        if self._ibkr_gap is None or self._ibkr_gap_expired:
+            return
+        self._ibkr_gap_expired = True
+        self._recovery_ready = False
+        reason = "Safety pause: IBKR callback deadline expired; venue evidence remains incomplete"
+        await self.repository.audit(
+            actor="SYSTEM",
+            action="IBKR_CALLBACK_GAP_EXPIRED",
+            reason=reason,
+            details=self._ibkr_gap,
+        )
+        await self._latch_reconciliation_pause(reason)
+        await self.state.set_automated_reconciliation(
+            clean=False,
+            snapshot_id=(await self.state.get()).snapshot_id,
+            reason=reason,
+        )
+        await self.state.add_alert(AlertSeverity.CRITICAL, "IBKR_CALLBACK_TIMEOUT", reason)
+
+    async def _watch_ibkr_gap(self) -> None:
+        try:
+            assert self._ibkr_gap_deadline is not None
+            await asyncio.sleep(max(0, self._ibkr_gap_deadline - asyncio.get_running_loop().time()))
+            async with self._lock:
+                await self._expire_ibkr_gap()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A failed audit/DB operation must not leave entries authorized.
+            self._recovery_ready = False
+            await self.state.set_operating_state(
+                paused=True,
+                armed=False,
+                pause_reason="Safety pause: IBKR callback watchdog failed",
+            )
+            LOGGER.exception("ibkr_callback_watchdog_failed")
+
+    async def _finish_ibkr_gap(self) -> None:
+        if self._ibkr_gap is None:
+            return
+        await self.repository.audit(
+            actor="SYSTEM",
+            action="IBKR_CALLBACK_GAP_RESOLVED",
+            reason="IBKR callbacks and execution ledger agree",
+            details=self._ibkr_gap,
+        )
+        self._ibkr_gap = None
+        self._ibkr_gap_deadline = None
+        self._ibkr_gap_expired = False
+        if self._ibkr_gap_watchdog is not None:
+            self._ibkr_gap_watchdog.cancel()
+        await self.state.resolve_alerts("IBKR_CALLBACK")
+
+    async def _classify_ibkr_callbacks(self, differences: dict[str, Any]) -> set[str]:
+        """Explain only bounded gaps in a previously reconciled, known BUY order."""
+        if self._ibkr_gap_deadline is not None and (
+            asyncio.get_running_loop().time() >= self._ibkr_gap_deadline
+        ):
+            await self._expire_ibkr_gap()
+        if not (
+            self._ibkr_positions_complete
+            and self._ibkr_open_orders_complete
+            and self._ibkr_executions_complete
+            and self._ibkr_completed_orders_complete
+        ):
+            return set()
+        progress = [
+            p
+            for p in await self.repository.ibkr_order_progress()
+            if p.contract_month == self.settings.ibkr_zq_contract_month
+        ]
+        expected = await self.repository.strategy_zq_quantity(self.settings.ibkr_zq_contract_month)
+        observed = self._observed_zq_position()
+        outstanding = {
+            p.order_id: str(p.reported - p.executed) for p in progress if p.reported > p.executed
+        }
+        incomplete = [
+            p.order_id
+            for p in progress
+            if p.executed == p.quantity and p.state not in IBKR_TERMINAL
+        ]
+        if outstanding:
+            differences["ibkr_unrecorded_fills"] = outstanding
+        if incomplete:
+            differences["ibkr_unconfirmed_completion"] = incomplete
+        if self._ibkr_terminal_conflicts:
+            differences["ibkr_terminal_conflicts"] = sorted(self._ibkr_terminal_conflicts)
+        if observed != expected:
+            differences["zq_position_mismatch"] = {
+                "expected": str(expected),
+                "observed": str(observed),
+            }
+        if self._ibkr_matched_zq is not None and observed == expected and not outstanding:
+            self._ibkr_matched_zq = expected
+        candidates = {
+            "ibkr_unrecorded_fills",
+            "ibkr_unconfirmed_completion",
+            "ibkr_terminal_conflicts",
+        } & differences.keys()
+        if self._ibkr_refresh_conflicts and not self._ibkr_reconciliation_in_progress:
+            candidates.discard("ibkr_terminal_conflicts")
+        capacity = sum(
+            (
+                p.quantity - p.executed
+                for p in progress
+                if p.state not in IBKR_TERMINAL | {"INTENT"} or p.reported > p.executed
+            ),
+            Decimal(0),
+        )
+        if self._ibkr_matched_zq is not None and (
+            (0 < observed - expected <= capacity and expected >= self._ibkr_matched_zq)
+            or (self._ibkr_matched_zq <= observed < expected)
+        ):
+            candidates.add("zq_position_mismatch")
+        ibkr_keys = {
+            "zq_position_mismatch",
+            "ibkr_unrecorded_fills",
+            "ibkr_unconfirmed_completion",
+            "ibkr_terminal_conflicts",
+        } & differences.keys()
+        if not ibkr_keys:
+            await self._finish_ibkr_gap()
+            return set()
+        # Startup has no previously reconciled anchor: it cannot use this live-fill allowance.
+        if candidates and self._ibkr_matched_zq is not None and self._ibkr_gap is None:
+            now = utc_now()
+            self._ibkr_gap = {
+                "expected": str(expected),
+                "observed": str(observed),
+                "order_ids": [
+                    p.order_id
+                    for p in progress
+                    if p.state not in IBKR_TERMINAL
+                    or p.reported > p.executed
+                    or p.order_id in self._ibkr_terminal_conflicts
+                ],
+                "first_seen_at": now.isoformat(),
+                "deadline_at": (
+                    now + timedelta(seconds=self.settings.ibkr_callback_settle_seconds)
+                ).isoformat(),
+                "refresh_serial": self._ibkr_completed_refresh_serial,
+                "differences": dict(differences),
+            }
+            self._ibkr_gap_deadline = (
+                asyncio.get_running_loop().time() + self.settings.ibkr_callback_settle_seconds
+            )
+            await self.repository.audit(
+                actor="SYSTEM",
+                action="IBKR_CALLBACK_GAP_STARTED",
+                reason="Awaiting IBKR updates for a known strategy order",
+                details=self._ibkr_gap,
+            )
+            self._ibkr_gap_watchdog = asyncio.create_task(self._watch_ibkr_gap())
+            self.ibkr_refresh_requested.set()
+        if self._ibkr_gap is None or self._ibkr_gap_expired:
+            return set()
+        if self._ibkr_completed_refresh_serial > self._ibkr_gap["refresh_serial"]:
+            return set()  # A completed fresh read still conflicts: no second grace period.
+        return candidates
+
     async def _reconcile_ledger_snapshot(self) -> None:
         venue_revision = self._venue_revision
+        differences = await self.repository.hedge_safety_differences()
+        if self._ibkr_foreign_orders:
+            differences["unexpected_ibkr_clients"] = sorted(self._ibkr_foreign_orders)
+        if self._ibkr_unknown_orders:
+            differences["unexpected_ibkr_orders"] = sorted(self._ibkr_unknown_orders)
+        if self._ibkr_identity_conflicts:
+            differences["ibkr_identity_conflicts"] = sorted(self._ibkr_identity_conflicts)
+        transient = await self._classify_ibkr_callbacks(differences)
+        unsafe_keys = {
+            "zq_position_mismatch",
+            "polymarket_position_mismatch",
+            "excess_hedges",
+            "unexpected_ibkr_orders",
+            "unexpected_ibkr_clients",
+            "unexpected_polymarket_orders",
+            "unprocessed_ibkr_events",
+            "unprocessed_polymarket_events",
+            "ibkr_unrecorded_fills",
+            "ibkr_unconfirmed_completion",
+            "ibkr_terminal_conflicts",
+            "ibkr_identity_conflicts",
+        }
+        if self._ibkr_refresh_started is not None and (
+            asyncio.get_running_loop().time() - self._ibkr_refresh_started
+            >= self.settings.execution_request_timeout_seconds
+        ):
+            self._ibkr_refresh_ambiguous = True
+        if self._ibkr_refresh_ambiguous:
+            self._recovery_ready = False
+            await self._latch_reconciliation_pause(
+                "Safety pause: IBKR account refresh timed out; reconnect required"
+            )
+            await self.state.invalidate_reconciliation("IBKR refresh timed out; reconnect required")
+            return
+        early_unsafe = (unsafe_keys & differences.keys()) - transient
+        if early_unsafe:
+            self._recovery_ready = False
+            await self._latch_reconciliation_pause(
+                f"Safety pause: unexplained venue evidence {differences}"
+            )
         simulated = self.settings.simulate_polymarket_fills
         fresh = simulated or (
             self._polymarket_snapshot_at is not None
@@ -616,12 +948,11 @@ class ExecutionCoordinator:
             <= self.settings.reconciliation_max_age_seconds
         ):
             await self.state.invalidate_reconciliation(
-                "venue reconciliation is incomplete or stale"
+                "Awaiting IBKR updates; new entries blocked"
+                if self._ibkr_gap is not None
+                else "venue reconciliation is incomplete or stale"
             )
             return
-        differences = await self.repository.hedge_safety_differences()
-        if self._ibkr_foreign_orders:
-            differences["unexpected_ibkr_clients"] = sorted(self._ibkr_foreign_orders)
         expected_zq = await self.repository.strategy_zq_quantity(
             self.settings.ibkr_zq_contract_month
         )
@@ -670,16 +1001,7 @@ class ExecutionCoordinator:
         if unresolved:
             differences["unresolved_hedge_obligations"] = unresolved
         clean = not differences
-        unsafe_differences = {
-            "zq_position_mismatch",
-            "polymarket_position_mismatch",
-            "excess_hedges",
-            "unexpected_ibkr_orders",
-            "unexpected_ibkr_clients",
-            "unexpected_polymarket_orders",
-            "unprocessed_ibkr_events",
-            "unprocessed_polymarket_events",
-        } & differences.keys()
+        unsafe_differences = (unsafe_keys & differences.keys()) - transient
         signature = (
             repr(differences),
             str(expected_zq),
@@ -691,7 +1013,7 @@ class ExecutionCoordinator:
         if venue_revision != self._venue_revision:
             await self.state.invalidate_reconciliation("venue changed during reconciliation")
             return
-        self._recovery_ready = not unsafe_differences
+        self._recovery_ready = not unsafe_differences and not self._ibkr_gap_expired
         if (
             signature == self._last_reconciliation_signature
             and current.reconciliation.clean == clean
@@ -721,7 +1043,8 @@ class ExecutionCoordinator:
             clean=clean,
             unknown=bool(differences)
             and set(differences)
-            <= {
+            <= transient
+            | {
                 "unresolved_polymarket_orders",
                 "pending_settlement",
                 "unresolved_hedge_obligations",
@@ -733,19 +1056,26 @@ class ExecutionCoordinator:
             reason=(
                 f"venue ledger reconciliation {reconciliation_id} is clean"
                 if clean
+                else f"Awaiting IBKR updates; new entries blocked: {differences}"
+                if transient and not unsafe_differences
                 else f"venue ledger differences: {differences}"
             ),
         )
         self._last_ledger_revision = self.repository.database.revision if clean else None
+        if clean:
+            self._ibkr_matched_zq = expected_zq
+            self._last_reconciled_venue_revision = self._venue_revision
         if differences:
-            await self.state.add_alert(
-                AlertSeverity.CRITICAL,
-                "EXECUTION_RECONCILIATION_MISMATCH",
-                f"Execution reconciliation blocks new entries: {differences}",
-            )
+            if not transient or unsafe_differences:
+                await self.state.add_alert(
+                    AlertSeverity.CRITICAL,
+                    "EXECUTION_RECONCILIATION_MISMATCH",
+                    f"Execution reconciliation blocks new entries: {differences}",
+                )
             if unsafe_differences:
-                await self.state.set_operating_state(paused=True, armed=False)
-                await self.cancel_working_zq("unexplained venue orders, fills, or inventory")
+                await self._latch_reconciliation_pause(
+                    f"Safety pause: unexplained venue evidence {differences}"
+                )
         else:
             await self.state.resolve_alerts("EXECUTION_RECONCILIATION")
             await self.state.resolve_alerts("HEDGE_ROUTING_FAILED")
@@ -874,7 +1204,9 @@ class ExecutionCoordinator:
                 return
             allow_one_tick = obligation.token_id == self._token_id("INC50PLUS")
             plan = plan_hedge_entry(
-                book, shares, self.settings.polymarket_emergency_max_price,
+                book,
+                shares,
+                self.settings.polymarket_emergency_max_price,
                 allow_one_tick=allow_one_tick,
             )
             price = plan.limit_price
@@ -899,7 +1231,9 @@ class ExecutionCoordinator:
             if book is None or book.best_ask != lowest_ask:
                 return
             rechecked_plan = plan_hedge_entry(
-                book, shares, self.settings.polymarket_emergency_max_price,
+                book,
+                shares,
+                self.settings.polymarket_emergency_max_price,
                 allow_one_tick=allow_one_tick,
             )
             if rechecked_plan.limit_price != price or rechecked_plan.price_cap != plan.price_cap:
@@ -963,6 +1297,9 @@ class ExecutionCoordinator:
         self, payload: dict[str, Any], received_at: datetime
     ) -> None:
         receipt = await self.repository.save_venue_receipt("POLYMARKET", payload)
+        if await self.repository.is_opening_inventory_receipt("POLYMARKET", payload):
+            await self.repository.finish_venue_receipt("POLYMARKET", receipt)
+            return
         trade_id = str(payload.get("id") or "")
         quantity = _decimal(payload.get("size"))
         price = _decimal(payload.get("price"))
@@ -1098,8 +1435,10 @@ class ExecutionCoordinator:
             (
                 max(
                     sum(
-                        (self._taker_fee(fee_parameters[code], fill.size, fill.price)
-                         for fill in depth.fills),
+                        (
+                            self._taker_fee(fee_parameters[code], fill.size, fill.price)
+                            for fill in depth.fills
+                        ),
                         Decimal("0"),
                     )
                     for depth in (entry.depth, emergency)
@@ -1293,7 +1632,11 @@ class ExecutionCoordinator:
         )
         return (
             snapshot.armed
+            and self._ibkr_gap is None
+            and not self._ibkr_reconciliation_in_progress
+            and not self._ibkr_refresh_ambiguous
             and snapshot.reconciliation.clean
+            and (manual_simulation or self._last_reconciled_venue_revision == self._venue_revision)
             and (manual_simulation or expected_revision == self.repository.database.revision)
             and not self._halt_requested
             and not snapshot.paused

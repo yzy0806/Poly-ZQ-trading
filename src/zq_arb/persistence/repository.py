@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -24,6 +25,7 @@ from zq_arb.persistence.models import (
     ConfigVersion,
     ExecutionRecord,
     HedgeObligationRecord,
+    OpeningInventoryRecord,
     OrderRecord,
     ReconciliationRecord,
 )
@@ -38,6 +40,16 @@ def json_safe(value: Any) -> Any:
     """Round-trip through the canonical encoder before storing in a JSON column."""
 
     return json.loads(json.dumps(value, default=str))
+
+
+@dataclass(frozen=True)
+class ZqOrderProgress:
+    order_id: int
+    state: str
+    quantity: Decimal
+    executed: Decimal
+    reported: Decimal
+    contract_month: str
 
 
 class Repository(HedgeLedger):
@@ -144,8 +156,21 @@ class Repository(HedgeLedger):
                 for item in batches
                 if str(item.details.get("contract_month") or "") == contract_month
             )
+            opening = await session.get(OpeningInventoryRecord, 1)
+            initial = (
+                sum(
+                    (
+                        Decimal(item["quantity"])
+                        for item in opening.snapshot["positions"]
+                        if item["venue"] == "IBKR" and item["instrument"] == contract_month
+                    ),
+                    Decimal("0"),
+                )
+                if opening
+                else Decimal("0")
+            )
             if not batch_ids:
-                return Decimal("0")
+                return initial
             executions = tuple(
                 (
                     await session.scalars(
@@ -156,7 +181,7 @@ class Repository(HedgeLedger):
                     )
                 ).all()
             )
-            return sum((item.quantity for item in executions), Decimal("0"))
+            return initial + sum((item.quantity for item in executions), Decimal("0"))
 
     async def strategy_portfolio_positions(
         self, settings: Settings
@@ -165,8 +190,7 @@ class Repository(HedgeLedger):
 
         async with self.database.session() as session:
             executions = tuple((await session.scalars(select(ExecutionRecord))).all())
-            if not executions:
-                return ()
+            opening = await session.get(OpeningInventoryRecord, 1)
             batches = {
                 item.batch_id: item
                 for item in tuple((await session.scalars(select(BatchRecord))).all())
@@ -180,6 +204,15 @@ class Repository(HedgeLedger):
             leg.no_token_id: f"{leg.code} NO" for leg in settings.market_legs
         }
         aggregates: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in opening.snapshot["positions"] if opening else ():
+            venue, instrument = item["venue"], item["instrument"]
+            quantity = Decimal(item["quantity"])
+            aggregates[(venue, instrument)] = {
+                "quantity": quantity,
+                "weighted_price": quantity * Decimal(item["average_price"]),
+                "label": f"ZQ {instrument}" if venue == "IBKR" else token_labels[instrument],
+                "simulated_flags": [False] if venue == "POLYMARKET" else [],
+            }
         for execution in executions:
             if bool(execution.details.get("terminal_failed")):
                 continue
@@ -376,7 +409,7 @@ class Repository(HedgeLedger):
         filled: Decimal | None = None,
         remaining: Decimal | None = None,
         permanent_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         async with self.database.session() as session:
             order = await session.scalar(
                 select(OrderRecord).where(
@@ -385,17 +418,19 @@ class Repository(HedgeLedger):
                 )
             )
             if order is None:
-                return
+                return None
             terminal = {"FILLED", "CANCELLED", "CANCELED", "APICANCELLED", "INACTIVE", "ABORTED"}
             if order.state in terminal and status.upper() not in terminal:
-                return
+                return order.state
             order.state = status.upper()
             order.permanent_id = permanent_id or order.permanent_id
             batch = await session.scalar(
                 select(BatchRecord).where(BatchRecord.batch_id == order.batch_id)
             )
             if batch is None:
-                return
+                return order.state
+            if status.upper() == "FILLED" and filled is None:
+                filled = order.quantity
             details = {**batch.details, "zq_order_status": status}
             if remaining is not None:
                 details["remaining_quantity"] = str(max(Decimal("0"), remaining))
@@ -407,6 +442,29 @@ class Repository(HedgeLedger):
             batch.details = details
             batch.updated_at = datetime.now(UTC)
             await self._refresh_batch_state(session, batch.batch_id)
+            return order.state
+
+    async def ibkr_order_progress(self) -> tuple[ZqOrderProgress, ...]:
+        async with self.database.session() as session:
+            rows = (
+                await session.execute(
+                    select(OrderRecord, BatchRecord)
+                    .join(BatchRecord, BatchRecord.batch_id == OrderRecord.batch_id)
+                    .where(OrderRecord.venue == "IBKR")
+                )
+            ).all()
+            return tuple(
+                ZqOrderProgress(
+                    order_id=int(order.venue_order_id),
+                    state=order.state,
+                    quantity=order.quantity,
+                    executed=batch.filled_quantity,
+                    reported=self._optional_decimal(batch.details.get("reported_filled_quantity"))
+                    or Decimal("0"),
+                    contract_month=str(batch.details.get("contract_month", "")),
+                )
+                for order, batch in rows
+            )
 
     async def set_batch_cancel_pending(
         self,

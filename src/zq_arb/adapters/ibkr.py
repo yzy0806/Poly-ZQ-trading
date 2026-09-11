@@ -382,6 +382,11 @@ class IbkrAdapter:
                     "execution",
                     {
                         "request_id": reqId,
+                        "account_fingerprint": adapter._fingerprint_account(
+                            str(getattr(execution, "acctNumber", ""))
+                        )
+                        if getattr(execution, "acctNumber", "")
+                        else None,
                         "exec_id": str(execution.execId),
                         "order_id": int(execution.orderId),
                         "client_id": getattr(
@@ -589,14 +594,22 @@ class IbkrAdapter:
         self._request_to_month.clear()
         self.request_contracts_and_market_data()
 
-    def request_open_orders_and_executions(self) -> None:
+    def reserve_reconciliation_request_id(self) -> int:
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        return request_id
+
+    def request_open_orders_and_executions(self, request_id: int | None = None) -> None:
         if not self.connected:
             raise IbkrAdapterError("TWS is not connected")
         if self._api is None:
             raise IbkrAdapterError("IB API modules not loaded")
         self._client.reqAllOpenOrders()
         self._client.reqCompletedOrders(True)
-        self._client.reqExecutions(9_003, self._api.execution.ExecutionFilter())
+        self._client.reqExecutions(
+            request_id if request_id is not None else self.reserve_reconciliation_request_id(),
+            self._api.execution.ExecutionFilter(),
+        )
         self._client.reqPositions()
 
     def _allocate_order_id(self) -> int:

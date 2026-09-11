@@ -17,17 +17,38 @@ def settings_payload(settings: Settings) -> dict[str, object]:
     )
 
 
-def test_child_quantity_safety_invariant(settings: Settings) -> None:
+@pytest.mark.parametrize("quantity", [0, -1])
+def test_child_quantity_safety_invariant(settings: Settings, quantity: int) -> None:
     payload = settings_payload(settings)
-    payload["ibkr_zq_child_order_quantity"] = 9
-    with pytest.raises(ValidationError, match="exactly 10"):
+    payload["ibkr_zq_child_order_quantity"] = quantity
+    with pytest.raises(ValidationError, match="positive integer"):
         Settings.model_validate(payload)
 
 
+def test_one_contract_child_quantity_is_supported(settings: Settings) -> None:
+    payload = settings_payload(settings)
+    payload.update(ibkr_zq_child_order_quantity=1, max_zq_position=25)
+    assert Settings.model_validate(payload).ibkr_zq_child_order_quantity == 1
+
+
+@pytest.mark.parametrize("seconds", [0, -1, 11])
+def test_ibkr_callback_deadline_must_be_positive_and_bounded(settings, seconds):
+    payload = settings_payload(settings)
+    payload["ibkr_callback_settle_seconds"] = seconds
+    with pytest.raises(ValidationError, match="ibkr_callback_settle_seconds"):
+        Settings.model_validate(payload)
+
+
+def test_ibkr_callback_deadline_has_no_hidden_default(settings, monkeypatch):
+    monkeypatch.delenv("IBKR_CALLBACK_SETTLE_SECONDS", raising=False)
+    payload = settings_payload(settings)
+    payload.pop("ibkr_callback_settle_seconds")
+    with pytest.raises(ValidationError, match="ibkr_callback_settle_seconds"):
+        Settings(_env_file=None, **payload)
+
+
 def test_live_mode_requires_an_explicit_ibkr_account(settings: Settings) -> None:
-    configured = settings.model_copy(
-        update={"ibkr_account_id": SecretStr("REPLACE_IN_LOCAL_ENV")}
-    )
+    configured = settings.model_copy(update={"ibkr_account_id": SecretStr("REPLACE_IN_LOCAL_ENV")})
     assert "IBKR_ACCOUNT_ID is absent" in configured.live_readiness_errors()
 
 
