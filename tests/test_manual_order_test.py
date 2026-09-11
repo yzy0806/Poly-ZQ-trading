@@ -89,6 +89,9 @@ def venue(monkeypatch: pytest.MonkeyPatch, live_settings: Settings) -> SimpleNam
     )
     monkeypatch.setattr(PolymarketAdapter, "_authenticated_client", AsyncMock(return_value=client))
     monkeypatch.setattr(
+        PolymarketAdapter, "_signed_order_id", AsyncMock(return_value="venue-order-123")
+    )
+    monkeypatch.setattr(
         PolymarketAdapter,
         "verify_market_mapping",
         AsyncMock(return_value=SimpleNamespace(verified=True, errors=())),

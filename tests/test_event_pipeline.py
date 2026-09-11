@@ -93,6 +93,7 @@ async def test_quotes_keep_coordinator_barrier_without_ledger_work(settings: Set
 async def test_reconciliation_has_periodic_backstop_without_quotes(settings: Settings) -> None:
     repository = MagicMock()
     repository.active_batch_view = AsyncMock(return_value=BatchView())
+    repository.pending_obligations = AsyncMock(return_value=())
     state = StateStore(settings)
     coordinator = ExecutionCoordinator(
         settings=settings,
@@ -323,6 +324,7 @@ async def test_order_authorization_is_rechecked_after_durable_intent(
     await database.initialize()
     repository = Repository(database)
     state = StateStore(configured)
+    await state.confirm_reconciliation(actor="test", reason="verified test ledger", snapshot_id=0)
     snapshot = await state.get()
     await state.replace(
         snapshot.model_copy(

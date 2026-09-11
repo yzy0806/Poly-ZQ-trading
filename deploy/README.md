@@ -10,6 +10,28 @@ The bootstrap configuration is `READ_ONLY`. `LIVE_TRADING_ENABLED`,
 `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are all `false`.
 Container or host restarts cannot arm the engine.
 
+Use a distinct `DATABASE_URL` for every IBKR environment/account and Polymarket wallet or
+simulation mode, such as `/var/lib/zq-arb/paper.sqlite3` and `/var/lib/zq-arb/live.sqlite3`.
+Execution databases bind themselves to that identity and refuse incompatible replay.
+Existing databases containing orders or fills without an identity remain inspectable in
+`READ_ONLY`, but require reconstruction and venue reconciliation before execution. Do not label
+old simulated or clipped fill history as live data. Start a fresh live ledger only after confirming
+that no outstanding strategy orders or positions need to be recovered.
+
+The example environment allows 20 seconds to cancel ZQ, process late fills, and reconcile before
+shutdown, within the container's 30-second stop grace period. An unresolved stop is recorded
+explicitly; a restart cannot treat it as clean. See [execution-safety.md](../docs/execution-safety.md).
+
+Before upgrading an existing installation, ensure `/etc/zq-arb/zq-arb.env` explicitly includes
+these required settings. Bootstrap does not update an existing environment file, and the
+application no longer supplies fallback values for them:
+
+```dotenv
+EXECUTION_REQUEST_TIMEOUT_SECONDS=10
+RECONCILIATION_MAX_AGE_SECONDS=60
+SHUTDOWN_DRAIN_SECONDS=20
+```
+
 ## Initial host preparation
 
 Copy the repository deployment directory to `/opt/zq-arb`, then run:
@@ -73,5 +95,7 @@ including checking that an account ID was loaded without displaying it, are in
 ## Backup and rollback
 
 The timer creates an online SQLite backup daily at 16:20 America/Chicago, during the CME maintenance
-break and after the Gateway restart. Fourteen days are retained. Rollback is performed by running
+break and after the Gateway restart. Every `*.sqlite3` database directly under `/var/lib/zq-arb`
+is backed up separately, including paper and live ledgers. Fourteen days are retained. Install the
+updated deployment script when adopting separate database files. Rollback is performed by running
 `update_vps.sh` with the previous image digest; the environment and SQLite volume are not replaced.

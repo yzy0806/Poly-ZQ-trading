@@ -307,7 +307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif payload.action is ControlAction.PAUSE_NEW_TRADES:
             await runtime.state.set_operating_state(paused=True, armed=False)
         elif payload.action is ControlAction.EMERGENCY_HALT:
-            await runtime.state.set_operating_state(kill_switch=True, paused=True, armed=False)
+            await runtime.execution.halt(payload.reason)
         elif payload.action is ControlAction.ACKNOWLEDGE_ALERT:
             if not payload.alert_id or not await runtime.state.acknowledge_alert(payload.alert_id):
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="alert not found")

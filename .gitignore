@@ -13,12 +13,16 @@ secrets/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.coverage
+.pytest-user-temp/
+.hypothesis/
+.coverage*
 htmlcov/
 .mypy_cache/
 .ruff_cache/
-.venv/
+.uv-cache/
+.venv*/
 venv/
+*.egg-info/
 
 # Local runtime state and logs.
 runtime/
@@ -26,6 +30,12 @@ logs/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 *.log
 
 # Frontend dependencies and build output.
@@ -33,7 +43,9 @@ node_modules/
 dist/
 coverage/
 .playwright-cli/
-output/playwright/
+output/
+artifacts/
+*.tsbuildinfo
 
 # Editor and operating-system metadata.
 .vscode/

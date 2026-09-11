@@ -29,6 +29,18 @@ class DepthCost:
     vwap: Decimal | None
     sufficient: bool
     worst_price: Decimal | None
+    fills: tuple[BookLevel, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class HedgeEntryPlan:
+    price_cap: Decimal | None
+    available_shares: Decimal
+    depth: DepthCost
+
+    @property
+    def limit_price(self) -> Decimal | None:
+        return self.depth.worst_price
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +95,7 @@ def walk_asks(
     remaining = shares
     total = Decimal("0")
     worst: Decimal | None = None
+    fills: list[BookLevel] = []
     for level in sorted(levels, key=lambda item: item.price):
         if price_cap is not None and level.price > price_cap:
             break
@@ -90,6 +103,10 @@ def walk_asks(
         if take <= 0:
             continue
         total += take * level.price
+        if fills and fills[-1].price == level.price:
+            fills[-1] = BookLevel(price=level.price, size=fills[-1].size + take)
+        else:
+            fills.append(BookLevel(price=level.price, size=take))
         remaining -= take
         worst = level.price
         if remaining == 0:
@@ -102,6 +119,7 @@ def walk_asks(
         vwap=(total / filled if filled > 0 else None),
         sufficient=remaining == 0,
         worst_price=worst,
+        fills=tuple(fills),
     )
 
 
@@ -113,6 +131,36 @@ def marketable_limit_price(book: OrderBook, price_cap: Decimal) -> Decimal | Non
     if book.best_bid is not None and book.best_bid >= book.best_ask:
         return None
     return book.best_ask
+
+
+def plan_hedge_entry(
+    book: OrderBook,
+    shares: Decimal,
+    price_cap: Decimal,
+    *,
+    allow_one_tick: bool = False,
+) -> HedgeEntryPlan:
+    """Walk the lowest ask, optionally including exactly its next valid tick."""
+    lowest = marketable_limit_price(book, price_cap)
+    ceiling = lowest
+    if lowest is not None and allow_one_tick and book.tick_size is not None:
+        if book.tick_size > 0:
+            ceiling = min(price_cap, lowest + book.tick_size)
+    levels = tuple(
+        level for level in book.asks
+        if lowest is not None and ceiling is not None
+        and lowest <= level.price <= ceiling and level.size > 0
+        and (
+            level.price == lowest
+            or (book.tick_size is not None and book.tick_size > 0
+                and (level.price - lowest) % book.tick_size == 0)
+        )
+    )
+    return HedgeEntryPlan(
+        price_cap=ceiling,
+        available_shares=sum((level.size for level in levels), Decimal("0")),
+        depth=walk_asks(levels, shares),
+    )
 
 
 def _payout(outcome_code: str, move_bps: int) -> Decimal:
@@ -139,8 +187,10 @@ def build_three_state_opportunity(
         raise ValueError("contracts must be positive")
     q25 = round_shares_up(hedge_shares_per_contract(25) * Decimal(contracts))
     q50 = round_shares_up(hedge_shares_per_contract(50) * Decimal(contracts))
-    post25 = marketable_limit_price(inc25_book, post_price_cap)
-    post50 = marketable_limit_price(inc50_book, post_price_cap)
+    entry25 = plan_hedge_entry(inc25_book, q25, post_price_cap)
+    entry50 = plan_hedge_entry(inc50_book, q50, post_price_cap, allow_one_tick=True)
+    post25 = entry25.limit_price
+    post50 = entry50.limit_price
     depth25 = walk_asks(inc25_book.asks, q25, price_cap=emergency_price_cap)
     depth50 = walk_asks(inc50_book.asks, q50, price_cap=emergency_price_cap)
     exact25 = inc25_book.best_ask_size or Decimal("0") if post25 is not None else Decimal("0")
@@ -149,30 +199,40 @@ def build_three_state_opportunity(
         HedgeDepthView(
             leg_code="INC25 YES",
             required_shares=q25,
-            available_shares=exact25,
-            shortfall_shares=max(Decimal("0"), q25 - exact25),
+            available_shares=entry25.available_shares,
+            shortfall_shares=max(Decimal("0"), q25 - entry25.available_shares),
             price_cap=emergency_price_cap,
             marketable_limit_price=post25,
             best_ask_shares=exact25,
+            entry_price_cap=entry25.price_cap,
+            entry_vwap=entry25.depth.vwap if entry25.depth.sufficient else None,
+            entry_cash_cost=entry25.depth.total_cost if entry25.depth.sufficient else None,
+            entry_fills=entry25.depth.fills,
             emergency_vwap=depth25.vwap,
             worst_price=depth25.worst_price,
-            sufficient=post25 is not None and exact25 >= q25 and depth25.sufficient,
+            sufficient=entry25.depth.sufficient and depth25.sufficient,
         ),
         HedgeDepthView(
             leg_code="INC50PLUS YES",
             required_shares=q50,
-            available_shares=exact50,
-            shortfall_shares=max(Decimal("0"), q50 - exact50),
+            available_shares=entry50.available_shares,
+            shortfall_shares=max(Decimal("0"), q50 - entry50.available_shares),
             price_cap=emergency_price_cap,
             marketable_limit_price=post50,
             best_ask_shares=exact50,
+            entry_price_cap=entry50.price_cap,
+            entry_vwap=entry50.depth.vwap if entry50.depth.sufficient else None,
+            entry_cash_cost=entry50.depth.total_cost if entry50.depth.sufficient else None,
+            entry_fills=entry50.depth.fills,
             emergency_vwap=depth50.vwap,
             worst_price=depth50.worst_price,
-            sufficient=post50 is not None and exact50 >= q50 and depth50.sufficient,
+            sufficient=entry50.depth.sufficient and depth50.sufficient,
         ),
     )
     checks: list[GateCheck] = []
     for detail, book in zip(depth_views, (inc25_book, inc50_book), strict=True):
+        one_tick = detail.leg_code == "INC50PLUS YES"
+        price_scope = "lowest ask + one tick" if one_tick else "lowest ask"
         limit_available = detail.marketable_limit_price is not None
         limit_inputs = (
             f"bid={book.best_bid}; ask={book.best_ask}; tick={book.tick_size}; cap={post_price_cap}"
@@ -181,7 +241,7 @@ def build_three_state_opportunity(
             GateCheck(
                 code=f"{detail.leg_code.replace(' ', '_')}_MARKETABLE_LIMIT",
                 category="HEDGE_LIQUIDITY",
-                label=f"{detail.leg_code} lowest-ask BUY limit",
+                label=f"{detail.leg_code} BUY limit through {price_scope}",
                 status=GateStatus.PASSED if limit_available else GateStatus.UNAVAILABLE,
                 actual_value=(
                     f"{detail.marketable_limit_price} ({limit_inputs})"
@@ -193,11 +253,11 @@ def build_three_state_opportunity(
                 unit="USD/share",
                 detail=(
                     f"{detail.leg_code} marketable BUY limit "
-                    f"{detail.marketable_limit_price} equals the lowest ask and is inside cap "
-                    f"{post_price_cap}"
+                    f"{detail.marketable_limit_price} uses available depth through {price_scope} "
+                    f"(ceiling={detail.entry_price_cap}) and is inside hard cap {post_price_cap}"
                     if limit_available
                     else (
-                        f"{detail.leg_code} cannot derive a lowest-ask BUY limit: "
+                        f"{detail.leg_code} cannot derive a BUY limit through {price_scope}: "
                         f"{limit_inputs}; a valid ask inside the cap and an uncrossed book "
                         "are required"
                     )
@@ -206,17 +266,18 @@ def build_three_state_opportunity(
         )
         checks.append(
             GateCheck(
-                code=f"{detail.leg_code.replace(' ', '_')}_BEST_ASK_SIZE",
+                code=f"{detail.leg_code.replace(' ', '_')}_"
+                f"{'ENTRY_DEPTH' if one_tick else 'BEST_ASK_SIZE'}",
                 category="HEDGE_LIQUIDITY",
-                label=f"{detail.leg_code} full size at lowest ask",
+                label=f"{detail.leg_code} full size through {price_scope}",
                 status=GateStatus.PASSED if detail.sufficient else GateStatus.FAILED,
                 actual_value=str(detail.available_shares),
                 operator=">=",
                 required_value=str(detail.required_shares),
                 unit="shares",
                 detail=(
-                    f"{detail.leg_code} has {detail.available_shares} shares at the current "
-                    f"lowest ask; {detail.required_shares} required, with complete emergency "
+                    f"{detail.leg_code} has {detail.available_shares} shares through "
+                    f"{price_scope}; {detail.required_shares} required, with complete emergency "
                     f"depth through {detail.price_cap} also required"
                 ),
             )
@@ -237,8 +298,12 @@ def build_three_state_opportunity(
     assert post50 is not None
     assert depth25.vwap is not None
     assert depth50.vwap is not None
+    assert entry25.depth.vwap is not None
+    assert entry50.depth.vwap is not None
 
-    def scenario_matrix(price25: Decimal, price50: Decimal) -> tuple[ScenarioPnl, ...]:
+    def scenario_matrix(cost25: DepthCost, cost50: DepthCost) -> tuple[ScenarioPnl, ...]:
+        assert cost25.vwap is not None and cost50.vwap is not None
+        price25, price50 = cost25.vwap, cost50.vwap
         scenarios: list[ScenarioPnl] = []
         explicit_costs = cost_inputs.explicit_costs
         for move in APPROVED_SCENARIOS:
@@ -247,8 +312,8 @@ def build_three_state_opportunity(
             futures_pnl = Decimal(contracts) * FUTURES_POINT_VALUE * futures_price_change
             inc25_payout = _payout("INC25", move)
             inc50plus_payout = _payout("INC50PLUS", move)
-            inc25_pnl = q25 * (inc25_payout - price25)
-            inc50plus_pnl = q50 * (inc50plus_payout - price50)
+            inc25_pnl = q25 * inc25_payout - cost25.total_cost
+            inc50plus_pnl = q50 * inc50plus_payout - cost50.total_cost
             polymarket_pnl = inc25_pnl + inc50plus_pnl
             gross_pnl = futures_pnl + polymarket_pnl
             scenarios.append(
@@ -278,8 +343,8 @@ def build_three_state_opportunity(
             )
         return tuple(scenarios)
 
-    passive_scenarios = scenario_matrix(post25, post50)
-    emergency_scenarios = scenario_matrix(depth25.vwap, depth50.vwap)
+    passive_scenarios = scenario_matrix(entry25.depth, entry50.depth)
+    emergency_scenarios = scenario_matrix(depth25, depth50)
     if cost_inputs.explicit_costs is None:
         passive_minimum = None
         emergency_minimum = None
@@ -324,7 +389,7 @@ def build_three_state_opportunity(
         zq_price=zq_price,
         contracts=contracts,
         token_requirements={"INC25": q25, "INC50PLUS": q50},
-        token_prices={"INC25": post25, "INC50PLUS": post50},
+        token_prices={"INC25": entry25.depth.vwap, "INC50PLUS": entry50.depth.vwap},
         emergency_token_prices={"INC25": depth25.vwap, "INC50PLUS": depth50.vwap},
         scenarios=passive_scenarios,
         emergency_scenarios=emergency_scenarios,

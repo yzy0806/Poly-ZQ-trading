@@ -17,6 +17,7 @@ from zq_arb.domain.models import (
     PortfolioPositionView,
 )
 from zq_arb.persistence.database import Database
+from zq_arb.persistence.hedge_ledger import HedgeLedger, order_resolved
 from zq_arb.persistence.models import (
     AuditLogRecord,
     BatchRecord,
@@ -39,7 +40,7 @@ def json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
-class Repository:
+class Repository(HedgeLedger):
     def __init__(self, database: Database) -> None:
         self.database = database
 
@@ -89,6 +90,7 @@ class Repository:
     ) -> None:
         """Atomically persist the batch and reserved IBKR id before placeOrder."""
 
+        await self.database.validate_execution_environment()
         idempotency_key = f"{batch_id}:IBKR:ENTRY"
         async with self.database.session() as session:
             existing = await session.scalar(
@@ -125,6 +127,7 @@ class Repository:
                     price=limit_price,
                     details={
                         "contract_month": contract_month,
+                        "execution_environment": self.database.identity,
                         "snapshot_id": snapshot_id,
                         "order_ref": batch_id,
                     },
@@ -326,7 +329,7 @@ class Repository:
                     quantity=quantity,
                     price=price,
                     executed_at=executed_at,
-                    details=json_safe(details),
+                    details=json_safe({**details, "execution_environment": self.database.identity}),
                 )
             )
             batch.filled_quantity += quantity
@@ -365,260 +368,6 @@ class Repository:
                 )
             return tuple(obligations)
 
-    async def create_hedge_order_intent(
-        self,
-        *,
-        obligation_id: str,
-        idempotency_key: str,
-        shares: Decimal,
-        limit_price: Decimal,
-        attempt: int,
-        signed_payload: dict[str, Any] | None,
-    ) -> bool:
-        async with self.database.session() as session:
-            existing = await session.scalar(
-                select(OrderRecord).where(OrderRecord.idempotency_key == idempotency_key)
-            )
-            if existing is not None:
-                return False
-            obligation = await session.scalar(
-                select(HedgeObligationRecord).where(
-                    HedgeObligationRecord.obligation_id == obligation_id
-                )
-            )
-            if obligation is None:
-                raise RuntimeError("hedge obligation is missing")
-            session.add(
-                OrderRecord(
-                    batch_id=obligation.batch_id,
-                    venue="POLYMARKET",
-                    venue_order_id=f"INTENT:{idempotency_key}",
-                    idempotency_key=idempotency_key,
-                    state="INTENT",
-                    side="BUY",
-                    quantity=shares,
-                    price=limit_price,
-                    details={
-                        "obligation_id": obligation_id,
-                        "token_id": obligation.token_id,
-                        "attempt": attempt,
-                        "signed_payload": json_safe(signed_payload),
-                    },
-                )
-            )
-            obligation.state = "ORDER_INTENT"
-            obligation.details = {
-                **obligation.details,
-                "latest_idempotency_key": idempotency_key,
-                "latest_limit_price": str(limit_price),
-                "reprice_count": attempt,
-            }
-            return True
-
-    async def pending_polymarket_intents(self) -> tuple[dict[str, Any], ...]:
-        async with self.database.session() as session:
-            records = tuple(
-                (
-                    await session.scalars(
-                        select(OrderRecord).where(
-                            OrderRecord.venue == "POLYMARKET",
-                            OrderRecord.state == "INTENT",
-                        )
-                    )
-                ).all()
-            )
-            return tuple(
-                {
-                    "idempotency_key": item.idempotency_key,
-                    "token_id": str(item.details.get("token_id") or ""),
-                    "shares": item.quantity,
-                    "limit_price": item.price,
-                    "signed_payload": item.details.get("signed_payload"),
-                }
-                for item in records
-            )
-
-    async def accept_hedge_order(
-        self,
-        *,
-        idempotency_key: str,
-        order_id: str,
-        state: str,
-        simulated: bool,
-    ) -> None:
-        async with self.database.session() as session:
-            order = await session.scalar(
-                select(OrderRecord).where(OrderRecord.idempotency_key == idempotency_key)
-            )
-            if order is None:
-                raise RuntimeError("hedge order intent is missing")
-            order.venue_order_id = order_id
-            order.state = state.upper()
-            order.details = {**order.details, "simulated": simulated}
-            obligation_id = str(order.details["obligation_id"])
-            obligation = await session.scalar(
-                select(HedgeObligationRecord).where(
-                    HedgeObligationRecord.obligation_id == obligation_id
-                )
-            )
-            if obligation is not None:
-                attempts = list(obligation.details.get("order_attempts") or [])
-                attempts.append(order_id)
-                obligation.details = {
-                    **obligation.details,
-                    "latest_order_id": order_id,
-                    "order_attempts": attempts,
-                }
-                obligation.state = "ORDER_LIVE" if state.lower() == "live" else "MATCHED"
-
-    async def mark_polymarket_order_cancelled(self, order_id: str) -> None:
-        async with self.database.session() as session:
-            order = await session.scalar(
-                select(OrderRecord).where(
-                    OrderRecord.venue == "POLYMARKET",
-                    OrderRecord.venue_order_id == order_id,
-                )
-            )
-            if order is not None:
-                order.state = "CANCELLED"
-                obligation = await session.scalar(
-                    select(HedgeObligationRecord).where(
-                        HedgeObligationRecord.obligation_id
-                        == str(order.details.get("obligation_id") or "")
-                    )
-                )
-                if obligation is not None and obligation.confirmed_shares < obligation.due_shares:
-                    obligation.state = "PENDING"
-
-    async def update_polymarket_order_status(self, order_id: str, status: str) -> None:
-        normalized = status.upper()
-        async with self.database.session() as session:
-            order = await session.scalar(
-                select(OrderRecord).where(
-                    OrderRecord.venue == "POLYMARKET",
-                    OrderRecord.venue_order_id == order_id,
-                )
-            )
-            if order is None:
-                return
-            order.state = normalized
-            obligation = await session.scalar(
-                select(HedgeObligationRecord).where(
-                    HedgeObligationRecord.obligation_id
-                    == str(order.details.get("obligation_id") or "")
-                )
-            )
-            if obligation is None or obligation.confirmed_shares >= obligation.due_shares:
-                return
-            if normalized in {"CANCELED", "CANCELLED", "UNMATCHED"}:
-                obligation.state = "PENDING"
-            elif normalized == "LIVE":
-                obligation.state = "ORDER_LIVE"
-            elif normalized == "MATCHED":
-                obligation.state = "MATCHED"
-
-    async def record_polymarket_execution(
-        self,
-        *,
-        execution_id: str,
-        order_id: str,
-        quantity: Decimal,
-        price: Decimal,
-        executed_at: datetime,
-        details: dict[str, Any],
-    ) -> bool:
-        """Credit a unique trade id to exactly one obligation."""
-
-        async with self.database.session() as session:
-            duplicate = await session.scalar(
-                select(ExecutionRecord).where(
-                    ExecutionRecord.venue == "POLYMARKET",
-                    ExecutionRecord.execution_id == execution_id,
-                )
-            )
-            if duplicate is not None:
-                return False
-            order = await session.scalar(
-                select(OrderRecord).where(
-                    OrderRecord.venue == "POLYMARKET",
-                    OrderRecord.venue_order_id == order_id,
-                )
-            )
-            if order is None:
-                return False
-            obligation = await session.scalar(
-                select(HedgeObligationRecord).where(
-                    HedgeObligationRecord.obligation_id
-                    == str(order.details.get("obligation_id") or "")
-                )
-            )
-            if obligation is None:
-                raise RuntimeError("Polymarket execution has no hedge obligation")
-            credit = min(
-                quantity,
-                max(Decimal("0"), obligation.due_shares - obligation.confirmed_shares),
-            )
-            if credit <= 0:
-                return False
-            session.add(
-                ExecutionRecord(
-                    batch_id=order.batch_id,
-                    venue="POLYMARKET",
-                    execution_id=execution_id,
-                    venue_order_id=order_id,
-                    quantity=credit,
-                    price=price,
-                    executed_at=executed_at,
-                    details=json_safe(details),
-                )
-            )
-            obligation.confirmed_shares += credit
-            obligation.state = (
-                "HEDGED" if obligation.confirmed_shares >= obligation.due_shares else "PARTIAL"
-            )
-            order.state = "MATCHED"
-            await session.flush()
-            await self._refresh_batch_state(session, order.batch_id)
-            return True
-
-    async def fail_polymarket_execution(self, execution_id: str) -> bool:
-        """Reverse a previously credited match when Polymarket reports terminal FAILED."""
-
-        async with self.database.session() as session:
-            execution = await session.scalar(
-                select(ExecutionRecord).where(
-                    ExecutionRecord.venue == "POLYMARKET",
-                    ExecutionRecord.execution_id == execution_id,
-                )
-            )
-            if execution is None or execution.details.get("terminal_failed"):
-                return False
-            order = await session.scalar(
-                select(OrderRecord).where(
-                    OrderRecord.venue == "POLYMARKET",
-                    OrderRecord.venue_order_id == execution.venue_order_id,
-                )
-            )
-            if order is None:
-                return False
-            obligation = await session.scalar(
-                select(HedgeObligationRecord).where(
-                    HedgeObligationRecord.obligation_id
-                    == str(order.details.get("obligation_id") or "")
-                )
-            )
-            if obligation is None:
-                return False
-            obligation.confirmed_shares = max(
-                Decimal("0"), obligation.confirmed_shares - execution.quantity
-            )
-            obligation.state = "PENDING"
-            order.state = "FAILED"
-            execution.details = {**execution.details, "terminal_failed": True}
-            await session.flush()
-            await self._refresh_batch_state(session, order.batch_id)
-            return True
-
     async def update_zq_order_status(
         self,
         *,
@@ -637,6 +386,9 @@ class Repository:
             )
             if order is None:
                 return
+            terminal = {"FILLED", "CANCELLED", "CANCELED", "APICANCELLED", "INACTIVE", "ABORTED"}
+            if order.state in terminal and status.upper() not in terminal:
+                return
             order.state = status.upper()
             order.permanent_id = permanent_id or order.permanent_id
             batch = await session.scalar(
@@ -648,7 +400,10 @@ class Repository:
             if remaining is not None:
                 details["remaining_quantity"] = str(max(Decimal("0"), remaining))
             if filled is not None:
-                details["reported_filled_quantity"] = str(filled)
+                previous_filled = self._optional_decimal(details.get("reported_filled_quantity"))
+                details["reported_filled_quantity"] = str(
+                    max(previous_filled or Decimal("0"), filled)
+                )
             batch.details = details
             batch.updated_at = datetime.now(UTC)
             await self._refresh_batch_state(session, batch.batch_id)
@@ -685,11 +440,15 @@ class Repository:
             batch.updated_at = datetime.now(UTC)
             return True
 
-    async def active_batch_view(self) -> BatchView:
+    async def active_batch_view(self, batch_id: str | None = None) -> BatchView:
         async with self.database.session() as session:
             batch = await session.scalar(
                 select(BatchRecord)
-                .where(BatchRecord.state != BatchState.COMPLETE.value)
+                .where(
+                    BatchRecord.batch_id == batch_id
+                    if batch_id is not None
+                    else BatchRecord.state != BatchState.COMPLETE.value
+                )
                 .order_by(BatchRecord.created_at.desc())
                 .limit(1)
             )
@@ -712,23 +471,7 @@ class Repository:
                 ).all()
             )
             ibkr_order = next((item for item in orders if item.venue == "IBKR"), None)
-            obligations = tuple(
-                HedgeObligationView(
-                    obligation_id=item.obligation_id,
-                    batch_id=item.batch_id,
-                    exec_id=item.exec_id,
-                    token_id=item.token_id,
-                    due_shares=item.due_shares,
-                    confirmed_shares=item.confirmed_shares,
-                    state=item.state,
-                    latest_order_id=str(item.details.get("latest_order_id") or "") or None,
-                    latest_limit_price=self._optional_decimal(
-                        item.details.get("latest_limit_price")
-                    ),
-                    reprice_count=int(item.details.get("reprice_count") or 0),
-                )
-                for item in obligation_records
-            )
+            obligations = tuple(self.obligation_view(item) for item in obligation_records)
             details = batch.details
             return BatchView(
                 batch_id=batch.batch_id,
@@ -755,8 +498,7 @@ class Repository:
             )
 
     async def pending_obligations(self) -> tuple[HedgeObligationView, ...]:
-        view = await self.active_batch_view()
-        return tuple(item for item in view.obligations if item.deficit_shares > 0)
+        return tuple(item for item in await self.all_hedge_obligations() if item.deficit_shares > 0)
 
     async def unresolved_hedge_obligation_count(self) -> int:
         """Count every durable hedge deficit, not only those on the displayed batch."""
@@ -770,16 +512,11 @@ class Repository:
         return int(count or 0)
 
     async def normalize_active_batch_state(self) -> None:
-        """Recompute the latest incomplete batch from its durable terminal evidence."""
+        """Recompute all batches; late settlement failures can reopen an older batch."""
 
         async with self.database.session() as session:
-            batch = await session.scalar(
-                select(BatchRecord)
-                .where(BatchRecord.state != BatchState.COMPLETE.value)
-                .order_by(BatchRecord.created_at.desc())
-                .limit(1)
-            )
-            if batch is not None:
+            batches = tuple((await session.scalars(select(BatchRecord))).all())
+            for batch in batches:
                 await self._refresh_batch_state(session, batch.batch_id)
 
     async def _refresh_batch_state(self, session: Any, batch_id: str) -> None:
@@ -794,8 +531,21 @@ class Repository:
             ).all()
         )
         hedged = bool(obligations) and all(
-            item.confirmed_shares >= item.due_shares for item in obligations
+            item.confirmed_shares >= item.due_shares
+            and Decimal(str(item.details.get("excess_shares", "0"))) == 0
+            and Decimal(str(item.details.get("pending_shares", "0"))) == 0
+            for item in obligations
         )
+        orders = tuple(
+            (
+                await session.scalars(
+                    select(OrderRecord).where(
+                        OrderRecord.batch_id == batch_id, OrderRecord.venue == "POLYMARKET"
+                    )
+                )
+            ).all()
+        )
+        orders_resolved = all(order_resolved(item) for item in orders)
         status = str(batch.details.get("zq_order_status") or "").upper()
         terminal_zq = status in {
             "FILLED",
@@ -809,8 +559,8 @@ class Repository:
         executions_caught_up = (
             reported_filled is not None and batch.filled_quantity >= reported_filled
         )
-        hedge_caught_up = reported_filled == 0 or hedged
-        if terminal_zq and executions_caught_up and hedge_caught_up:
+        hedge_caught_up = (reported_filled == 0 and batch.filled_quantity == 0) or hedged
+        if terminal_zq and executions_caught_up and hedge_caught_up and orders_resolved:
             batch.state = BatchState.COMPLETE.value
             batch.details = {**batch.details, "remaining_quantity": "0"}
         elif cancel_requested:

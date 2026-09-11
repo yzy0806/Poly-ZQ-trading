@@ -58,6 +58,7 @@ async def test_new_entry_waits_for_every_persisted_hedge_deficit(settings: Setti
         }
     )
     state = StateStore(configured)
+    await state.confirm_reconciliation(actor="test", reason="verified test ledger", snapshot_id=0)
     coordinator = ExecutionCoordinator(
         settings=configured,
         repository=MagicMock(),
@@ -101,6 +102,7 @@ async def test_armed_waiting_does_not_submit_without_a_tradeable_opportunity(
     )
     repository = MagicMock()
     repository.active_batch_view = AsyncMock(return_value=BatchView())
+    repository.pending_obligations = AsyncMock(return_value=())
     coordinator = ExecutionCoordinator(
         settings=configured,
         repository=repository,
@@ -181,6 +183,8 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
         },
     )
     await coordinator.handle_ibkr_event(fill)
+    await coordinator.wait_for_hedges()
+    await coordinator._publish()
     await state.apply_ibkr_event(fill)
     await coordinator.handle_ibkr_event(fill)
 
@@ -195,16 +199,12 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
     ]
     assert all(item.deficit_shares == 0 for item in batch.obligations)
     current = await state.get()
-    assert current.reconciliation.clean
+    assert not current.reconciliation.clean  # A fill invalidates the previous account snapshot.
     positions = {(item.venue, item.label): item for item in current.portfolio.positions}
     zq_position = positions[("IBKR", f"ZQ {configured.ibkr_zq_contract_month}")]
     assert zq_position.strategy_quantity == Decimal("3")
-    assert positions[("POLYMARKET", "INC25 YES")].strategy_quantity == Decimal(
-        "1458.45000000"
-    )
-    assert positions[("POLYMARKET", "INC50PLUS YES")].strategy_quantity == Decimal(
-        "2916.90000000"
-    )
+    assert positions[("POLYMARKET", "INC25 YES")].strategy_quantity == Decimal("1458.45000000")
+    assert positions[("POLYMARKET", "INC50PLUS YES")].strategy_quantity == Decimal("2916.90000000")
     assert positions[("POLYMARKET", "INC25 YES")].simulated
     assert positions[("POLYMARKET", "INC25 YES")].reconciled is True
 
@@ -229,6 +229,7 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
             },
         ),
         VenueEvent(venue="IBKR", kind="open_order_end", payload={}),
+        VenueEvent(venue="IBKR", kind="completed_order_end", payload={}),
         VenueEvent(venue="IBKR", kind="execution_end", payload={}),
         VenueEvent(venue="IBKR", kind="position_end", payload={}),
     ):
@@ -274,6 +275,7 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
             },
         ),
         VenueEvent(venue="IBKR", kind="open_order_end", payload={}),
+        VenueEvent(venue="IBKR", kind="completed_order_end", payload={}),
         VenueEvent(venue="IBKR", kind="execution_end", payload={}),
         VenueEvent(venue="IBKR", kind="position_end", payload={}),
     ):
@@ -329,6 +331,7 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
         }
     )
     await coordinator.handle_ibkr_event(late_fill)
+    await coordinator.wait_for_hedges()
     assert await repository.strategy_zq_quantity(configured.ibkr_zq_contract_month) == Decimal("5")
     await coordinator.handle_ibkr_event(
         VenueEvent(
@@ -359,6 +362,7 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
             },
         ),
         VenueEvent(venue="IBKR", kind="open_order_end", payload={}),
+        VenueEvent(venue="IBKR", kind="completed_order_end", payload={}),
         VenueEvent(venue="IBKR", kind="execution_end", payload={}),
         VenueEvent(venue="IBKR", kind="position_end", payload={}),
     ):

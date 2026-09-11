@@ -89,7 +89,7 @@ Before starting the operator terminal, fill the still-required local values for 
 
 7. The latest IBKR `BUY 10 ZQU6` what-if margin preview is requested no faster than once per minute and refreshed after connectivity recovery or a changed candidate. The dashboard shows `REFRESHING` while awaiting a matching response. It never uses an expired raw `AVAILABLE` response or substitutes zero margin for committed-capital and return calculations.
 
-8. Strategy IBKR open orders, `execId` history, and the authenticated aggregate target-contract position are automatically reconciled with authenticated Polymarket open orders and trades after startup and reconnect. Routine strategy fills and status callbacks update the durable ledger instead of invalidating reconciliation; an order, position, or obligation difference fails the gate.
+8. IBKR open and completed orders, `execId` history, and the target-contract position are reconciled with authenticated Polymarket orders, trades, and event-token positions after startup, reconnect, and periodically. Execution events invalidate the previous clean result. Missing, stale, or incomplete evidence is `UNKNOWN`; unexplained inventory, orders, or excess fills block new entries and cancel working strategy ZQ orders.
 
 9. `IBKR_COMMISSION_ESTIMATE=3.64` is the conservative per-contract round-trip ZQ cost floor derived from the published non-member low-volume schedule. For a 10-contract batch the model deducts at least `$36.40`; twice a higher current IBKR entry what-if commission overrides that floor.
 
@@ -97,7 +97,7 @@ Before starting the operator terminal, fill the still-required local values for 
 
 ## Safety Invariants
 
-1. Process startup always begins in `READ_ONLY`, regardless of the previous database state.
+1. Process startup uses the configured run mode and always starts disarmed and unreconciled. Real hedge recovery waits for fresh venue evidence. Paper and live execution databases must be separate; unidentified legacy execution data cannot be replayed automatically.
 
 2. `ARM` authorizes the engine to wait for a qualifying entry; it does not require the current snapshot to be profitable and it does not itself place an order. The dashboard distinguishes `ARMED · WAITING`, `ARMED · READY`, and `ARMED · WORKING`. Structural routing blockers such as read-only or shadow mode, emergency halt, disabled venue submission, or a disabled live-trading switch reject the action with their exact cause.
 
@@ -107,7 +107,7 @@ Before starting the operator terminal, fill the still-required local values for 
 
 5. Version 1 is structurally long-only: the engine can submit only `BUY` ZQ entries and may hedge confirmed fills only by buying the approved Polymarket Yes legs. Bid-side and No-token data are diagnostic and cannot create an order.
 
-6. Polymarket orders cannot precede a confirmed, unique IBKR `execId`. Each fill creates durable INC25 and INC50PLUS obligations, and each hedge is a non-post-only GTC BUY limit at the latest lowest ask.
+6. Polymarket orders cannot precede a confirmed, unique IBKR `execId`. Each fill creates durable INC25 and INC50PLUS obligations. INC25 requires full size at the lowest ask. INC50PLUS can combine the lowest ask and exactly one tick above it, within the configured price cap. Each hedge is a non-post-only GTC BUY limit at the highest price needed for its available fill plan. Scenario P&L uses the actual quantity at each consumed price level; taker-fee estimates also use those quantities and prices. The dashboard shows the entry VWAP, total cash cost, and fill breakdown.
 
 7. Filled ZQ is never automatically flattened.
 
@@ -118,6 +118,10 @@ Before starting the operator terminal, fill the still-required local values for 
 10. Every failed qualification is transported as typed actual-versus-required evidence. The dashboard renders all blocking gates and never truncates the failure list.
 
 11. The executable payoff matrix remains limited by owner decision to the defined `0`, `+25`, and `+50` basis-point states. No tail-scenario gate is implemented.
+
+12. Signed Polymarket orders and their hashes are saved before submission. An uncertain submission keeps its reservation; recovery may retransmit the identical signed order but cannot sign a replacement until terminal order status and cumulative fills agree. Full fill quantities and costs are retained, with pending settlement and excess exposure reported separately.
+
+13. Emergency halt cancels unfilled ZQ independently of hedge network requests and profitability. Late fills remain actionable within the existing hedge mandate. Shutdown drains callbacks and reconciles for a bounded period; unresolved shutdowns leave an audit record and require recovery on restart. See [execution-safety.md](docs/execution-safety.md) for deployment and recovery procedures.
 
 ## Settlement Lifecycle
 

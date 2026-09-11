@@ -43,6 +43,27 @@ class ConfigVersion(Base, TimestampMixin):
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class ExecutionEnvironmentRecord(Base, TimestampMixin):
+    __tablename__ = "execution_environment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    identity: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class VenueEventRecord(Base, TimestampMixin):
+    """Durable receipts, including events whose order has not been acknowledged yet."""
+
+    __tablename__ = "venue_events"
+    __table_args__ = (UniqueConstraint("venue", "event_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    venue: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
 class MarketMappingRecord(Base, TimestampMixin):
     __tablename__ = "market_mappings"
     __table_args__ = (UniqueConstraint("config_version", "market_code"),)

@@ -148,7 +148,8 @@ class IbkrAdapter:
                 api.client.EClient.__init__(self, self)
 
             def nextValidId(self, orderId: int) -> None:
-                adapter._next_order_id = orderId
+                with adapter._order_id_lock:
+                    adapter._next_order_id = max(adapter._next_order_id or 0, orderId)
                 adapter._signal_connected()
                 adapter._emit("next_valid_id", {"order_id": orderId})
 
@@ -244,10 +245,16 @@ class IbkrAdapter:
             def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:
                 context = adapter._margin_preview_context.get(orderId)
                 if context is None:
+                    with adapter._order_id_lock:
+                        adapter._next_order_id = max(adapter._next_order_id or 0, orderId + 1)
                     adapter._emit(
                         "open_order",
                         {
                             "order_id": orderId,
+                            "client_id": getattr(
+                                order, "clientId", adapter.settings.ibkr_client_id
+                            ),
+                            "perm_id": getattr(order, "permId", None),
                             "contract_id": getattr(contract, "conId", None),
                             "symbol": str(getattr(contract, "symbol", "")),
                             "contract_month": str(
@@ -296,6 +303,26 @@ class IbkrAdapter:
 
             def openOrderEnd(self) -> None:
                 adapter._emit("open_order_end", {})
+
+            def completedOrder(self, contract: Any, order: Any, orderState: Any) -> None:
+                adapter._emit(
+                    "completed_order",
+                    {
+                        "order_id": getattr(order, "orderId", None),
+                        "client_id": getattr(order, "clientId", None),
+                        "perm_id": getattr(order, "permId", None),
+                        "order_ref": str(getattr(order, "orderRef", "")),
+                        "symbol": str(getattr(contract, "symbol", "")),
+                        "contract_month": str(
+                            getattr(contract, "lastTradeDateOrContractMonth", "")
+                        ),
+                        "status": str(getattr(orderState, "status", "")),
+                        "filled": str(getattr(order, "filledQuantity", "")),
+                    },
+                )
+
+            def completedOrdersEnd(self) -> None:
+                adapter._emit("completed_order_end", {})
 
             def accountSummary(
                 self, reqId: int, account: str, tag: str, value: str, currency: str
@@ -357,6 +384,14 @@ class IbkrAdapter:
                         "request_id": reqId,
                         "exec_id": str(execution.execId),
                         "order_id": int(execution.orderId),
+                        "client_id": getattr(
+                            execution, "clientId", adapter.settings.ibkr_client_id
+                        ),
+                        "perm_id": getattr(execution, "permId", None),
+                        "symbol": str(getattr(contract, "symbol", "")),
+                        "contract_month": str(
+                            getattr(contract, "lastTradeDateOrContractMonth", "")
+                        ),
                         "contract_id": int(contract.conId),
                         "side": str(execution.side),
                         "shares": str(execution.shares),
@@ -559,7 +594,8 @@ class IbkrAdapter:
             raise IbkrAdapterError("TWS is not connected")
         if self._api is None:
             raise IbkrAdapterError("IB API modules not loaded")
-        self._client.reqOpenOrders()
+        self._client.reqAllOpenOrders()
+        self._client.reqCompletedOrders(True)
         self._client.reqExecutions(9_003, self._api.execution.ExecutionFilter())
         self._client.reqPositions()
 

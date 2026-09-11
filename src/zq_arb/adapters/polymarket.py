@@ -50,6 +50,7 @@ class PolymarketAccountSnapshot:
     trades: tuple[dict[str, Any], ...]
     captured_at: datetime
     positions: tuple[dict[str, Any], ...] = ()
+    trades_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,7 @@ class PreparedPolymarketOrder:
     shares: Decimal
     idempotency_key: str
     signed_payload: dict[str, Any] | None
+    order_id: str | None = None
 
 
 def _json_list(value: Any) -> list[Any]:
@@ -605,6 +607,8 @@ class PolymarketAdapter:
         if required_cash < 0:
             raise ValueError("required cash cannot be negative")
         if self.settings.simulate_polymarket_fills:
+            if self.settings.run_mode.value != "PAPER":
+                raise RuntimeError("Simulated hedge execution requires PAPER mode")
             return {
                 "simulated": True,
                 "required_cash": str(required_cash),
@@ -637,7 +641,7 @@ class PolymarketAdapter:
         shares: Decimal,
         idempotency_key: str,
     ) -> PolymarketOrderResult:
-        """Submit a non-post-only GTC BUY limit at the coordinator-supplied lowest ask."""
+        """Submit a non-post-only GTC BUY limit at the coordinator's depth-based price."""
 
         prepared = await self.prepare_hedge_limit(
             token_id=token_id,
@@ -680,19 +684,59 @@ class PolymarketAdapter:
             side="BUY",
             post_only=False,
         )
+        order_id = await self._signed_order_id(client, signed_order)
         return PreparedPolymarketOrder(
             token_id=token_id,
             limit_price=limit_price,
             shares=shares,
             idempotency_key=idempotency_key,
             signed_payload=asdict(signed_order),
+            order_id=order_id,
         )
+
+    @staticmethod
+    async def _signed_order_id(client: Any, signed_order: Any) -> str:
+        """Use the SDK's exchange domain and V2 order struct, including wallet type 3.
+
+        The CLOB order ID hashes the exchange Order, not the deposit wallet's
+        outer signature wrapper. No private key or signature is persisted here.
+        """
+        from eth_account.messages import encode_typed_data
+        from eth_utils.crypto import keccak
+        from polymarket._internal.actions.orders.context import resolve_exchange_address
+        from polymarket._internal.actions.orders.typed_data import _build_standard_typed_data
+        from polymarket._internal.actions.orders.types import UnsignedOrder
+
+        ctx = client._ctx
+        metadata = await ctx.order_metadata.resolve_market(ctx, token_id=signed_order.token_id)
+        values = asdict(signed_order)
+        values.pop("signature")
+        values.pop("post_only")
+        unsigned = UnsignedOrder(
+            **values,
+            chain_id=ctx.environment_config.chain_id,
+            exchange_address=resolve_exchange_address(ctx.environment_config, metadata.neg_risk),
+        )
+        message = encode_typed_data(
+            full_message=_build_standard_typed_data(
+                unsigned,
+                protocol_version="2",
+            )
+        )
+        return "0x" + keccak(b"\x19" + message.version + message.header + message.body).hex()
 
     async def post_prepared_hedge(self, prepared: PreparedPolymarketOrder) -> PolymarketOrderResult:
         """POST a previously persisted signed order; retries keep the same order hash."""
 
         self._routing_authorized()
         if prepared.signed_payload is None:
+            if (
+                not self.settings.simulate_polymarket_fills
+                or self.settings.run_mode.value != "PAPER"
+            ):
+                raise RuntimeError(
+                    "Unsigned hedge cannot be executed or credited outside simulation"
+                )
             digest = hashlib.sha256(prepared.idempotency_key.encode("utf-8")).hexdigest()[:32]
             return PolymarketOrderResult(
                 order_id=f"SIM-{digest}",
@@ -702,14 +746,24 @@ class PolymarketAdapter:
                 limit_price=prepared.limit_price,
                 simulated=True,
             )
+        if self.settings.simulate_polymarket_fills:
+            raise RuntimeError("Simulation refuses to post a real signed order")
+        if not prepared.order_id or prepared.order_id.startswith(("INTENT:", "SIM-")):
+            raise RuntimeError("Real hedge submission requires a persisted signed order hash")
         client = await self._authenticated_client()
         from polymarket.models.clob.orders import SignedOrder
 
         signed_order = SignedOrder(**prepared.signed_payload)
+        if await self._signed_order_id(client, signed_order) != prepared.order_id:
+            raise PolymarketProtocolError("Persisted payload does not match its signed order hash")
         response = await client.post_order(signed_order)
         if not response.ok:
             raise PolymarketProtocolError(
                 f"Polymarket rejected hedge order ({response.code}): {response.message}"
+            )
+        if prepared.order_id and str(response.order_id) != prepared.order_id:
+            raise PolymarketProtocolError(
+                "Acknowledged order ID differs from the signed order hash"
             )
         return PolymarketOrderResult(
             order_id=str(response.order_id),
@@ -724,6 +778,11 @@ class PolymarketAdapter:
     async def cancel_order(self, order_id: str) -> bool:
         self._routing_authorized()
         if order_id.startswith("SIM-"):
+            if (
+                not self.settings.simulate_polymarket_fills
+                or self.settings.run_mode.value != "PAPER"
+            ):
+                raise RuntimeError("Real execution refuses simulated order cancellation")
             return True
         client = await self._authenticated_client()
         response = await client.cancel_order(order_id=order_id)
@@ -757,15 +816,24 @@ class PolymarketAdapter:
                     source_timestamp=_timestamp(payload.get("timestamp")),
                 )
 
-    async def account_snapshot(self, *, trade_limit: int = 500) -> PolymarketAccountSnapshot:
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        client = await self._authenticated_client()
+        order = await client.get_order(order_id=order_id)
+        return dict(order.model_dump(mode="json"))
+
+    async def account_snapshot(
+        self, *, trade_limit: int | None = None
+    ) -> PolymarketAccountSnapshot:
         client = await self._authenticated_client()
         open_orders = [
             item.model_dump(mode="json") async for item in client.list_open_orders().iter_items()
         ]
         trades: list[dict[str, Any]] = []
+        complete = True
         async for item in client.list_account_trades().iter_items():
             trades.append(item.model_dump(mode="json"))
-            if len(trades) >= trade_limit:
+            if trade_limit is not None and len(trades) >= trade_limit:
+                complete = False
                 break
         positions = await self.current_event_positions()
         return PolymarketAccountSnapshot(
@@ -773,6 +841,7 @@ class PolymarketAdapter:
             trades=tuple(trades),
             captured_at=utc_now(),
             positions=positions,
+            trades_complete=complete,
         )
 
     async def current_event_positions(self) -> tuple[dict[str, Any], ...]:
@@ -780,7 +849,7 @@ class PolymarketAdapter:
 
         address = self.settings.polymarket_funder_address.get_secret_value()
         if not address:
-            return ()
+            raise PolymarketProtocolError("Wallet identity is missing for position reconciliation")
         url = f"{self.settings.polymarket_data_api_host.rstrip('/')}/positions"
         params = {
             "user": address,

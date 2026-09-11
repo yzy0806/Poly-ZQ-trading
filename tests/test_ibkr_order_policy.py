@@ -100,7 +100,8 @@ def test_ibkr_recovery_requests_orders_executions_and_positions(settings: Settin
 
     adapter.request_open_orders_and_executions()
 
-    adapter._client.reqOpenOrders.assert_called_once_with()
+    adapter._client.reqAllOpenOrders.assert_called_once_with()
+    adapter._client.reqCompletedOrders.assert_called_once_with(True)
     adapter._client.reqExecutions.assert_called_once_with(9_003, execution_filter)
     adapter._client.reqPositions.assert_called_once_with()
 

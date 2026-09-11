@@ -126,6 +126,8 @@ td { padding: 8px 7px; text-align: right; border-bottom: 1px solid #142638; }
 .hedge-depth-grid strong { color: var(--text); font: 600 10px 'IBM Plex Mono'; }
 .hedge-depth-grid .depth-pass { border-left-color: var(--green); }
 .hedge-depth-grid .depth-fail { border-left-color: var(--red); }
+.hedge-fill-plan { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 4px; }
+.hedge-fill-plan code { color: var(--text); font-size: 10px; overflow-wrap: anywhere; }
 .gate-report { margin-top: 12px; border-left: 3px solid var(--red); background: #140e14; padding: 11px; }
 .gate-report-title { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .gate-report-title b { color: #ff8498; font: 700 10px 'IBM Plex Mono'; }

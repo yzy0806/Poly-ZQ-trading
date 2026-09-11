@@ -63,7 +63,10 @@ def book(token_id: str, bid: str, ask: str, market: str) -> OrderBook:
 
 
 @pytest.mark.asyncio
-async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Settings) -> None:
+@pytest.mark.parametrize("split_inc50", [False, True])
+async def test_engine_builds_comparisons_and_long_only_profit_path(
+    settings: Settings, split_inc50: bool
+) -> None:
     paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
     runtime = EngineRuntime(paper)
     snapshot = await runtime.state.get()
@@ -86,6 +89,12 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Set
             legs["INC50PLUS"].no_token_id, "0.996", "0.997", "INC50PLUS_NO"
         ),
     }
+    if split_inc50:
+        token_id = legs["INC50PLUS"].yes_token_id
+        books[token_id] = books[token_id].model_copy(update={"asks": (
+            BookLevel(price=Decimal("0.004"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.005"), size=Decimal("19900")),
+        )})
     qualified_input = snapshot.model_copy(
         update={
             "ibkr": VenueHealth(status=ConnectionStatus.CONNECTED),
@@ -166,6 +175,15 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(settings: Set
     assert long.token_prices["INC25"] == Decimal("0.28")
     assert long.emergency_token_prices["INC25"] == Decimal("0.28")
     assert len(long.scenarios) == len(long.emergency_scenarios) == 3
+    if split_inc50:
+        assert long.hedge_depth[1].entry_cash_cost == Decimal("48.515")
+        assert long.scenarios[0].inc50plus_pnl == Decimal("-48.515")
+        assert long.calculation is not None
+        assert long.calculation.costs.polymarket_fees == Decimal("0.05") * (
+            Decimal("4861.5") * Decimal("0.28") * Decimal("0.72")
+            + Decimal("100") * Decimal("0.004") * Decimal("0.996")
+            + Decimal("9623") * Decimal("0.005") * Decimal("0.995")
+        )
     model_check = next(
         check
         for check in calculated.probabilities.qualification_checks

@@ -19,6 +19,7 @@ from zq_arb.analytics.payoff import (
     build_three_state_opportunity,
     conservative_ibkr_round_trip_commission,
     hedge_shares_per_contract,
+    plan_hedge_entry,
     round_shares_up,
     walk_asks,
 )
@@ -94,6 +95,7 @@ class EngineRuntime:
         self.risk = RiskEngine(settings)
         self._tasks: list[asyncio.Task[None]] = []
         self._stopping = asyncio.Event()
+        self._shutdown_lock = asyncio.Lock()
         self._polymarket_resync_requested = asyncio.Event()
         self._polymarket_stream_reset = asyncio.Event()
         self._polymarket_stream_generation = 0
@@ -108,6 +110,7 @@ class EngineRuntime:
         self._max_handler_ms = 0.0
         self._max_event_loop_lag_ms = 0.0
         self._queue_high_water = 0
+        self._processing_event = False
 
     async def start(self) -> None:
         await self.database.initialize()
@@ -175,23 +178,70 @@ class EngineRuntime:
             )
 
     async def stop(self) -> None:
-        if self._stopping.is_set():
-            return
-        self._stopping.set()
-        await self.state.set_operating_state(paused=True, armed=False)
-        await self.repository.audit(
-            actor="SYSTEM",
-            action="ENGINE_STOP",
-            reason="application shutdown",
-        )
-        for background_task in self._tasks:
-            background_task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        await self.ibkr.disconnect()
-        if self.nyfed is not None:
-            await self.nyfed.close()
-        await self.polymarket.close()
-        await self.database.close()
+        async with self._shutdown_lock:
+            if self._stopping.is_set():
+                return
+            ready = False
+            try:
+                async with asyncio.timeout(self.settings.shutdown_drain_seconds):
+                    inspecting = self.settings.run_mode.value in {"READ_ONLY", "SHADOW"}
+                    if not inspecting:
+                        await self.execution.halt("application shutdown")
+                    last_reconciliation = float("-inf")
+                    while True:
+                        if inspecting:
+                            break
+                        await self.execution.cancel_working_zq("application shutdown")
+                        if (
+                            await self.execution.shutdown_ready()
+                            and self.events.empty()
+                            and not self._processing_event
+                            and self.ibkr.ingress_diagnostics()["pending"] == 0
+                            and self.ibkr.event_queue_overflowed is not True
+                        ):
+                            ready = True
+                            break
+                        await self.execution.cycle(await self.state.get())
+                        now = asyncio.get_running_loop().time()
+                        if (
+                            not self.settings.simulate_polymarket_fills
+                            and self.settings.polymarket_order_submission_enabled
+                            and now - last_reconciliation >= 2
+                        ):
+                            last_reconciliation = now
+                            try:
+                                await self.execution.reconcile_polymarket_account()
+                            except Exception as exc:
+                                LOGGER.warning(
+                                    "shutdown_reconciliation_pending", error_type=type(exc).__name__
+                                )
+                        await asyncio.sleep(0.1)
+            except TimeoutError:
+                await self.state.add_alert(
+                    AlertSeverity.CRITICAL,
+                    "SHUTDOWN_UNRESOLVED",
+                    "Shutdown deadline reached with unresolved orders or exposure; "
+                    "restart requires venue reconciliation",
+                    flashing=True,
+                )
+            finally:
+                # Until this point, callbacks, user streams and hedge workers stay alive.
+                self._stopping.set()
+                for background_task in self._tasks:
+                    background_task.cancel()
+                await asyncio.gather(*self._tasks, return_exceptions=True)
+                await self.execution.close()
+                await self.repository.audit(
+                    actor="SYSTEM",
+                    action="ENGINE_STOP",
+                    reason="application shutdown",
+                    details={"reconciled_shutdown": ready, "requires_recovery": not ready},
+                )
+                await self.ibkr.disconnect()
+                if self.nyfed is not None:
+                    await self.nyfed.close()
+                await self.polymarket.close()
+                await self.database.close()
 
     def event_diagnostics(self) -> dict[str, Any]:
         consumer = next(
@@ -217,6 +267,7 @@ class EngineRuntime:
         handled = 0
         while not self._stopping.is_set():
             event = await self.events.get()
+            self._processing_event = True
             self._queue_high_water = max(self._queue_high_water, self.events.qsize() + 1)
             started = loop.time()
             self._max_event_wait_ms = max(
@@ -273,6 +324,7 @@ class EngineRuntime:
             finally:
                 self._max_handler_ms = max(self._max_handler_ms, (loop.time() - started) * 1000)
                 self.events.task_done()
+                self._processing_event = False
                 handled += 1
                 if handled >= 64 or loop.time() - budget_started >= 0.005:
                     await asyncio.sleep(0)
@@ -290,6 +342,7 @@ class EngineRuntime:
                 await self.state.set_ibkr_resubscribe_required(False)
                 await self.execution.begin_ibkr_reconciliation()
                 self.ibkr.request_open_orders_and_executions()
+                last_account_refresh = asyncio.get_running_loop().time()
                 self._margin_preview_refresh_requested.set()
                 attempts = 0
                 while self.ibkr.connected and not self._stopping.is_set():
@@ -299,7 +352,13 @@ class EngineRuntime:
                             timeout=self.settings.ibkr_heartbeat_seconds,
                         )
                     except TimeoutError:
-                        continue
+                        if (
+                            asyncio.get_running_loop().time() - last_account_refresh
+                            >= self.settings.reconciliation_max_age_seconds / 2
+                        ):
+                            await self.execution.begin_ibkr_reconciliation()
+                            self.ibkr.request_open_orders_and_executions()
+                            last_account_refresh = asyncio.get_running_loop().time()
                 if not self._stopping.is_set():
                     raise ConnectionError("TWS network loop stopped")
             except asyncio.CancelledError:
@@ -870,11 +929,16 @@ class EngineRuntime:
                 q25,
                 price_cap=self.settings.polymarket_emergency_max_price,
             )
-            fee_prices25 = [long_book_25.best_ask]
-            if emergency25.vwap is not None:
-                fee_prices25.append(emergency25.vwap)
+            entry25 = plan_hedge_entry(
+                long_book_25, q25, self.settings.polymarket_hard_price_cap
+            )
             polymarket_fees += max(
-                self._polymarket_taker_fee("INC25", q25, value) for value in fee_prices25
+                sum(
+                    (self._polymarket_taker_fee("INC25", fill.size, fill.price)
+                     for fill in depth.fills),
+                    Decimal("0"),
+                )
+                for depth in (entry25.depth, emergency25)
             )
         if (
             polymarket_fees is not None
@@ -886,11 +950,16 @@ class EngineRuntime:
                 q50,
                 price_cap=self.settings.polymarket_emergency_max_price,
             )
-            fee_prices50 = [long_book_50.best_ask]
-            if emergency50.vwap is not None:
-                fee_prices50.append(emergency50.vwap)
+            entry50 = plan_hedge_entry(
+                long_book_50, q50, self.settings.polymarket_hard_price_cap, allow_one_tick=True
+            )
             polymarket_fees += max(
-                self._polymarket_taker_fee("INC50PLUS", q50, value) for value in fee_prices50
+                sum(
+                    (self._polymarket_taker_fee("INC50PLUS", fill.size, fill.price)
+                     for fill in depth.fills),
+                    Decimal("0"),
+                )
+                for depth in (entry50.depth, emergency50)
             )
         costs = CostInputs(
             ibkr_commission=conservative_ibkr_round_trip_commission(

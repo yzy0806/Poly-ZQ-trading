@@ -1035,6 +1035,7 @@ class StateStore:
                     "metadata": metadata,
                     "reconciliation": ReconciliationStatusView(
                         clean=True,
+                        status="CLEAN",
                         method="MANUAL_OPERATOR_ATTESTATION",
                         confirmed_by=actor,
                         confirmed_at=now,
@@ -1052,6 +1053,7 @@ class StateStore:
         clean: bool,
         reason: str,
         snapshot_id: int,
+        unknown: bool = False,
     ) -> None:
         now = utc_now()
 
@@ -1063,6 +1065,7 @@ class StateStore:
                     "metadata": metadata,
                     "reconciliation": ReconciliationStatusView(
                         clean=clean,
+                        status="CLEAN" if clean else "UNKNOWN" if unknown else "MISMATCH",
                         method="AUTHENTICATED_VENUE_LEDGER",
                         confirmed_by="SYSTEM" if clean else None,
                         confirmed_at=now if clean else None,
@@ -1088,6 +1091,7 @@ class StateStore:
                     "reconciliation": current.model_copy(
                         update={
                             "clean": False,
+                            "status": "UNKNOWN",
                             "reason": reason,
                             "invalidated_at": now,
                         }

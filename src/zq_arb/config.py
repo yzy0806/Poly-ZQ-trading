@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Self
 
-from pydantic import SecretStr, computed_field, field_validator, model_validator
+from pydantic import Field, SecretStr, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from zq_arb.domain.enums import RunMode
@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     audit_export_dir: Path
     sqlite_busy_timeout_ms: int = 5_000
     sqlite_wal_autocheckpoint_pages: int = 1_000
+    execution_request_timeout_seconds: int = Field(ge=1, le=20)
+    reconciliation_max_age_seconds: int = Field(ge=5, le=300)
+    shutdown_drain_seconds: int = Field(ge=1, le=25)
     retention_days_quotes: int = 30
     retention_days_audit: int = 2_555
 

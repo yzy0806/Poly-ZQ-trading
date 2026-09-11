@@ -1,5 +1,5 @@
 import { CheckCircle2, XCircle } from 'lucide-react'
-import type { Opportunity, ScenarioPnl } from '../types'
+import type { HedgeDepthView, Opportunity, ScenarioPnl } from '../types'
 import { number, signedUsd, tone, usd } from '../format'
 import { GateTable } from './GateTable'
 import { Panel, Metric } from './Panel'
@@ -20,7 +20,7 @@ function ScenarioCalculation({ passive, emergency }: { passive: ScenarioPnl; eme
     <header><b>{passive.move_bps > 0 ? '+' : ''}{passive.move_bps} bp scenario</b><span>Settlement {number(passive.settlement_price, 5)}</span></header>
     <div className="futures-formula"><span>ZQ P&amp;L</span><code>{passive.contracts} × ${number(passive.futures_point_value, 0)} × ({number(passive.settlement_price, 5)} − {number(passive.zq_entry_price, 5)})</code><strong className={tone(passive.futures_pnl)}>{signedUsd(passive.futures_pnl, 2)}</strong></div>
     <div className="scenario-path-grid">
-      <ScenarioPath label="LOWEST-ASK LIMIT HEDGE" row={passive} />
+      <ScenarioPath label="ENTRY DEPTH HEDGE" row={passive} />
       <ScenarioPath label="EMERGENCY-CAP HEDGE" row={emergency} />
     </div>
   </article>
@@ -37,7 +37,7 @@ function CalculationAudit({ opportunity }: { opportunity: Opportunity }) {
       <div><span>INC50PLUS shares</span><code>{opportunity.contracts} contracts × {number(calculation.inc50plus_shares_per_contract, 2)}</code><strong>{number(opportunity.token_requirements.INC50PLUS, 2)}</strong></div>
       <div><span>Emergency hedge cash</span><code>{usd(calculation.inc25_emergency_hedge_cash, 2)} + {usd(calculation.inc50plus_emergency_hedge_cash, 2)}</code><strong>{usd(calculation.emergency_hedge_cash, 2)}</strong></div>
       <div><span>Committed capital</span><code>{calculation.incremental_initial_margin === null ? 'Awaiting current IBKR margin preview' : `${usd(calculation.emergency_hedge_cash, 2)} hedge + ${usd(calculation.incremental_initial_margin, 2)} margin + ${usd(calculation.emergency_cash_reserve, 2)} reserve`}</code><strong>{usd(calculation.committed_capital, 2)}</strong></div>
-      <div><span>Conservative minimum</span><code>min({signedUsd(opportunity.passive_minimum_net_profit, 2)} lowest-ask, {signedUsd(opportunity.emergency_minimum_net_profit, 2)} emergency)</code><strong className={tone(opportunity.minimum_net_profit)}>{signedUsd(opportunity.minimum_net_profit, 2)}</strong></div>
+      <div><span>Conservative minimum</span><code>min({signedUsd(opportunity.passive_minimum_net_profit, 2)} entry, {signedUsd(opportunity.emergency_minimum_net_profit, 2)} emergency)</code><strong className={tone(opportunity.minimum_net_profit)}>{signedUsd(opportunity.minimum_net_profit, 2)}</strong></div>
       <div><span>Return on capital</span><code>{calculation.committed_capital === null ? 'Awaiting current committed capital' : `${signedUsd(opportunity.minimum_net_profit, 2)} ÷ ${usd(calculation.committed_capital, 2)} × 100`}</code><strong>{opportunity.return_on_capital_bps === null ? '—' : `${number(Number(opportunity.return_on_capital_bps) / 100, 2)}%`}</strong></div>
     </div>
     <div className="cost-formulas">
@@ -52,16 +52,34 @@ function CalculationAudit({ opportunity }: { opportunity: Opportunity }) {
   </details>
 }
 
+function HedgeDepthCard({ depth }: { depth: HedgeDepthView }) {
+  const oneTick = depth.leg_code === 'INC50PLUS YES'
+  return <div className={depth.sufficient && depth.marketable_limit_price !== null ? 'depth-pass' : 'depth-fail'}>
+    <b>{depth.leg_code}</b>
+    <span>Required <strong>{number(depth.required_shares, 2)}</strong></span>
+    <span>{oneTick ? 'Available through +1 tick' : 'At lowest ask'} <strong>{number(depth.available_shares, 2)}</strong></span>
+    <span>Shortfall <strong>{number(depth.shortfall_shares, 2)}</strong></span>
+    <span>BUY limit <strong>{number(depth.marketable_limit_price, 4)}</strong></span>
+    {oneTick && <span>At lowest ask <strong>{number(depth.best_ask_shares, 2)}</strong></span>}
+    <span>Entry VWAP <strong>{number(depth.entry_vwap ?? null, 6)}</strong></span>
+    <span>Entry cash <strong>{usd(depth.entry_cash_cost ?? null, 4)}</strong></span>
+    {!!depth.entry_fills?.length && <div className="hedge-fill-plan">
+      <span>Estimated fills at current depth</span>
+      <code>{depth.entry_fills.map((fill) => `${number(fill.size, 2)} × $${number(fill.price, 4)}`).join(' + ')}</code>
+    </div>}
+  </div>
+}
+
 function OpportunityCard({ opportunity }: { opportunity: Opportunity }) {
   const checks = opportunity.gate_checks ?? []
   const blockingChecks = checks.filter((check) => check.blocking && check.status !== 'PASSED')
   const passedChecks = checks.filter((check) => check.status === 'PASSED')
   return <article className="opportunity long-only-opportunity">
     <div className="opportunity-head"><div><Pill tone="blue">LONG ZQ</Pill><h3>BUY {opportunity.contracts} @ {number(opportunity.zq_price, 4)}</h3></div>{opportunity.tradeable ? <CheckCircle2 className="positive" /> : <XCircle className="negative" />}</div>
-    <div className="hedge-legs">{Object.entries(opportunity.token_requirements).map(([token, shares]) => <div key={token}><span>{token} YES</span><b>{number(shares, 2)} shares</b><small>lowest ask {number(opportunity.token_prices[token], 4)} · emergency VWAP {number(opportunity.emergency_token_prices[token], 4)}</small></div>)}</div>
-    {!!opportunity.hedge_depth.length && <div className="hedge-depth-grid">{opportunity.hedge_depth.map((depth) => <div key={depth.leg_code} className={depth.sufficient && depth.marketable_limit_price !== null ? 'depth-pass' : 'depth-fail'}><b>{depth.leg_code}</b><span>Required <strong>{number(depth.required_shares, 2)}</strong></span><span>At lowest ask <strong>{number(depth.best_ask_shares, 2)}</strong></span><span>Shortfall <strong>{number(depth.shortfall_shares, 2)}</strong></span><span>BUY limit <strong>{number(depth.marketable_limit_price, 4)}</strong></span></div>)}</div>}
-    <table><thead><tr><th>Scenario</th><th>ZQ P&amp;L</th><th>Passive Poly</th><th>Costs</th><th>Passive net</th><th>Emergency net</th></tr></thead><tbody>{opportunity.scenarios.map((row, index) => { const emergency = opportunity.emergency_scenarios[index]; return <tr key={row.move_bps}><td>{row.move_bps > 0 ? '+' : ''}{row.move_bps} bp</td><td className={tone(row.futures_pnl)}>{signedUsd(row.futures_pnl)}</td><td className={tone(row.polymarket_pnl)}>{signedUsd(row.polymarket_pnl)}</td><td>{usd(row.costs)}</td><td className={tone(row.net_pnl)}><b>{signedUsd(row.net_pnl)}</b></td><td className={tone(emergency?.net_pnl ?? null)}><b>{signedUsd(emergency?.net_pnl ?? null)}</b></td></tr> })}</tbody></table>
-    <div className="opportunity-summary"><Metric label="Lowest-ask minimum" value={signedUsd(opportunity.passive_minimum_net_profit)} tone={tone(opportunity.passive_minimum_net_profit)} /><Metric label="Emergency-cap minimum" value={signedUsd(opportunity.emergency_minimum_net_profit)} tone={tone(opportunity.emergency_minimum_net_profit)} /><Metric label="Conservative minimum" value={signedUsd(opportunity.minimum_net_profit)} tone={tone(opportunity.minimum_net_profit)} /><Metric label="Committed capital" value={usd(opportunity.committed_capital)} /><Metric label="Return on capital" value={opportunity.return_on_capital_bps === null ? '—' : `${number(Number(opportunity.return_on_capital_bps) / 100, 2)}%`} /></div>
+    <div className="hedge-legs">{Object.entries(opportunity.token_requirements).map(([token, shares]) => <div key={token}><span>{token} YES</span><b>{number(shares, 2)} shares</b><small>entry VWAP {number(opportunity.token_prices[token], 6)} · emergency VWAP {number(opportunity.emergency_token_prices[token], 6)}</small></div>)}</div>
+    {!!opportunity.hedge_depth.length && <div className="hedge-depth-grid">{opportunity.hedge_depth.map((depth) => <HedgeDepthCard key={depth.leg_code} depth={depth} />)}</div>}
+    <table><thead><tr><th>Scenario</th><th>ZQ P&amp;L</th><th>Entry Poly</th><th>Costs</th><th>Entry net</th><th>Emergency net</th></tr></thead><tbody>{opportunity.scenarios.map((row, index) => { const emergency = opportunity.emergency_scenarios[index]; return <tr key={row.move_bps}><td>{row.move_bps > 0 ? '+' : ''}{row.move_bps} bp</td><td className={tone(row.futures_pnl)}>{signedUsd(row.futures_pnl)}</td><td className={tone(row.polymarket_pnl)}>{signedUsd(row.polymarket_pnl)}</td><td>{usd(row.costs)}</td><td className={tone(row.net_pnl)}><b>{signedUsd(row.net_pnl)}</b></td><td className={tone(emergency?.net_pnl ?? null)}><b>{signedUsd(emergency?.net_pnl ?? null)}</b></td></tr> })}</tbody></table>
+    <div className="opportunity-summary"><Metric label="Entry minimum" value={signedUsd(opportunity.passive_minimum_net_profit)} tone={tone(opportunity.passive_minimum_net_profit)} /><Metric label="Emergency-cap minimum" value={signedUsd(opportunity.emergency_minimum_net_profit)} tone={tone(opportunity.emergency_minimum_net_profit)} /><Metric label="Conservative minimum" value={signedUsd(opportunity.minimum_net_profit)} tone={tone(opportunity.minimum_net_profit)} /><Metric label="Committed capital" value={usd(opportunity.committed_capital)} /><Metric label="Return on capital" value={opportunity.return_on_capital_bps === null ? '—' : `${number(Number(opportunity.return_on_capital_bps) / 100, 2)}%`} /></div>
     <CalculationAudit opportunity={opportunity} />
     <section className="gate-report" aria-label="Complete opportunity qualification report">
       <div className="gate-report-title"><b>{opportunity.tradeable ? 'ALL BLOCKING GATES PASSED' : `${blockingChecks.length || opportunity.gate_reasons.length} BLOCKING GATES`}</b><span>No blocking gate is hidden.</span></div>

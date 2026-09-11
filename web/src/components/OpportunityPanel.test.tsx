@@ -1,8 +1,10 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import type { GateCheck, Opportunity } from '../types'
 import { OpportunityPanel } from './OpportunityPanel'
+
+afterEach(cleanup)
 
 function failedCheck(index: number): GateCheck {
   return {
@@ -47,6 +49,34 @@ function opportunityFixture(): Opportunity {
 }
 
 describe('OpportunityPanel', () => {
+  it('shows combined one-tick liquidity and the quantities used for true cash cost', () => {
+    const opportunity = opportunityFixture()
+    opportunity.hedge_depth = [{
+      leg_code: 'INC50PLUS YES',
+      required_shares: '1000',
+      available_shares: '1200',
+      shortfall_shares: '0',
+      price_cap: '0.99',
+      marketable_limit_price: '0.010',
+      best_ask_shares: '100',
+      entry_price_cap: '0.010',
+      entry_vwap: '0.0099',
+      entry_cash_cost: '9.900',
+      entry_fills: [{ price: '0.009', size: '100' }, { price: '0.010', size: '900' }],
+      emergency_vwap: '0.0099',
+      worst_price: '0.010',
+      sufficient: true,
+    }]
+
+    render(<OpportunityPanel opportunities={[opportunity]} />)
+
+    expect(screen.getByText('Available through +1 tick').textContent).toContain('1,200')
+    expect(screen.getByText('BUY limit').textContent).toContain('0.01')
+    expect(screen.getByText('Entry VWAP').textContent).toContain('0.0099')
+    expect(screen.getByText('Entry cash').textContent).toContain('$9.9000')
+    expect(screen.getByText('100 × $0.009 + 900 × $0.01')).toBeTruthy()
+  })
+
   it('renders every blocking gate and only the long-ZQ execution path', () => {
     render(<OpportunityPanel opportunities={[opportunityFixture()]} />)
 

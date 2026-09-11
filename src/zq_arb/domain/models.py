@@ -276,6 +276,10 @@ class HedgeDepthView(StrictModel):
     price_cap: Decimal
     marketable_limit_price: Decimal | None = None
     best_ask_shares: Decimal = Decimal("0")
+    entry_price_cap: Decimal | None = None
+    entry_vwap: Decimal | None = None
+    entry_cash_cost: Decimal | None = None
+    entry_fills: tuple[BookLevel, ...] = ()
     emergency_vwap: Decimal | None = None
     worst_price: Decimal | None = None
     sufficient: bool = False
@@ -416,6 +420,8 @@ class HedgeObligationView(StrictModel):
     token_id: str
     due_shares: Decimal
     confirmed_shares: Decimal = Decimal("0")
+    pending_shares: Decimal = Decimal("0")
+    excess_shares: Decimal = Decimal("0")
     state: str = "PENDING"
     latest_order_id: str | None = None
     latest_limit_price: Decimal | None = None
@@ -458,6 +464,7 @@ class AlertView(StrictModel):
 
 class ReconciliationStatusView(StrictModel):
     clean: bool = False
+    status: Literal["CLEAN", "MISMATCH", "UNKNOWN"] = "UNKNOWN"
     method: str = "NOT_CONFIRMED"
     confirmed_by: str | None = None
     confirmed_at: datetime | None = None

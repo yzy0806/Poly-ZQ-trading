@@ -23,6 +23,10 @@ export interface HedgeDepthView {
   price_cap: DecimalValue
   marketable_limit_price: DecimalValue
   best_ask_shares: DecimalValue
+  entry_price_cap?: DecimalValue
+  entry_vwap?: DecimalValue
+  entry_cash_cost?: DecimalValue
+  entry_fills?: BookLevel[]
   emergency_vwap: DecimalValue
   worst_price: DecimalValue
   sufficient: boolean
@@ -271,6 +275,7 @@ export interface MarginPreview {
 }
 
 export interface ReconciliationStatus {
+  status?: 'CLEAN' | 'MISMATCH' | 'UNKNOWN'
   clean: boolean
   method: string
   confirmed_by: string | null
@@ -325,6 +330,8 @@ export interface HedgeObligation {
   token_id: string
   due_shares: DecimalValue
   confirmed_shares: DecimalValue
+  pending_shares?: DecimalValue
+  excess_shares?: DecimalValue
   deficit_shares: DecimalValue
   state: string
   latest_order_id: string | null
