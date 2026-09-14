@@ -1,11 +1,18 @@
-# ZQ Trading System — Current Deployment and Security Architecture
+# ZQ Trading System — Current Deployment, Security and Production Readiness
 
-Last updated and VPS settings verified: 2026-09-08  
-Environment: Paper Gateway / read-only application  
-Active VPS: **78.142.195.87** (`s62219`)  
+Last updated: 2026-09-14; production runtime verified at 08:04 UTC / 16:04 Taipei
+
+Environment: Live Gateway / production engine armed at the recorded verification
+
+Active VPS: **78.142.195.87** (`s62219`)
+
 Public monitor: <https://trade.cardiuscapital.com>
 
-This document reflects the September 8 migration and the settings verified on the new VPS. Cloudflare and Entra policy details below are retained from the original setup record; those administrative settings were not re-audited during migration. Current verification used non-sensitive system configuration and public health/readiness endpoints.
+This is the single maintained deployment, security, and production-readiness record. It consolidates the September 8 migration, the September 10 **Review VPS production readiness** task and its implementation follow-up, the September 11–12 validation records, and the September 14 Passless recovery and authorized production restart. [Section 11](#11-production-readiness-findings-and-evidence) distinguishes implemented fixes, accepted deferrals, and outstanding evidence; [Section 12](#12-release-acceptance-and-recovery-procedure) contains the combined acceptance procedure.
+
+Runtime status is a dated observation, not a continuously updated monitor. Cloudflare and Entra administrative settings were not re-audited during the passkey work. Consolidating this record does not rerun the historical tests, certify unattended operation, or change production configuration.
+
+For routine Gateway login and desktop access, use [IBKR_GATEWAY_PASSLESS.md](IBKR_GATEWAY_PASSLESS.md). Passless and port 6090 start as VPS system services; workstation access still requires an SSH tunnel, and fresh authentication can require manual unlock and approval.
 
 ## 1. Executive Summary
 
@@ -15,7 +22,7 @@ GitHub is the source and build system. A push to `main` runs validation and crea
 
 The VPS runs the trading engine, the IB Gateway, Cloudflare Tunnel, and local SQLite storage. The application listens only on the VPS loopback interface. Cloudflare Tunnel makes the monitor reachable at `trade.cardiuscapital.com` without opening an application port to the Internet. Cloudflare Access requires Microsoft Entra authentication and authorizes only `leo_ying@lucentti.com`. The application then requires its own dashboard username and password, creating a second authentication layer.
 
-The deployment remains deliberately non-trading. The engine is in `READ_ONLY` mode, and `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are all false. IB Gateway is logged into paper mode. Geographic eligibility still blocks application readiness, and intermittent application delays remain; this is not an accepted live-trading deployment.
+The production engine was armed on September 14 after the user authorized the restart and fresh checks passed. Its configured mode is `LIVE_ARMED`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are true. Gateway is logged into live mode with `READ_ONLY_API=no`. At the recorded verification, readiness and authenticated venue-ledger reconciliation were clean, positions matched, and a current margin preview qualified the configured 5-contract child order. Engine restarts still start disarmed and require fresh checks before authorized arming.
 
 ### 1.1 Active VPS and approved resource settings
 
@@ -29,15 +36,34 @@ The deployment remains deliberately non-trading. The engine is in `READ_ONLY` mo
 | ZQ engine RAM limit | **1 GiB**, increased from 384 MiB |
 | Gateway Java heap ceiling | **1,024 MiB**, increased from 512 MiB |
 | Application worker count | `API_WORKERS=1` |
-| Gateway mode and API setting | `TRADING_MODE=paper`, `READ_ONLY_API=no` |
-| Application trading controls | `RUN_MODE=READ_ONLY`; all three order-submission switches false |
+| Gateway mode and API setting | `TRADING_MODE=live`, `READ_ONLY_API=no` |
+| Application trading controls | `RUN_MODE=LIVE_ARMED`; all three order-submission switches true; runtime arming required after engine restart |
+| Gateway passkey provider | Passless 0.19.2, patched and installed as a restricted host service; attended approval desktop on loopback 6090 |
 | Old VPS retained for rollback | **192.109.228.234** (`s61959`); migrated services stopped and automatic startup disabled |
 
-The three resource increases were explicitly approved before application. The Gateway retains no Docker CPU or memory cap; its Java heap ceiling is not a limit on total container memory. `READ_ONLY_API=no` preserves paper-account API functionality, while the ZQ application retains its disabled submission gates. It is not authorization for live trading.
+The three resource increases were explicitly approved before application. The Gateway retains no Docker CPU or memory cap; its Java heap ceiling is not a limit on total container memory. Gateway API permissions and application order gates are separate controls. Live execution was enabled under the user's production authorization, with the existing ledger and risk settings preserved.
 
-The active engine Compose file and the workstation copy both contain `cpus: 2.0` and `mem_limit: 1g`. The migration changed deployment configuration while preserving the application image. The workstation configuration change has not been committed or pushed to GitHub as part of this work.
+The active engine Compose file and repository copy contain `cpus: 2.0` and `mem_limit: 1g`. The September 14 Gateway recovery preserved the deployed engine artifact and production trading limits.
 
-## 2. The Configuration Issue That Caused the Login Failure
+### 1.2 Approved production limits
+
+These are the settings preserved during the September 14 production restart. Historical review examples and pilot proposals do not replace them.
+
+| Setting | Production value |
+|---|---|
+| ZQ child order quantity | 5 contracts |
+| Maximum total ZQ position | 60 contracts, including adopted opening inventory |
+| Maximum open batches | 1 |
+| Minimum net profit | USD 100 |
+| Minimum return on capital | 100 basis points |
+| Minimum margin cushion ratio | 5% |
+| Minimum full excess liquidity | USD 10,000 on the VPS; the local value was USD 5,000 |
+| Maximum reconciliation age | 60 seconds |
+| Network execution request timeout | 10 seconds |
+| Shutdown drain | 20 seconds, within the container stop grace period |
+| IBKR callback settlement window | 2 seconds; not a Polymarket settlement deadline |
+
+## 2. Configuration and Authentication
 
 The initial VPS installation created a new `zq-arb.env` because no server configuration existed yet. The bootstrap script generated a new dashboard password, session-signing key, and control-confirmation secret. Those values are independent of the local development `.env`, the IB Gateway credentials, the IBKR account password, and the Microsoft account used by Cloudflare Access.
 
@@ -57,8 +83,10 @@ The relevant configuration locations are:
 | Deployed image reference | `/etc/zq-arb` | `deployment.env` | Updated atomically during promotion |
 | Cloudflare Tunnel credential | `/etc/cloudflared` | `trade.token` | Stored with restrictive permissions; loaded by systemd |
 | IB Gateway credentials and settings | `/opt/ib-gateway` | **`.env`** | **Edit this file on 78.142.195.87 to enter the IBKR login; mode 0600** |
-| IB Gateway container definition | `/opt/ib-gateway` | `compose.production.yml` | Reads the Gateway `.env`; image pinned to its existing digest |
+| IB Gateway container definition | `/opt/ib-gateway` | `compose.production.yml` | Reads the Gateway `.env`; uses the verified local repaired image and Passless device mapping |
 | Saved Gateway session and GUI settings | `/opt/ib-gateway` | `tws_settings/` | Mounted at `/home/ibgateway/tws_settings` inside Gateway |
+| Passless service files and executable | `/opt/ib-passkey` | `passless`, `desktop.sh`, readiness helper | Host services; separate from the Gateway container |
+| Passless encrypted key material | `/var/lib/ib-passkey` | `.gnupg/`, `.password-store/` | Restricted service account; preserve together; never commit |
 | Application database | `/var/lib/zq-arb` | `engine.sqlite3` | Persistent across container replacements |
 
 The Gateway `.env`, application configuration, and tunnel token were verified as root-owned files with mode `0600`. No secrets belong in GitHub commits, GitHub Actions logs, container image layers, or this document. The migration preserved the existing credentials instead of running first-install credential generation again.
@@ -88,10 +116,10 @@ Update the existing assignments rather than adding duplicate keys. The following
 ```dotenv
 TWS_USERID='your_ibkr_username'
 TWS_PASSWORD='your_ibkr_password'
-TRADING_MODE=paper
+TRADING_MODE=live
 ```
 
-Use the credentials accepted for your IBKR paper-account login. `VNC_SERVER_PASSWORD` in the same file controls the Gateway desktop password; it is separate from the IBKR password. Preserve its existing value unless you intend to change the desktop password as well. Keep `JAVA_HEAP_SIZE=1024` and the other approved settings.
+Use the credentials for the approved live IBKR account and preserve the intended environment. `VNC_SERVER_PASSWORD` in the same file controls the Gateway desktop password; it is separate from the IBKR password and the Passless storage passphrase. Preserve its existing value unless you intend to change the desktop password as well. Keep `JAVA_HEAP_SIZE=1024` and the other approved settings.
 
 Single quotes preserve literal dollar signs in Compose values. If a credential itself contains a single quote, escape it as `\'` within the single-quoted value, following [Docker's environment-file syntax](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax).
 
@@ -104,7 +132,7 @@ docker compose -f compose.production.yml config --quiet && \
   systemctl start ib-gateway-config.path
 ```
 
-If validation or application fails, correct the file and rerun this command; the watcher stays paused until those steps succeed. The apply service runs the pinned-image Compose deployment. A changed credential causes Gateway to be recreated and to log in again, briefly disconnecting its API. A plain `docker restart` does not load changed Compose environment values.
+If validation or application fails, correct the file and rerun this command; the watcher stays paused until those steps succeed. The apply service starts Passless, resolves its HID device and group, checks the verified repaired image, and applies Compose without pulling an upstream image. A changed credential causes Gateway to be recreated and to log in again, disconnecting its API until authentication completes. A plain `docker restart` does not load changed Compose environment values.
 
 Check the service and Gateway status:
 
@@ -113,15 +141,15 @@ systemctl status ib-gateway-apply.service ib-gateway-config.path --no-pager
 docker ps --filter name=ib-gateway
 ```
 
-The apply unit is a one-shot service: `inactive (dead)` after a successful exit can be normal; the config watcher should be active. Open the Gateway desktop as described in Section 7 and approve IBKR authentication if requested. If the engine does not reconnect after Gateway finishes logging in, run `docker restart zq-arb-engine` on the active VPS. Do not change application trading gates as part of a credential update.
+The apply unit is a one-shot service: `inactive (dead)` after a successful exit can be normal; the config watcher should be active. Open both desktops as described in Section 7 and complete Passless unlock or approval if requested. If the engine exhausts its reconnect attempts, follow the [trading recovery procedure](IBKR_GATEWAY_PASSLESS.md#trading-recovery-after-login), including inspecting active orders before an engine restart. Do not change account identity or trading limits as part of a credential update.
 
 ### 2.2 Account selection required for margin previews
 
-Gateway login and the application's account selection are separate settings. `TWS_USERID` and `TWS_PASSWORD` belong in the Gateway `.env`. **`IBKR_ACCOUNT_ID` belongs in `/etc/zq-arb/zq-arb.env` on 78.142.195.87**, and must identify the intended paper account rather than the login username.
+Gateway login and the application's account selection are separate settings. `TWS_USERID` and `TWS_PASSWORD` belong in the Gateway `.env`. **`IBKR_ACCOUNT_ID` belongs in `/etc/zq-arb/zq-arb.env` on 78.142.195.87**, and must identify the approved live account rather than the login username. The execution database is bound to its account/environment and wallet identity; do not repurpose it for another account.
 
-A follow-up diagnosis on September 8 found `IBKR_ACCOUNT_ID` blank in both the saved application file (line 37 at the time of inspection) and the running engine environment. The user subsequently reported entering the account ID in the file; activation of that saved value has not yet been verified. The margin-preview loop requires a configured account before issuing an IBKR what-if request. The missing value explained the dashboard's `NOT_REQUESTED` status and unavailable next-batch initial margin, projected excess liquidity, and projected margin cushion. A connected Gateway and working quotes do not satisfy that separate account-selection requirement.
+The September 8 staging diagnosis found a blank account ID and a `NOT_REQUESTED` margin preview. That historical state is superseded: on September 14 the saved production identities matched the intended configuration, and an actual current IBKR margin preview completed for quantity 5. Its estimated next-batch initial margin was USD 1,363.66 at the recorded verification; this is a dated result, not a fixed requirement for future orders.
 
-The corrective configuration change is to enter the intended paper account identifier as `IBKR_ACCOUNT_ID` in the application file, then recreate the engine using Section 5.3 so the changed environment is loaded. Keep `RUN_MODE=READ_ONLY` and all order-submission switches false: the preview path sets `whatIf=True` independently of those execution switches. The account value and runtime configuration were not changed during this diagnosis. A successful preview still requires the verified live ZQ subscription and an acceptable IBKR response.
+For an authorized account-setting correction, use Section 5.3 to load the saved environment. The preview path sets `whatIf=True` independently of execution switches. A connected Gateway and working quotes do not replace account validation, a current margin preview, or authenticated venue reconciliation.
 
 ## 3. Current Architecture
 
@@ -132,11 +160,14 @@ flowchart LR
     A --> T[Cloudflare edge and DNS\ntrade.cardiuscapital.com]
     T -->|Outbound tunnel connection| C[cloudflared on VPS\n78.142.195.87]
     C -->|HTTP over loopback| W[ZQ monitor and engine\n127.0.0.1:8765]
-    W -->|Private Docker network| I[IB Gateway\nAPI port 4004]
+    W -->|Private Docker network| I[IB Gateway\nlive API proxy port 4003]
     W -->|Outbound APIs| P[Polymarket and reference-data services]
     W --> D[(SQLite\nengine.sqlite3)]
     D --> B[Daily online backup\n14-day retention]
-    O[Operator workstation] -->|SSH local port forward| V[noVNC\n127.0.0.1:6080]
+    O[Operator workstation] -->|SSH local port forward| V[Gateway noVNC\n127.0.0.1:6080]
+    O -->|SSH local port forward| Q[Passless noVNC\n127.0.0.1:6090]
+    Q --> H[Host Passless service\nencrypted credential store]
+    H -->|Mapped virtual HID device| I
 ```
 
 The important trust boundaries are:
@@ -165,19 +196,19 @@ The image receives traceable tags, including the Git commit and a mutable stagin
 
 ### 4.2 Current deployed artifact
 
-The staged deployment was built from Git commit `c12a018` (`Align protobuf runtime with IBKR API`). The deployed image digest is:
+The production engine artifact verified on September 14 was built from Git commit `710c55bb5ab6d97363b219bfc734a2cd3b3ed0b4`. Its immutable deployed reference is:
 
 ```text
-sha256:3a383258bd5995de00338f70c2f2bbffb0364b7f62362183ace7efb89a5d44c4
+ghcr.io/yzy0806/poly-zq-trading@sha256:d40166d4e2149571712d66ac5ac7f394ffc363463f0e12255451da3446354176
 ```
 
-GitHub Actions run 5 completed successfully before that digest was promoted.
+Gateway uses the locally repaired image `local/ib-gateway:jxbrowser-fix-20260914`, image ID `sha256:3e7f26494a26f74a024126754625d647508ad29a56fa6be739b5d379129694cf`. It contains Gateway 10.45.1j and the bundled x86 JxBrowser 8.9.4 JARs with the runtime repair. The production apply script verifies this image ID and uses `--pull never`.
 
-The September 8 migration retained that exact application digest. Gateway is separately pinned to `ghcr.io/gnzsnz/ib-gateway@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d`, preserving the image previously running under the mutable `stable` tag. The new host uses Docker Engine 29.8.0, Compose 5.5.1, and cloudflared 2026.8.3.
+The September 8 migration previously used application commit `c12a018` and digest `sha256:3a383258bd5995de00338f70c2f2bbffb0364b7f62362183ace7efb89a5d44c4`; that is historical, not the current release. The repaired Gateway derives from the previously pinned upstream image `ghcr.io/gnzsnz/ib-gateway@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d`. Docker Engine 29.8.0, Compose 5.5.1, and cloudflared 2026.8.3 were observed during the September 8 migration.
 
 ### 4.3 What GitHub does not currently do
 
-GitHub Actions does not SSH into the VPS and does not automatically replace the running container. This is intentional for the staging phase. A successful build creates a candidate artifact; a separate operator-controlled promotion selects the exact digest.
+GitHub Actions does not SSH into the VPS and does not automatically replace the running container. A successful build creates a candidate artifact; a separate operator-controlled promotion selects the exact digest.
 
 The recommended day-to-day code path is therefore:
 
@@ -237,7 +268,7 @@ sudo docker compose --env-file /etc/zq-arb/deployment.env \
   up -d --no-deps --force-recreate --pull never engine
 ```
 
-This briefly interrupts the dashboard and engine connections. It uses the already-installed image digest, reloads the saved environment, and retains the mounted database. Gateway and Cloudflare Tunnel continue running. If validation fails, correct the file before retrying. Keep the configuration mode `0600` and retain `RUN_MODE=READ_ONLY` and the three false order-submission switches for the current deployment.
+This briefly interrupts the dashboard and engine connections. It uses the already-installed image digest, reloads the saved environment, and retains the mounted database. Gateway and Cloudflare Tunnel continue running. If validation fails, correct the file before retrying. Keep the configuration mode `0600` and preserve the approved account, trading limits, and execution settings. The recreated engine starts disarmed even when configured as `LIVE_ARMED`; require fresh reconciliation and margin checks before authorized arming. First-install bootstrap defaults remain `READ_ONLY` with submission switches false.
 
 After the engine has started, check process health and the loaded safety settings:
 
@@ -266,7 +297,11 @@ The engine has a **2-CPU allowance and 1-GiB RAM limit**, a 256-process limit, a
 
 ### 5.5 Reboot behavior and old-host standby
 
-Docker, `cloudflared-trade.service`, `ib-gateway-novnc.service`, `ib-gateway-config.path`, and `zq-arb-backup.timer` are enabled on the active VPS. Both application containers use `restart: unless-stopped`. Services are configured for reboot recovery, although a host reboot was not performed as part of migration. IBKR authentication may still be required, and the workstation SSH desktop forward must be recreated after its connection ends.
+Docker, `cloudflared-trade.service`, `ib-gateway-novnc.service`, `ib-gateway-config.path`, and `zq-arb-backup.timer` are enabled on the active VPS. Both application containers use `restart: unless-stopped`.
+
+Passless runs outside Docker as four enabled host services: `ib-passkey-display.service`, `ib-passkey-desktop.service`, `ib-passkey.service`, and `ib-passkey-novnc.service`. All four were verified active. The enabled `ib-gateway-apply.service` depends on Passless; the desktop readiness check prevents the authenticator starting before its session is available. A normal Gateway restart does not require manually starting Passless or port 6090.
+
+These settings configure startup, not unattended authentication. A fresh IBKR login can still require the storage passphrase and approval on 6090, and an engine restart leaves trading disarmed. Full VPS reboot recovery and daily/weekly login behavior have not been tested. The workstation SSH forwards must be recreated after their connection ends or Windows restarts. See [the Passless runbook](IBKR_GATEWAY_PASSLESS.md).
 
 On **192.109.228.234**, both containers are stopped with restart policy `no`; the tunnel, Gateway config watcher, noVNC, and backup timer are disabled. The host and data remain available for rollback. Before restoring the old services, stop the destination services and preserve and assess the destination database changes. Do not start both deployments with the same Gateway credentials or expose two independent application databases through the same tunnel.
 
@@ -305,26 +340,31 @@ Cloudflare recommends validating Access tokens at the origin, either with the tu
 | Trading monitor | `127.0.0.1:8765` | Public only through Cloudflare | Access exact-email policy plus application login |
 | Application Prometheus metrics | **Not listening** on port `9108` | Configured intent only; not an operational endpoint | Instrumentation remains incomplete |
 | Cloudflared connector metrics/readiness | `127.0.0.1:20241` observed after migration | VPS-local only; selected port can change after restart | Loopback binding |
-| IB Gateway paper API | Private Docker port `4004`; host `127.0.0.1:4002` | ZQ engine and approved local tooling only | Private Docker networking and loopback binding |
-| Reserved Gateway live-port mapping | Host `127.0.0.1:4001` to container `4003` | Mapping retained; Gateway currently runs only paper mode | Loopback binding; no live session claimed |
+| IB Gateway live API | Engine uses `ib-gateway:4003`; host `127.0.0.1:4001` maps to container `4003` | Proxy connects to Gateway's trusted container-loopback API port `4001` | Private Docker networking and host loopback binding |
+| Reserved Gateway paper mapping | Host `127.0.0.1:4002` to container `4004` | Mapping retained; no paper session is claimed in the live deployment | Loopback binding |
 | IB Gateway VNC | `127.0.0.1:5900` | noVNC or approved SSH forwarding only | VNC password and loopback binding |
 | IB Gateway noVNC | `127.0.0.1:6080` | Workstation through SSH forwarding only | SSH authentication and loopback binding |
+| Passless approval VNC | `127.0.0.1:5901` | Local noVNC backend only | Loopback binding; no separate VNC password on this desktop |
+| Passless approval noVNC | `127.0.0.1:6090` | Workstation through SSH forwarding only | SSH authentication; encrypted credential store and per-login approval |
 | SQLite database | Local filesystem | Application and privileged host operators only | Unix permissions, container mount, backups |
 | SSH | Host SSH service | Administrative access only | Host SSH policy; firewall and key policy should be periodically audited |
 
-The IB Gateway desktop is not published at `trade.cardiuscapital.com`. From a **local workstation PowerShell terminal**, create an SSH local port forward to the active VPS:
+The Gateway and Passless desktops are not published at `trade.cardiuscapital.com`. From a **local workstation PowerShell terminal**, with both local ports free, create SSH forwards to the active VPS:
 
 ```powershell
-ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:6080:127.0.0.1:6080 root@78.142.195.87
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:6090:127.0.0.1:6090 root@78.142.195.87
 ```
 
-Keep that connection running, then open:
+Keep that connection running, then open both desktops:
 
 ```text
 http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale
+http://127.0.0.1:6090/vnc.html?autoconnect=true&resize=scale
 ```
 
-Enter the `VNC_SERVER_PASSWORD` from the Gateway `.env` when prompted. A forward to the new VPS was started during migration; if port 6080 is already in use by that forward, use it rather than starting a duplicate. Recreate the forward after the SSH connection ends. Keeping noVNC behind SSH avoids exposing a remote desktop login surface through the public monitor.
+Enter `VNC_SERVER_PASSWORD` from the Gateway `.env` only at the Gateway VNC prompt on 6080. A GPG prompt for **IBKR VPS Authenticator** on 6090 requires the separate user-created Passless storage passphrase. Gateway's generic “insert security key” screen can be waiting for that unlock or approval; the virtual device is already attached.
+
+Reuse existing forwards rather than starting duplicates. Reopen them after the SSH connection ends or Windows restarts. This is workstation connectivity, not a Passless startup command: the VPS services run independently of the Windows terminal and browser. The [Passless runbook](IBKR_GATEWAY_PASSLESS.md#access-from-windows) includes a 6090-only command when the Gateway forward already exists.
 
 ## 8. Database and Backup Design
 
@@ -338,11 +378,19 @@ The systemd backup timer runs daily at 16:20 in the `America/Chicago` time zone,
 
 The present backup is local to the same VPS. It protects against application-level corruption and accidental file loss, but not total VPS or provider loss. An encrypted off-host backup target is still required for disaster recovery.
 
+The September 14 Gateway promotion also saved a private backup at `/opt/ib-passkey/production-backup-20260914T073953Z`, including the prior Gateway configuration, a consistent SQLite backup, and an archive of the protected Passless store. The routine SQLite timer does not back up Passless key material. Preserve its GPG key and encrypted password store together when preparing host recovery; the temporary registration service is not needed for ordinary login.
+
+Execution databases bind themselves to the IBKR environment/account/client and Polymarket simulation/wallet/API-owner identity. Keep one engine writer per ledger and use separate databases for incompatible identities. An older ledger containing clipped fills or missing provenance cannot be relabelled as live data: preserve it and reconstruct from venue evidence. The existing production ledger has already completed its handoff; do not repeat the historical empty-ledger adoption. Detailed invariants and the exceptional transition procedure remain in [execution-safety.md](../docs/execution-safety.md) and [OPENING_INVENTORY.md](../docs/OPENING_INVENTORY.md).
+
 ## 9. IB Gateway Restart and Trading Impact
 
 IB Gateway is configured for an automatic daily restart at 16:10 `America/Chicago`, within the CME daily maintenance interval. Scheduling in `America/Chicago` keeps the restart consistent with CME local market time across daylight-saving transitions.
 
 During the restart, the IBKR API socket disconnects. The engine should mark IBKR unready, prevent new IBKR-dependent execution, and reconnect after the gateway returns. Open orders already resting at IBKR are managed by IBKR during the client disconnect, but local monitoring and modification are temporarily unavailable. The engine must reconcile positions, orders, executions, and market-data subscriptions after reconnection before trading can resume.
+
+Passless and its port-6090 desktop remain running as host services when only the Gateway container restarts. No manual start command is normally needed. If Gateway requires fresh passkey authentication, open 6090, unlock the encrypted store if prompted, and approve the request. An already-unlocked store may skip the passphrase step. Automatic service startup does not guarantee unattended authentication or completion of the daily restart.
+
+If login takes long enough to exhaust the engine's reconnect attempts, complete Gateway login first, then follow the [trading recovery procedure](IBKR_GATEWAY_PASSLESS.md#trading-recovery-after-login). Inspect outstanding orders before restarting an engine, allow its shutdown drain, and obtain fresh reconciliation and margin checks before authorized arming. Every engine restart starts disarmed. An attended Gateway login and production restart were verified on September 14; scheduled daily/weekly recovery and a full VPS reboot remain untested.
 
 The database backup follows at 16:20, after the planned gateway restart. Any strategy expected to operate across the maintenance interval must treat the disconnect as a scheduled risk event rather than an exceptional transient failure.
 
@@ -359,93 +407,140 @@ The database backup follows at 16:20, after the planned gateway restart. Any str
 | Origin | Outbound tunnel and loopback listener | Prevent direct application-port exposure |
 | Application | Independent dashboard login, secure cookies, CORS restriction | Second authentication and session boundary |
 | Runtime | Read-only filesystem, dropped capabilities, resource limits | Limit container compromise impact |
-| Trading | Read-only mode plus venue-specific order gates | Prevent accidental order submission during staging |
+| Trading | Explicit arming, venue-specific order gates, authenticated reconciliation, margin and risk limits | Require verified state before production execution; engine restarts start disarmed |
 | Data | Persistent SQLite, online integrity-checked backups | Preserve state across deployments and support recovery |
-| Operator GUI | SSH-forwarded noVNC | Avoid public remote-desktop exposure |
+| Operator GUI | SSH-forwarded Gateway 6080 and Passless 6090; separate host services | Avoid public remote-desktop exposure while supporting attended login |
 
-## 11. Current Operational State and Known Risks
+## 11. Production Readiness, Findings and Evidence
 
-1. The verified deployment mode is `READ_ONLY`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are false. Gateway is in paper mode. The private runtime armed/halted state was not inspected during migration and is not asserted here.
+The September 10 review assessed local revision `b25c72a` and advised against unattended live trading at that revision. The same task subsequently implemented the agreed execution fixes. Later validation and the September 14 production restart supersede several initial findings. A successful attended startup does not establish that every failure scenario or unattended operating requirement has been verified.
 
-2. Intermittent application delays remain on the new hardware. A roughly 30-second migration verification sample recorded 18 successful local health requests and two timeouts at a three-second deadline; successful requests ranged from 8.44 to 2,753.11 ms. CPU use averaged approximately 1.04 cores, with 1% of quota periods throttled and approximately 6.7 GiB host memory available. The earlier state-copying/event-loop bottleneck and historical `VENUE_EVENT_QUEUE_OVERFLOW` reports require application work; a restart or resource increase alone does not establish that they are fixed. The measurements are not a controlled before/after benchmark.
+### 11.1 Last verified production observation
 
-3. The September 8 public `/readyz` check returned HTTP 503 with the sole reported reason `geographic eligibility is blocked or indeterminate`. At that sampled time it did not report disconnected venues, missing target quotes/EFFR, unsynchronized books, or an unverified market mapping. The earlier farm disconnect and unsynchronized-book reports are historical findings. The margin diagnosis found a blank `IBKR_ACCOUNT_ID`; the user has since reported filling it in, with runtime activation still unverified. Follow Sections 2.2 and 5.3. `/readyz` does not check that margin prerequisite, so its reasons list is not a complete set of execution blockers. Private account balances, positions, and overall execution readiness remain unverified.
+| Observation | Evidence at 08:04:44 UTC / 16:04:44 Taipei, September 14 |
+|---|---|
+| Engine | `armed=true`, `paused=false`, `kill_switch=false`; health `ok`, readiness true |
+| Venue state | Both venues connected; fresh `AUTHENTICATED_VENUE_LEDGER` reconciliation was CLEAN |
+| Positions | 25 September ZQ contracts; 12,153.8957 INC25 YES shares; 24,307.5 INC50PLUS YES shares; all matched the ledger |
+| Margin | Current actual preview for quantity 5; estimated next-batch initial margin USD 1,363.66 |
+| New execution | After arming, a 5-contract ZQ order at limit 96.2675 was submitted; zero filled and five remaining at the observation |
+| Event processing | Empty queue, no failed events or IBKR ingress overflow, healthy container |
+| Alerts | No critical alert; a non-critical IBKR 2119 connecting notice remained in history while current quotes and Gateway's connected data-farm panel were verified |
+| Single writer | Local workstation engine stopped; VPS engine active |
 
-4. The application login limiter currently keys failures from `request.client.host`. Behind a reverse proxy or tunnel, multiple users can appear to come from the same proxy address. Five failed attempts in five minutes can therefore create a shared lockout. The limiter should use a trusted, validated identity or client-IP signal, with proxy-trust rules, before broader access is granted.
+The engine was armed at 08:03:44 UTC after current reconciliation, positions, margin, and safety checks passed. The configured limits are recorded once in Section 1.2. These snapshots do not authorize reliance on cached reconciliation after restart, prove subsequent fills, or constitute peak-load certification.
 
-5. The original setup record reports that a GitHub personal access token appeared during that workflow. Its rotation status was not reverified during migration; confirm that the exposed token was revoked. Any replacement used only for GHCR pulls should have the narrowest practical scope, normally read-only package access, and should not be stored in application configuration.
+### 11.2 Execution findings and disposition
 
-6. The Entra client secret needs an owner, expiration record, and renewal alert. The previous expiration already caused an outage. Secret rotation should occur before expiry and be validated with an external Access login.
+| Finding from the review | Recorded disposition | Remaining boundary |
+|---|---|---|
+| Lost order responses could produce another signed hedge; excess fills were clipped; reconciliation omitted inventory/order differences | **Implemented as one coordinated ledger change.** Persist the signed payload and stable order identity before POST; retain reservations for unknown outcomes; preserve full fills and cost; track allocated, pending, and excess quantities; compare both venues' inventory, orders, and executions. Offline regressions and later production startup reconciliation passed. | A timeout, 404, cancellation acknowledgement, or absence from open orders cannot alone authorize replacement. Live VPS fault-injection evidence is separate from normal startup evidence. |
+| Halt could leave a profitable resting ZQ order working; shutdown disconnected too early | **Implemented.** Halt blocks new entries and requests cancellation independently of profitability or slow hedge requests. Late fills remain processed and existing permitted hedge obligations remain managed. Shutdown drains for a bounded period and records unresolved state. | Forced termination cannot guarantee venue cancellation. Filled ZQ is not automatically liquidated; the strategy remains BUY-only. |
+| Unsigned/simulated saved intent could receive simulated credit in live mode | **Implemented.** Live execution rejects unsigned/simulated records; database identity is checked before replay; incompatible venue/account/wallet modes require separate ledgers. | Legacy clipped or unproven history requires reconstruction, not relabelling. Opening inventory is a separately evidenced balance, not fabricated fills. |
+| September 10 local live switches were combined with paper IBKR configuration | **Historical mismatch superseded for the VPS.** September 14 verified the intended live identities, valid settings, approved gates and limits, and fresh venue evidence. Documentation now distinguishes bootstrap READ_ONLY defaults from runtime disarmed startup. | Validate every future deployment's actual environment; copying a local `.env` is not acceptance. |
+| September 12 real IBKR callback used a masked account label where the ledger expected a hash | **Fixed in the successor release.** The callback bridge and execution ledger share normalized SHA-256 account identity; regression tests include duplicate replay and a different account with the same final four digits. The verified `710c55b` production artifact reached CLEAN. | No purge, account-identity rewrite, or reconciliation override was required. This execution-identity repair does not fix account-summary aggregation below. |
+| IBKR account-summary values can mix accounts or currencies | **Explicitly deferred by the user under the single-account constraint.** Current source still stores values by metric tag. | Revisit before adding accounts/advisor structures, and verify that risk inputs belong to the intended account and currency. The single-account assumption is not a general multi-account guarantee. |
+| Polymarket order-heartbeat cadence/protocol may lack sufficient timing margin | **Assigned to separate analysis; not closed by this record.** The agreed ledger work left heartbeat code unchanged. Current source sends the HTTP order heartbeat and then waits `POLYMARKET_USER_WS_PING_SECONDS`; this setting is not merely a WebSocket ping. | The original review questioned cadence, endpoint compatibility, returned/expired heartbeat IDs, and lapse recovery. Obtain the separate analysis and deployed timing/response evidence before treating the finding as resolved; absence of a current alert is insufficient. |
 
-7. The tunnel currently has one active VPS connector on 78.142.195.87, with four ready Cloudflare connections observed after cutover. The old connector is disabled. Any additional connector serving this stateful application requires explicit application and database failover design; do not turn the old independent database into an accidental second origin.
+The first ledger row combines three related findings without dropping their distinct invariants. For implementation details and regression scope, use [execution-safety.md](../docs/execution-safety.md). The later IBKR callback convergence behavior is documented in [ibkr-callback-reconciliation.md](../docs/validation/ibkr-callback-reconciliation.md): known out-of-order callbacks can temporarily yield UNKNOWN, but unexplained or overdue differences must retain the safety response.
 
-8. Firewall, SSH key-only authentication, operating-system patching, Docker patching, and fail2ban or equivalent controls should be verified as a separate host-hardening audit. They are expected operational controls, but this document does not claim they were fully audited.
+### 11.3 Outstanding operational and security evidence
 
-9. The database backup is local only. An encrypted, versioned, off-host backup and a tested restore procedure are required before the VPS becomes the sole production system of record.
+This is the combined action register from the deployment record and readiness review. An item is not marked complete merely because a configuration flag exists or the engine is currently connected. Items not re-audited remain evidence gaps, rather than newly asserted incidents.
 
-10. Explicit origin-side Cloudflare Access token validation should be verified and enabled if absent. This complements, rather than replaces, loopback binding and application authentication.
+| Item | Recorded status and completion evidence required |
+|---|---|
+| External critical alerts and task supervision | External paging was deferred in the original design; delivered critical alerts and an independent liveness/exposure monitor are not demonstrated here. Prove notification for a dead/stalled trading task, stale venue data, unresolved order/hedge exposure, margin deterioration, or storage failure. The authenticated event diagnostics used on September 14 provide local evidence, not external delivery. |
+| Dashboard freshness and metrics | The reviewed dashboard silently retries socket/HTTP reads; a prominent last-update/stale-state warning remains a review item. Application port 9108 refused connections in the earlier check. Reverify actual instrumentation; `PROMETHEUS_ENABLED` and cloudflared's connector metrics do not prove application observability. |
+| Off-host backup and restore | Local SQLite backups and a protected Passless snapshot exist (Section 8). Encrypted versioned off-host copies, a demonstrated restore, and agreed recovery-point/recovery-time objectives are not recorded. Include the ledger, configuration, required authenticator key material, and evidence for unresolved venue state. |
+| Failure and capacity exercises | Attended Gateway login and production reconnection passed. Full host reboot, scheduled daily/weekly passkey recovery, sustained load on the 2-CPU/1-GiB engine, disk stalls, venue loss, and detection/containment without an open browser remain unproven. Use the acceptance matrix in Section 12. |
+| Release and schema discipline | Preserve commit/digest, validation evidence, prior configuration and backup references, and schema compatibility before promotion. `update_vps.sh` verifies health but cannot establish all execution prerequisites. Formal versioned migrations and their rollback procedure remain a review item; additive schema compatibility alone is insufficient. |
+| Dependency advisories and test scope | The September 10 scan reported advisories for `protobuf==5.29.5` and development dependency `pytest==8.4.2`; both versions remain in the current lockfile. Preserve the [protobuf advisory](https://github.com/advisories/GHSA-7gcm-g887-7qv7) and [pytest advisory](https://github.com/advisories/GHSA-6w46-j5rx-g56g) as review references, assess applicability, and validate compatible remediation. Application-specific exploitability and a new vulnerability scan are not established by this consolidation. CI types `src`; the earlier 28 test-file typing errors were outside that gate and have no closure evidence here. |
+| Financial model and capital acceptance | Document the accepted basis/tail exposure and fund IBKR margin and Polymarket hedge collateral separately. Section 11.5 preserves the original sensitivity examples; production startup and clean accounting do not establish a model-risk limit. |
+| Dashboard login rate limiting | The original audit identified failure counts keyed by `request.client.host`, which can aggregate users behind one proxy. Review trusted client identity/proxy handling before broadening access, with a regression test for shared lockout. |
+| Credential lifecycle | The original setup recorded a potentially exposed GitHub token; revocation was not reverified in this work. Retain narrow package-read permissions for pull credentials. Record an owner, expiry, and renewal alert for the Entra client secret and verify the external login after rotation. |
+| Origin and host hardening | Explicit origin-side Access JWT validation, firewall/SSH policy, patch status, and intrusion protection require their own verified audit. Existing loopback isolation and dashboard login remain documented controls; they are not evidence that every host-hardening item is complete. |
+| Failover topology | Keep the old host stopped as described in Section 5.5. A second Cloudflare connector backed by an independent writable SQLite database is not safe failover; any restoration must preserve destination changes and enforce one authoritative writer. |
 
-11. The application Prometheus endpoint is not running; a fresh probe of container-local port 9108 returned connection refused. Do not treat a configured metrics flag or cloudflared's separate connector metrics as working application observability.
+The narrower September 8 verification scope, including a denied private dashboard read, was superseded by authorized authenticated runtime checks on September 14. That later access does not imply that the retained security, disaster-recovery, or unattended-operation items above were audited.
 
-12. Automatic approval review rejected the detailed authenticated dashboard check during migration because it would return private application data to the workstation. Non-sensitive health/readiness, system settings, API handshake, database integrity, and tunnel checks were used instead. The document does not claim a new authenticated dashboard review, host reboot test, or peak-load certification.
+### 11.4 Dated validation and handoff evidence
 
-## 12. Release Acceptance Procedure
+| Date and scope | Recorded results | Interpretation |
+|---|---|---|
+| September 8 migration | Database integrity and destination backup passed; paper Gateway/API and tunnel were checked. A roughly 30-second health sample had 18 successes and two three-second timeouts; successful requests ranged from 8.44 to 2,753.11 ms, with about 1.04 cores average use and 1% quota throttling. | Historical migration/performance observations, not current runtime status or a controlled comparison. |
+| September 10 initial review, `b25c72a` | Python 3.13: 216 passed. Fresh locked Python 3.12: 215 passed, one timestamp-sensitive callback test failed again in isolation. Coverage about 81.7% against 85%. Source lint/types passed; typing source plus tests exposed 28 errors in six test files. Dashboard lint, 14 tests and build passed; the npm scan reported no known findings then. | Baseline before the agreed fixes; do not present the initial failures as the result of the later release. |
+| September 10 implementation follow-up | 255 Python tests passed on Windows/Python 3.13.12 with 85.99% coverage; Python lint/source types and 14 dashboard tests, lint and build passed. | Ledger, halt/shutdown and simulation isolation implemented. Docker/Python 3.12 and venue/VPS integration were still outstanding at that point; account-summary filtering and heartbeat remained deferred. |
+| September 11 callback convergence | 316 Python tests and 17 dashboard tests passed, plus lint, types and build. Wheel/source-distribution checks matched source and excluded private material. | Offline callback-order, deadline, identity, refresh, late-fill, pause-preservation and replay regressions; see the detailed callback validation note. |
+| September 12 account-identity validation | 319 Python tests, Ruff, changed-file formatting and mypy passed. Published `d5fee99` reproduced the real callback-identity mismatch. An isolated instance using that image with the three corrected source files mounted read-only and submission disabled reached CLEAN, matching positions and a current quantity-5 margin preview. | This was a diagnostic preview, not the production release. Trading stayed stopped during that validation; the successor image was required. |
+| September 14 verified successor and production recovery | The immutable artifact in Section 4.2 was preserved. Ledger checks, actual Gateway API/login, configuration identities, position reconciliation, and margin passed; production was armed and a submitted batch was observed as recorded in Section 11.1. | Supersedes the September 12 “fix awaiting publication / production stopped” status. It does not retroactively turn offline fault tests into real-venue fault-injection evidence. |
 
-Every release should use the following sequence:
+The September 12 image's Python source matched the committed source, ran as UID/GID 10001, and included the IBKR API. Disposable-copy provenance checks, market mapping/rules, ten synchronized Polymarket books, and live September ZQ quotes passed. The corrected-source diagnostic instance wrote only a scratch database, stayed unarmed/unpaused, and submitted no live order; no strategy orders were open in the inspected venue snapshot. These details distinguish that diagnostic preview from the later production activation.
 
-1. Confirm the intended Git commit and review its changes.
+The September 12 staged ledger passed SQLite integrity, foreign keys, opening-inventory, provenance, and venue-position checks. Its historical SHA-256 was `418c85ff5e8beff1df7d76e4be864ef9c4ee0881d101972dd92002187605232f`; this is not the checksum of the mutable live database after activation. The original empty VPS ledger and backup were preserved. The existing holdings were 25 ZQ with modeled hedge requirements of 12,153.75 INC25 YES and 24,307.50 INC50PLUS YES; the observed INC25 surplus was 0.1457 shares. The quantity-5 margin preview was approximately USD 1,293 then, rather than the later amount in Section 11.1.
 
-2. Confirm the Python and dashboard validation jobs passed.
+The September 12 eligibility observation returned country `NL` with raw `blocked=true`; that review evaluated it using the repository's API-specific eligibility policy and cited venue guidance. The raw flag was retained for diagnostics, and the check did not establish account-specific authorization. Later readiness success does not replace the release-time account/venue eligibility check.
 
-3. Confirm the GHCR artifact digest and record it in the release log.
+### 11.5 Financial assumptions retained from the review
 
-4. Confirm a recent valid database backup exists.
+The original review used a **ten-contract illustration**, a three-state payoff model, 14 post-decision days in a 30-day month, and USD 41.67 per basis point per contract. Its risk examples were:
 
-5. Promote the immutable digest with `update_vps.sh`.
+| Adverse scenario | Additional loss in the historical ten-contract illustration |
+|---|---|
+| +75 bp outcome compared with the modeled +50 bp case | USD 4,861.50 |
+| +100 bp outcome compared with the modeled +50 bp case | USD 9,723.00 |
+| One-basis-point adverse post-decision EFFR deviation | Approximately USD 194.46 |
+| One-basis-point adverse full-month average deviation | USD 416.70 |
 
-6. Confirm the container reports healthy and remains stable through the initial observation period.
+These are conditional model sensitivities, not guaranteed payoffs, a forecast, or current portfolio P&L. Larger rate moves and EFFR basis deviations can fall outside the three modeled states. The original USD 195 profit threshold and proposed supervised ten-contract pilot/cap were historical review assumptions; the later approved production configuration is Section 1.2. Do not treat the old pilot proposal as authorization to change order size or position limits. Financial acceptance should record the tolerated basis/tail loss and liquidity needed on both venues, separately from technical reconciliation.
 
-7. Confirm Cloudflare Access works from an external browser and that the application login succeeds.
+### 11.6 Sources and maintenance boundary
 
-8. Confirm `/healthz`, application readiness, IBKR connectivity, Polymarket connectivity, synchronized books, account identity, clock health, and absence of critical alerts.
+The review source is the live task [Review VPS production readiness](thread://01a0899d-92d5-7060-b49b-f08786b5a363?hostId=local), including its initial findings, the user's explicit deferrals, and its implementation completion. Its original `Production-readiness-review.md` output is no longer present in this workspace or the file's Git history; the task's recorded findings and follow-up were used instead. The old output's full prose and raw probe artifacts are not claimed to have been recovered.
 
-9. Keep all order-submission gates disabled unless a separately approved live-trading checklist authorizes the change.
+The tracked September 12 readiness note has been consolidated into this section and replaced by a link to this document. Its original text remains in Git at `710c55bb5ab6d97363b219bfc734a2cd3b3ed0b4:docs/validation/production-readiness-2026-09-12.md`. Keep this file authoritative for readiness status, operational gaps, and release acceptance. [execution-safety.md](../docs/execution-safety.md), [ibkr-callback-reconciliation.md](../docs/validation/ibkr-callback-reconciliation.md), [OPENING_INVENTORY.md](../docs/OPENING_INVENTORY.md), and the [Passless runbook](IBKR_GATEWAY_PASSLESS.md) retain focused implementation or operator procedures rather than a second overall readiness verdict.
 
-10. If acceptance fails, redeploy the last accepted digest and repeat state reconciliation. Do not assume an image rollback alone reverses data or external venue state.
+## 12. Release Acceptance and Recovery Procedure
 
-## 13. Change Record: What Was Done So Far
+Use one acceptance record for each immutable release. A container health check is only the start of acceptance, and an old test result or clean database snapshot cannot authorize a new runtime.
 
-1. Installed and configured the containerized IB Gateway on the VPS in paper mode.
+1. Identify the intended commit and digest. Review its changes, outstanding findings in Section 11, account/venue mode, simulation setting, wallet identity, and the approved limits in Section 1.2. Preserve bootstrap READ_ONLY defaults for a new installation until live operation is authorized.
+2. Require the exact release's Linux/Python 3.12 locked-environment CI, lint/source types, tests and configured coverage threshold, dashboard tests/build, and compatible dependency review. Record what was actually tested; identify any excluded scope such as test-file typing or real-venue fault exercises.
+3. Inspect active orders, unresolved obligations, and both venues' positions. Preserve one writer per ledger. Complete or deliberately retain recovery state before stopping; allow the shutdown drain and retain its result. Do not infer venue cancellation from process termination.
+4. Take a consistent database backup and preserve the prior image digest, configuration identity, and schema/restore compatibility. If the release changes provenance or adopts opening inventory, use the reviewed transition procedure before startup; the normal update script starts the engine and does not install a staged ledger for you.
+5. Promote the exact artifact with the Section 5 procedure. Keep the restarted engine disarmed. Complete Gateway/Passless authentication, reopen workstation tunnels if needed, and verify the intended account. Do not blindly replace the repaired Gateway image during an engine release.
+6. Verify process health, internal task/event processing, clock and storage health, current target quotes/EFFR, synchronized Polymarket books, market mapping and rule validity, venue connectivity and account-specific eligibility. Check external Access and application login when accepting changes to that path.
+7. Require fresh clean authenticated venue-ledger reconciliation, matching inventory, accounted-for orders/fills, no unexplained/excess exposure, and a current qualified margin preview. Do not clear an emergency halt, manual pause, expired callback deadline, or confirmed mismatch merely because a later snapshot is CLEAN.
+8. For changes affecting execution or recovery, complete the applicable exercises below in an isolated environment first. Any real-order validation requires an explicitly authorized, bounded mandate. Record real VPS/load evidence separately from mocked/offline regression results.
+9. After the user's production authorization and current checks pass, arm through the authenticated control path and observe the result, including any new orders or fills. Preserve the approved limits and capital assumptions; use the external notification/response arrangements appropriate to the intended operating coverage.
+10. If acceptance fails, retain the failed state and evidence, stop new exposure, and assess image/schema compatibility before rollback. An old executable can open some additive schemas without enforcing current safety invariants. Rollback does not reverse venue trades or database history; require fresh reconciliation and reviewed execution compatibility before resuming.
 
-2. Aligned the IB Gateway daily restart to 16:10 `America/Chicago`, inside the CME maintenance interval.
+| Recovery exercise | Required result |
+|---|---|
+| Order accepted but POST response lost, then process restart | Resolve the original signed order; no different replacement while its outcome remains unknown |
+| Two unique 60-share fills against a 100-share obligation | Record 120 actual, allocate 100, retain 20 excess with full cost and a blocking review state |
+| Partial fill races with cancellation/replacement | Reserve matched/pending/uncertain quantity and confirm terminal outcome before recalculating a replacement |
+| Duplicate, reordered, unidentified, or failed-settlement events | No duplicate credit or lost raw history; unknown evidence remains visible and blocks unsafe entry |
+| Missing inventory, unexpected orders, stale/incomplete snapshots | Reconciliation becomes MISMATCH or UNKNOWN; neither can authorize a new batch |
+| Halt while ZQ remains profitable or a hedge request is slow | Prompt residual ZQ cancellation, continued late-fill processing, and permitted hedge management within existing limits |
+| Live startup with simulated, unsigned, or incompatible saved data | Refuse unsafe replay before submission or simulated hedge credit |
+| Shutdown deadline or abrupt process/host failure | Durable unresolved state, no claim of cancellation without venue evidence, fresh recovery before resumption |
+| Out-of-order IBKR callbacks or a timed-out account refresh | Bounded known-gap handling, unique/serialized refresh completion, no indefinite deadline extension or stale CLEAN reuse |
+| Heartbeat lapse or venue disconnect | Verify actual protocol/cadence and venue order outcomes, deliver an actionable alert, reconcile before new entries |
+| VPS reboot, Gateway login, disk stall, or browser left unattended | Services and desktop recovery behave as documented; detection, containment, backup/restore, and operator response work under the real resource limits |
 
-3. Added a hardened production compose definition for the ZQ application, using loopback exposure, resource limits, a read-only filesystem, dropped capabilities, health checks, persistent data, and private IB Gateway networking.
+## 13. Consolidated Change Record
 
-4. Added first-install and update scripts that separate one-time secret generation from repeatable immutable-image deployment.
+| Date | Change and verification scope |
+|---|---|
+| Original September setup | Containerized paper Gateway, CME-aligned restart/backup schedules, immutable engine publishing, hardened runtime, protected environment files, and the two-layer Cloudflare/Entra plus application login. The expired Entra secret was corrected and the external login verified at that time. |
+| September 8 | Migrated credentials, ledger, Gateway settings, backup history, noVNC and the existing tunnel from 192.109.228.234 to 78.142.195.87. Verified destination integrity/backup, paper API, tunnel connections and the Access challenge. Applied the approved 2-CPU/1-GiB engine and 1,024-MiB Gateway heap. Stopped and disabled old-host services; retained the host and `MIGRATION-20260908.md` for recovery context. |
+| September 10 | Reviewed `b25c72a`; implemented the coordinated order/fill ledger, safe halt/drain, and simulation/database isolation. Explicitly deferred account-summary filtering under the user's single-account constraint and left heartbeat for separate analysis. |
+| September 11–12 | Added callback convergence and opening-inventory recovery evidence. The published `d5fee99` identity mismatch was reproduced and fixed with the normalized account hash; offline and isolated real-Gateway validation are recorded in Section 11.4. |
+| Successor release | Published/deployed the verified `710c55b` artifact recorded in Section 4.2 and completed the ledger handoff without an identity rewrite or purge. Historical “awaiting publication / stopped” instructions no longer describe the September 14 production state. |
+| September 14 | Registered VPS Passless, verified attended Linux Gateway login, promoted the repaired image/device mapping, enabled the host services and startup ordering, and stopped temporary enrollment components. Preserved the existing engine artifact, ledger, identities and limits; armed at 08:03:44 UTC and verified a new submitted batch at 08:04:44 UTC. |
+| Documentation consolidation | Combined the readiness task, its implementation outcome, the tracked September 12 handoff note, and this deployment/security record. Historical findings, current observations, accepted deferrals and missing evidence now share one maintained status register. |
 
-5. Added a GitHub Actions pipeline that validates Python and dashboard code, publishes a GHCR image, generates supply-chain metadata, and supports digest-based deployment.
-
-6. Deployed and verified the image built from commit `c12a018` at the digest recorded in Section 4.2.
-
-7. Created the Cloudflare Tunnel `zq-trade-vps` and routed `trade.cardiuscapital.com` to the loopback-only application service.
-
-8. Installed the tunnel as a hardened systemd service with credential-file loading.
-
-9. Created the Cloudflare Access application `ZQ Trading Monitor`, restricted it to `leo_ying@lucentti.com`, selected Microsoft Entra ID, and set a six-hour Access session.
-
-10. Diagnosed the expired Entra client secret; after the integration was corrected, verified the complete Microsoft-to-Cloudflare-to-application login flow.
-
-11. Added a daily online SQLite backup with integrity checking, restrictive permissions, 14-day retention, and a 16:20 `America/Chicago` schedule.
-
-12. During the original setup, verified that the external dashboard loads and reports live system status while all trading gates remain disabled.
-
-13. On September 8, migrated IB Gateway, the ZQ engine, credentials, persistent data, backup history, noVNC, and the existing Cloudflare Tunnel from 192.109.228.234 to **78.142.195.87**. Preserved the application image and pinned Gateway to its existing image digest.
-
-14. Applied the user-approved engine allowance of **2 CPUs / 1 GiB RAM** and Gateway Java heap of **1,024 MiB**, retaining one worker, paper mode, disabled order gates, and the existing schedules.
-
-15. Verified paper Gateway login/API handshake, database integrity, a destination backup, boot configuration, four ready tunnel connections, the external Access challenge, and the local noVNC page. Recorded the remaining eligibility and application-performance limitations.
-
-16. Stopped the old services and disabled their automatic startup while retaining the source host and data for rollback. Saved the migration handover as `MIGRATION-20260908.md` in `/opt/zq-arb` on the active VPS.
 
 ## 14. Implementation References
 
@@ -454,11 +549,18 @@ Every release should use the following sequence:
 | `container.yml` | GitHub validation and GHCR publication |
 | `Dockerfile` | Reproducible application image |
 | ZQ `compose.production.yml` in `/opt/zq-arb/deploy` | Hardened engine runtime; 2 CPUs and 1 GiB RAM |
-| Gateway `.env` in `/opt/ib-gateway` | **IBKR username/password, VNC password, paper mode, and Java heap setting** |
-| Gateway `compose.production.yml` in `/opt/ib-gateway` | Pinned Gateway image and loopback API/VNC mappings |
-| `apply-config.sh` in `/opt/ib-gateway` | Validate, pull the pinned image, and apply Gateway Compose configuration |
+| Gateway `.env` in `/opt/ib-gateway` | **IBKR username/password, VNC password, live mode, and Java heap setting** |
+| Gateway `compose.production.yml` in `/opt/ib-gateway` | Verified repaired image, Passless HID/group mapping, read-only udev mount, and loopback API/VNC mappings |
+| `apply-config.sh` in `/opt/ib-gateway` | Start Passless, resolve its device/group, verify the local image, and apply Compose without pulling |
 | `ib-gateway-config.path` and `ib-gateway-apply.service` | Watch the Gateway `.env` and apply saved changes |
 | `ib-gateway-novnc.service` | Loopback-only Gateway desktop web access |
+| `ib-passkey-display.service`, `ib-passkey-desktop.service` | Private display and approval desktop with session-readiness ordering |
+| `ib-passkey.service`, `ib-passkey-novnc.service` | Restricted host authenticator and loopback port-6090 desktop access |
+| `IBKR_GATEWAY_PASSLESS.md` | Startup behavior, Windows SSH forwarding, attended login, and trading recovery runbook |
+| `execution-safety.md` | Detailed order identity, fill accounting, simulation isolation, halt/drain, and reconciliation invariants |
+| `OPENING_INVENTORY.md` | Evidenced opening-balance adoption into an eligible empty ledger |
+| `ibkr-callback-reconciliation.md` | Focused callback convergence regression evidence |
+| `production-readiness-2026-09-12.md` | Compatibility link to the consolidated dated evidence in Section 11.4 |
 | `install_vps.sh` | Initial host setup |
 | `bootstrap_env.py` | One-time secret and environment bootstrap |
 | `update_vps.sh` | Immutable-digest promotion and health verification |

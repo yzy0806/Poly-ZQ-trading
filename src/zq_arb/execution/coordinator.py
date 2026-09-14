@@ -118,6 +118,9 @@ class ExecutionCoordinator:
         self._ibkr_terminal_conflicts: set[int] = set()
         self._ibkr_refresh_conflicts: set[int] = set()
         self._ibkr_matched_zq: Decimal | None = None
+        # Preserve reconciled positions plus live callbacks across snapshot refreshes.
+        # This evidence settles fill gaps only; entry still requires a complete fresh read.
+        self._ibkr_callback_positions: dict[str, Decimal] | None = None
         self._ibkr_gap: dict[str, Any] | None = None
         self._ibkr_gap_deadline: float | None = None
         self._ibkr_gap_expired = False
@@ -187,6 +190,7 @@ class ExecutionCoordinator:
                 self._ibkr_reconciliation_in_progress = False
                 self._ibkr_refresh_started = None
                 self._ibkr_matched_zq = None
+                self._ibkr_callback_positions = None
                 self._ibkr_refresh_ambiguous = False
             if event.kind in {
                 "execution",
@@ -221,6 +225,9 @@ class ExecutionCoordinator:
                     await self.state.set_zq_position(self._observed_zq_position())
             elif event.kind == "position_end":
                 self._ibkr_positions_complete = True
+                if self._ibkr_callback_positions is not None:
+                    # A completed read also accounts for positions absent from the new snapshot.
+                    self._ibkr_callback_positions = dict(self._ibkr_positions)
                 await self.state.set_zq_position(self._observed_zq_position())
             if (
                 self._ibkr_reconciliation_in_progress
@@ -706,6 +713,8 @@ class ExecutionCoordinator:
             f"ZQ:{payload.get('contract_month')}:{payload.get('account_fingerprint')}"
         )
         self._ibkr_positions[identity] = quantity
+        if self._ibkr_callback_positions is not None:
+            self._ibkr_callback_positions[identity] = quantity
 
     def _observed_zq_position(self) -> Decimal:
         return sum(self._ibkr_positions.values(), Decimal("0"))
@@ -765,14 +774,19 @@ class ExecutionCoordinator:
             )
             LOGGER.exception("ibkr_callback_watchdog_failed")
 
-    async def _finish_ibkr_gap(self) -> None:
+    async def _finish_ibkr_gap(self, *, expected: Decimal, observed: Decimal) -> None:
         if self._ibkr_gap is None:
             return
         await self.repository.audit(
             actor="SYSTEM",
             action="IBKR_CALLBACK_GAP_RESOLVED",
             reason="IBKR callbacks and execution ledger agree",
-            details=self._ibkr_gap,
+            details={
+                **self._ibkr_gap,
+                "resolved_expected": str(expected),
+                "resolved_observed": str(observed),
+                "account_refresh_pending": self._ibkr_reconciliation_in_progress,
+            },
         )
         self._ibkr_gap = None
         self._ibkr_gap_deadline = None
@@ -787,12 +801,18 @@ class ExecutionCoordinator:
             asyncio.get_running_loop().time() >= self._ibkr_gap_deadline
         ):
             await self._expire_ibkr_gap()
-        if not (
+        if (
             self._ibkr_positions_complete
             and self._ibkr_open_orders_complete
             and self._ibkr_executions_complete
             and self._ibkr_completed_orders_complete
         ):
+            observed = self._observed_zq_position()
+        elif self._ibkr_matched_zq is not None and self._ibkr_callback_positions is not None:
+            # Snapshot end markers are not fill evidence. Reconcile the live stream
+            # against the execution ledger without treating a partial snapshot as complete.
+            observed = sum(self._ibkr_callback_positions.values(), Decimal("0"))
+        else:
             return set()
         progress = [
             p
@@ -800,7 +820,6 @@ class ExecutionCoordinator:
             if p.contract_month == self.settings.ibkr_zq_contract_month
         ]
         expected = await self.repository.strategy_zq_quantity(self.settings.ibkr_zq_contract_month)
-        observed = self._observed_zq_position()
         outstanding = {
             p.order_id: str(p.reported - p.executed) for p in progress if p.reported > p.executed
         }
@@ -849,7 +868,7 @@ class ExecutionCoordinator:
             "ibkr_terminal_conflicts",
         } & differences.keys()
         if not ibkr_keys:
-            await self._finish_ibkr_gap()
+            await self._finish_ibkr_gap(expected=expected, observed=observed)
             return set()
         # Startup has no previously reconciled anchor: it cannot use this live-fill allowance.
         if candidates and self._ibkr_matched_zq is not None and self._ibkr_gap is None:
@@ -1064,6 +1083,7 @@ class ExecutionCoordinator:
         self._last_ledger_revision = self.repository.database.revision if clean else None
         if clean:
             self._ibkr_matched_zq = expected_zq
+            self._ibkr_callback_positions = dict(self._ibkr_positions)
             self._last_reconciled_venue_revision = self._venue_revision
         if differences:
             if not transient or unsafe_differences:

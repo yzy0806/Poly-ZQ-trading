@@ -306,6 +306,192 @@ async def complete_refresh(h, request_id):
         await h.c.handle_ibkr_event(event(h, kind, request_id=request_id))
 
 
+async def partial_fill_during_refresh(h, ordering=("position", "execution", "order_status")):
+    callbacks = {
+        "position": event(h, "position"),
+        "execution": event(h, "execution"),
+        "order_status": event(h, "order_status", status="Submitted", filled="1", remaining="4"),
+    }
+    await h.c.handle_ibkr_event(callbacks[ordering[0]])
+    assert h.c._ibkr_gap is not None
+    assert await h.c.begin_ibkr_reconciliation(9004)
+    for kind in ordering[1:]:
+        await h.c.handle_ibkr_event(callbacks[kind])
+    # Converged fill evidence must retire the watchdog before any snapshot end marker.
+    assert h.c._ibkr_gap is None
+    assert h.c._ibkr_reconciliation_in_progress
+    current = await h.state.get()
+    assert current.armed and not current.paused
+    assert not current.reconciliation.clean
+    assert not h.c._new_entry_authorized(current)
+
+
+@pytest.mark.parametrize("live_fill", [5], indirect=True)
+@pytest.mark.parametrize("ordering", list(permutations(["position", "execution", "order_status"])))
+async def test_partial_fill_clears_gap_during_refresh_in_any_callback_order(live_fill, ordering):
+    h = live_fill
+    cached_clean = await h.state.get()
+    await partial_fill_during_refresh(h, ordering)
+    assert not h.c._new_entry_authorized(cached_clean)
+    await h.c.handle_ibkr_event(event(h, "execution"))  # replay cannot duplicate the hedge
+    await finish_hedges(h)
+    batch = await h.repo.active_batch_view()
+    assert batch.filled_quantity == 1 and batch.remaining_quantity == 4
+    assert all(o.deficit_shares == 0 for o in batch.obligations)
+    assert len(await h.repo.all_hedge_obligations()) == 2
+    h.ibkr.cancel_order.assert_not_called()
+
+
+@pytest.mark.parametrize("live_fill", [5], indirect=True)
+@pytest.mark.parametrize(
+    "delayed_end", ["position_end", "execution_end", "open_order_end", "completed_order_end"]
+)
+async def test_resolved_fill_does_not_timeout_waiting_for_snapshot_end(live_fill, delayed_end):
+    h = live_fill
+    await partial_fill_during_refresh(h)
+    await finish_hedges(h)
+    await h.c.handle_ibkr_event(event(h, "position"))
+    await h.c.handle_ibkr_event(event(h, "open_order", status="Submitted"))
+    for kind in ("position_end", "execution_end", "open_order_end", "completed_order_end"):
+        if kind != delayed_end:
+            await h.c.handle_ibkr_event(event(h, kind, request_id=9004))
+    await asyncio.sleep(h.settings.ibkr_callback_settle_seconds + 0.05)
+    current = await h.state.get()
+    assert current.armed and not current.paused
+    assert not current.reconciliation.clean and not h.c._new_entry_authorized(current)
+    h.ibkr.cancel_order.assert_not_called()
+    await h.c.handle_ibkr_event(event(h, delayed_end, request_id=9004))
+    current = await h.state.get()
+    assert current.reconciliation.clean and current.armed and not current.paused
+    async with h.repo.database.session() as session:
+        actions = (await session.scalars(select(AuditLogRecord.action))).all()
+    assert actions.count("IBKR_CALLBACK_GAP_STARTED") == 1
+    assert actions.count("IBKR_CALLBACK_GAP_RESOLVED") == 1
+    assert "IBKR_CALLBACK_GAP_EXPIRED" not in actions
+
+
+@pytest.mark.parametrize("missing", ["position", "execution", "order_status"])
+async def test_missing_fill_evidence_still_times_out_during_refresh(live_fill, missing):
+    h = live_fill
+    first = "execution" if missing == "position" else "position"
+    await h.c.handle_ibkr_event(event(h, first))
+    assert await h.c.begin_ibkr_reconciliation(9004)
+    for kind in ("position", "execution", "order_status"):
+        if kind != missing:
+            await h.c.handle_ibkr_event(event(h, kind))
+    assert h.c._ibkr_gap is not None
+    await asyncio.sleep(h.settings.ibkr_callback_settle_seconds + 0.05)
+    current = await h.state.get()
+    assert current.paused and not current.armed
+    assert "deadline" in current.metadata["pause_reason"].lower()
+    # Later evidence can repair reconciliation, but cannot undo the expired safety pause.
+    await h.c.handle_ibkr_event(event(h, missing))
+    await h.c.handle_ibkr_event(event(h, "position"))
+    await complete_refresh(h, 9004)
+    await h.c.wait_for_hedges()
+    await h.c.cycle(await h.state.get())
+    await finish_hedges(h)
+    current = await h.state.get()
+    assert current.reconciliation.clean and current.paused and not current.armed
+
+
+@pytest.mark.parametrize("position", ["22", "25"])
+async def test_contradictory_position_during_refresh_pauses_immediately(live_fill, position):
+    h = live_fill
+    await h.c.handle_ibkr_event(event(h, "position"))
+    assert await h.c.begin_ibkr_reconciliation(9004)
+    await h.c.handle_ibkr_event(event(h, "position", position=position))
+    current = await h.state.get()
+    assert current.paused and not current.armed
+    assert "unexplained" in current.metadata["pause_reason"].lower()
+
+
+@pytest.mark.parametrize("live_fill", [5], indirect=True)
+async def test_full_refresh_timeout_survives_callback_gap_resolution(live_fill):
+    h = live_fill
+    await partial_fill_during_refresh(h)
+    h.c._ibkr_refresh_started -= h.settings.execution_request_timeout_seconds + 1
+    with pytest.raises(TimeoutError):
+        await h.c.check_ibkr_refresh_timeout()
+    current = await h.state.get()
+    assert current.paused and not current.armed and not current.reconciliation.clean
+    assert "refresh timed out" in current.metadata["pause_reason"].lower()
+    h.ibkr.cancel_order.assert_called_with(166)
+
+
+@pytest.mark.parametrize("live_fill", [5], indirect=True)
+@pytest.mark.parametrize("cancel_between", [False, True])
+async def test_additional_and_late_fill_during_same_refresh_gets_its_own_gap(
+    live_fill, cancel_between
+):
+    h = live_fill
+    await partial_fill_during_refresh(h)
+    await finish_hedges(h)
+    if cancel_between:
+        await h.c.cancel_working_zq("test residual cancellation")
+        await h.c.handle_ibkr_event(event(h, "order_status", status="Cancelled"))
+    second = event(h, "execution", exec_id="fill-2")
+    await h.c.handle_ibkr_event(second)
+    assert h.c._ibkr_gap is not None
+    assert h.c._ibkr_reconciliation_in_progress
+    current = await h.state.get()
+    assert current.armed and not current.paused and not current.reconciliation.clean
+    await h.c.handle_ibkr_event(event(h, "position", position="25"))
+    await h.c.handle_ibkr_event(
+        event(
+            h,
+            "order_status",
+            status="Cancelled" if cancel_between else "Submitted",
+            filled="2",
+            remaining="0" if cancel_between else "3",
+        )
+    )
+    await h.c.handle_ibkr_event(second)
+    assert h.c._ibkr_gap is None
+    await finish_hedges(h, expected_orders=4)
+    assert await h.repo.strategy_zq_quantity(h.settings.ibkr_zq_contract_month) == 25
+    assert len(await h.repo.all_hedge_obligations()) == 4
+    current = await h.state.get()
+    assert current.armed and not current.paused and not h.c._new_entry_authorized(current)
+    async with h.repo.database.session() as session:
+        resolved = (
+            await session.scalars(
+                select(AuditLogRecord)
+                .where(AuditLogRecord.action == "IBKR_CALLBACK_GAP_RESOLVED")
+                .order_by(AuditLogRecord.id)
+            )
+        ).all()
+    assert len(resolved) == 2
+    assert [Decimal(r.details["resolved_expected"]) for r in resolved] == [24, 25]
+    assert [Decimal(r.details["resolved_observed"]) for r in resolved] == [24, 25]
+    assert all(r.details["account_refresh_pending"] for r in resolved)
+
+
+@pytest.mark.parametrize("live_fill", [5], indirect=True)
+async def test_completed_position_read_overrides_retained_callback_positions(live_fill):
+    h = live_fill
+    await partial_fill_during_refresh(h)
+    assert not h.c._ibkr_positions  # Position evidence arrived before the refresh began.
+    # An empty completed read must not reuse the retained 24-contract position.
+    await h.c.handle_ibkr_event(event(h, "position_end"))
+    current = await h.state.get()
+    assert current.paused and not current.armed and not current.reconciliation.clean
+    h.ibkr.cancel_order.assert_called_with(166)
+
+
+@pytest.mark.parametrize("live_fill", [5], indirect=True)
+async def test_disconnect_discards_retained_callback_evidence(live_fill):
+    h = live_fill
+    await partial_fill_during_refresh(h)
+    await h.c.handle_ibkr_event(event(h, "connection", status="DISCONNECTED"))
+    assert h.c._ibkr_callback_positions is None and h.c._ibkr_matched_zq is None
+    assert await h.c.begin_ibkr_reconciliation(9005)
+    await h.c.handle_ibkr_event(event(h, "position", position="25"))
+    # Reconnection must acquire a full baseline; it cannot infer fills from old live evidence.
+    assert h.c._ibkr_gap is None and not h.c._hedge_submission_ready()
+    assert not (await h.state.get()).reconciliation.clean
+
+
 async def test_immediate_refresh_is_single_flight_and_ignores_old_execution_end(live_fill):
     h = live_fill
     await h.c.handle_ibkr_event(event(h, "position"))
@@ -364,10 +550,15 @@ async def test_duplicates_do_not_extend_deadline(live_fill):
     assert h.c._ibkr_gap_deadline == deadline
 
 
+@pytest.mark.parametrize("refresh_in_progress", [False, True])
 @pytest.mark.parametrize("fault", ["foreign_client", "unknown_order", "unknown_fill", "identity"])
-async def test_independent_fault_interrupts_pending_gap_immediately(live_fill, fault):
+async def test_independent_fault_interrupts_pending_gap_immediately(
+    live_fill, fault, refresh_in_progress
+):
     h = live_fill
     await h.c.handle_ibkr_event(event(h, "position"))
+    if refresh_in_progress:
+        assert await h.c.begin_ibkr_reconciliation(9004)
     if fault == "foreign_client":
         callback = event(h, "order_status", client_id=999, status="Submitted")
     elif fault == "unknown_order":
