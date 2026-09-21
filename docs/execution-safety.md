@@ -1,6 +1,9 @@
 # Execution safety and recovery
 
-1. **Scope.** This change unifies order identity, fill accounting, and reconciliation; adds safe halt and bounded shutdown; and isolates simulated and real execution data. It does not change the heartbeat implementation or IBKR account-summary filtering. The strategy remains BUY-only: no automatic flattening, selling, redemption, or position repair is added.
+For workstation paths and setup, see [macOS development](local-development-macos.md).
+For dated deployment status, see the [production record](../deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md).
+
+1. **Scope.** This implementation unifies order identity, fill accounting, and reconciliation; adds safe halt and bounded shutdown; and isolates simulated and real execution data. It does not change the heartbeat implementation or IBKR account-summary filtering. The strategy remains BUY-only: no automatic flattening, selling, redemption, or position repair is added.
 
 2. **Durable order identity.** A real hedge's signed payload and exchange order hash are committed before POST. Timeouts, lost replies, crashes, 404 lookups, and missing open-order entries cannot release its reservation. Recovery queries the original hash and may retransmit the identical signed payload after a delay. It never signs a different replacement while the earlier outcome is unresolved. A cancellation acknowledgement alone is insufficient: terminal venue status, cumulative matched quantity, and associated trade IDs must agree with the ledger before any remaining quantity can be replaced.
 
@@ -28,4 +31,10 @@
 
 13. **Pause explanations and activation.** The dashboard shows pending reconciliation separately from a retained safety or operator pause cause and timestamp. Audit actions record callback-gap start, resolution, expiry, and safety pauses. CLEAN does not automatically clear a manual pause, emergency halt, expired callback deadline, or confirmed mismatch. Restart loads the new code but starts disarmed and requires fresh venue reconciliation. This update neither purges the ledger nor synthesizes opening inventory or executions.
 
-Historical validation on 2026-09-10: 255 Python tests passed on Windows/Python 3.13.12, with 85.99% coverage against the existing 85% threshold. See `docs/validation/ibkr-callback-reconciliation.md` for this update's validation. Docker/Python 3.12 and actual venue/VPS integration remain release checks.
+14. **Scheduled Gateway maintenance.** `IBKR_ACCOUNT_REFRESH_TIMEOUT_SECONDS` is a separate required setting, set to 30 seconds in the example environment. The execution request and callback convergence deadlines remain 10 and 2 seconds. With maintenance enabled, the engine blocks entries and cancels working ZQ one minute before the regular 16:00–17:00 America/Chicago break. Confirmed cancellations, completed hedges and fresh clean reconciliation certify the drain. Only a drained cycle with a connectivity interruption beginning near the configured 16:10 Gateway restart can reconnect without latching an account-refresh timeout pause. Timed-out reads remain invalid; independent safety faults still pause. The bounded exception ends on recovery or at 17:05. Fresh reconciliation and a restored connection release the hold at reopening without changing arming permission. Manual disarm, pause and halt remain effective. Friday's entry hold continues through Sunday 17:00; special holiday schedules are not implemented. See [maintenance validation and rollout](validation/ibkr-maintenance-2026-09-21.md) for configuration and checks.
+
+Historical validation on 2026-09-10: 255 Python tests passed on Windows/Python 3.13.12, with 85.99% coverage against the existing 85% threshold. Later evidence is recorded in the [callback report](validation/ibkr-callback-reconciliation.md),
+[September 14 deployment follow-up](validation/ibkr-callback-refresh-2026-09-14.md), and
+[September 21 macOS maintenance validation](validation/ibkr-maintenance-2026-09-21.md).
+The maintenance implementation is local and has not been deployed; historical production
+checks do not establish acceptance of that newer working tree.

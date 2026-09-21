@@ -1,8 +1,9 @@
 # ZQ Trading System — Current Deployment, Security and Production Readiness
 
-Last updated: 2026-09-14; production runtime verified at 08:04 UTC / 16:04 Taipei
+Documentation reviewed: 2026-09-21 for macOS workstation instructions.
+Last production runtime verification: 2026-09-14 at 13:17 UTC / 21:17 Taipei
 
-Environment: Live Gateway / production engine armed at the recorded verification
+Environment: Live Gateway / callback fix deployed / production engine disarmed at the recorded verification
 
 Active VPS: **78.142.195.87** (`s62219`)
 
@@ -14,6 +15,8 @@ Runtime status is a dated observation, not a continuously updated monitor. Cloud
 
 For routine Gateway login and desktop access, use [IBKR_GATEWAY_PASSLESS.md](IBKR_GATEWAY_PASSLESS.md). Passless and port 6090 start as VPS system services; workstation access still requires an SSH tunnel, and fresh authentication can require manual unlock and approval.
 
+Local toolchain, native dependency installation, and nonsynchronized runtime paths are covered in [macOS development](../docs/local-development-macos.md). This documentation review did not reconnect to or change the VPS.
+
 ## 1. Executive Summary
 
 The current design separates source control, artifact creation, host configuration, runtime data, and public access.
@@ -22,7 +25,7 @@ GitHub is the source and build system. A push to `main` runs validation and crea
 
 The VPS runs the trading engine, the IB Gateway, Cloudflare Tunnel, and local SQLite storage. The application listens only on the VPS loopback interface. Cloudflare Tunnel makes the monitor reachable at `trade.cardiuscapital.com` without opening an application port to the Internet. Cloudflare Access requires Microsoft Entra authentication and authorizes only `leo_ying@lucentti.com`. The application then requires its own dashboard username and password, creating a second authentication layer.
 
-The production engine was armed on September 14 after the user authorized the restart and fresh checks passed. Its configured mode is `LIVE_ARMED`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are true. Gateway is logged into live mode with `READ_ONLY_API=no`. At the recorded verification, readiness and authenticated venue-ledger reconciliation were clean, positions matched, and a current margin preview qualified the configured 5-contract child order. Engine restarts still start disarmed and require fresh checks before authorized arming.
+The callback deadline fix in `0c4718e` was deployed on September 14 at 13:15 UTC after the operator explicitly approved disarming and cancelling the working unfilled ZQ order. At 13:17 UTC, the updated engine was healthy, disarmed, unpaused and idle, with clean venue-ledger reconciliation, matching positions, no outstanding hedge obligations, and a qualified 5-contract margin preview. Its configured mode remains `LIVE_ARMED`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are unchanged. Gateway remains logged into live mode with `READ_ONLY_API=no`. No re-arm action was sent during this deployment. The earlier morning arming is recorded as historical evidence in Section 11.1.
 
 ### 1.1 Active VPS and approved resource settings
 
@@ -95,9 +98,9 @@ The Gateway `.env`, application configuration, and tunnel token were verified as
 
 The live credential file is **`/opt/ib-gateway/.env` on VPS 78.142.195.87**. It is separate from the workstation project `.env` and the ZQ application file `/etc/zq-arb/zq-arb.env`. Existing Gateway credentials were migrated, so re-entry is needed only if you want to change them.
 
-From a local PowerShell terminal, connect to the active VPS:
+From a local macOS Terminal (zsh), connect to the active VPS:
 
-```powershell
+```sh
 ssh root@78.142.195.87
 ```
 
@@ -196,11 +199,13 @@ The image receives traceable tags, including the Git commit and a mutable stagin
 
 ### 4.2 Current deployed artifact
 
-The production engine artifact verified on September 14 was built from Git commit `710c55bb5ab6d97363b219bfc734a2cd3b3ed0b4`. Its immutable deployed reference is:
+The production engine artifact deployed on September 14 at 13:15 UTC was built from Git commit `0c4718e605950e97fa0c3660f1b9760899833897`. [GitHub validation and publishing](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/34846383394) passed. The packaged coordinator, repository, and state source matched the inspected checkout; the coordinator also imported successfully in an isolated container without network access. Its immutable deployed reference is:
 
 ```text
-ghcr.io/yzy0806/poly-zq-trading@sha256:d40166d4e2149571712d66ac5ac7f394ffc363463f0e12255451da3446354176
+ghcr.io/yzy0806/poly-zq-trading@sha256:8b4ee4929fa331a49d6ae287a189819d0ef10f2adfcfa323c7d7d244fdbb34ea
 ```
+
+The previous engine artifact, commit `710c55bb5ab6d97363b219bfc734a2cd3b3ed0b4` at `ghcr.io/yzy0806/poly-zq-trading@sha256:d40166d4e2149571712d66ac5ac7f394ffc363463f0e12255451da3446354176`, is preserved as the rollback reference. The final drained database backup is `/var/backups/zq-arb/drained-0c4718e-20260914T131515Z.sqlite3`; integrity and foreign-key checks passed. The protected release record is under `/opt/zq-arb/releases/0c4718e605950e97fa0c3660f1b9760899833897`. Production configuration and Compose contents were unchanged, and the Gateway container was not restarted.
 
 Gateway uses the locally repaired image `local/ib-gateway:jxbrowser-fix-20260914`, image ID `sha256:3e7f26494a26f74a024126754625d647508ad29a56fa6be739b5d379129694cf`. It contains Gateway 10.45.1j and the bundled x86 JxBrowser 8.9.4 JARs with the runtime repair. The production apply script verifies this image ID and uses `--pull never`.
 
@@ -301,7 +306,7 @@ Docker, `cloudflared-trade.service`, `ib-gateway-novnc.service`, `ib-gateway-con
 
 Passless runs outside Docker as four enabled host services: `ib-passkey-display.service`, `ib-passkey-desktop.service`, `ib-passkey.service`, and `ib-passkey-novnc.service`. All four were verified active. The enabled `ib-gateway-apply.service` depends on Passless; the desktop readiness check prevents the authenticator starting before its session is available. A normal Gateway restart does not require manually starting Passless or port 6090.
 
-These settings configure startup, not unattended authentication. A fresh IBKR login can still require the storage passphrase and approval on 6090, and an engine restart leaves trading disarmed. Full VPS reboot recovery and daily/weekly login behavior have not been tested. The workstation SSH forwards must be recreated after their connection ends or Windows restarts. See [the Passless runbook](IBKR_GATEWAY_PASSLESS.md).
+These settings configure startup, not unattended authentication. A fresh IBKR login can still require the storage passphrase and approval on 6090, and an engine restart leaves trading disarmed. Full VPS reboot recovery and daily/weekly login behavior have not been tested. The workstation SSH forwards must be recreated after their connection ends or the Mac restarts or loses its connection during sleep. See [the Passless runbook](IBKR_GATEWAY_PASSLESS.md).
 
 On **192.109.228.234**, both containers are stopped with restart policy `no`; the tunnel, Gateway config watcher, noVNC, and backup timer are disabled. The host and data remain available for rollback. Before restoring the old services, stop the destination services and preserve and assess the destination database changes. Do not start both deployments with the same Gateway credentials or expose two independent application databases through the same tunnel.
 
@@ -349,9 +354,9 @@ Cloudflare recommends validating Access tokens at the origin, either with the tu
 | SQLite database | Local filesystem | Application and privileged host operators only | Unix permissions, container mount, backups |
 | SSH | Host SSH service | Administrative access only | Host SSH policy; firewall and key policy should be periodically audited |
 
-The Gateway and Passless desktops are not published at `trade.cardiuscapital.com`. From a **local workstation PowerShell terminal**, with both local ports free, create SSH forwards to the active VPS:
+The Gateway and Passless desktops are not published at `trade.cardiuscapital.com`. From a **local macOS Terminal (zsh)**, with both local ports free, create SSH forwards to the active VPS:
 
-```powershell
+```sh
 ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:6090:127.0.0.1:6090 root@78.142.195.87
 ```
 
@@ -364,7 +369,7 @@ http://127.0.0.1:6090/vnc.html?autoconnect=true&resize=scale
 
 Enter `VNC_SERVER_PASSWORD` from the Gateway `.env` only at the Gateway VNC prompt on 6080. A GPG prompt for **IBKR VPS Authenticator** on 6090 requires the separate user-created Passless storage passphrase. Gateway's generic “insert security key” screen can be waiting for that unlock or approval; the virtual device is already attached.
 
-Reuse existing forwards rather than starting duplicates. Reopen them after the SSH connection ends or Windows restarts. This is workstation connectivity, not a Passless startup command: the VPS services run independently of the Windows terminal and browser. The [Passless runbook](IBKR_GATEWAY_PASSLESS.md#access-from-windows) includes a 6090-only command when the Gateway forward already exists.
+Reuse existing forwards rather than starting duplicates. Reopen them after the SSH connection ends or the Mac restarts or loses its connection during sleep. This is workstation connectivity, not a Passless startup command: the VPS services run independently of the Mac terminal and browser. The [Passless runbook](IBKR_GATEWAY_PASSLESS.md#access-from-macos) includes a 6090-only command when the Gateway forward already exists.
 
 ## 8. Database and Backup Design
 
@@ -416,6 +421,21 @@ The database backup follows at 16:20, after the planned gateway restart. Any str
 The September 10 review assessed local revision `b25c72a` and advised against unattended live trading at that revision. The same task subsequently implemented the agreed execution fixes. Later validation and the September 14 production restart supersede several initial findings. A successful attended startup does not establish that every failure scenario or unattended operating requirement has been verified.
 
 ### 11.1 Last verified production observation
+
+| Observation | Evidence at 13:17:03 UTC / 21:17:03 Taipei, September 14 |
+|---|---|
+| Release | `0c4718e`; callback timer fix verified in the running container |
+| Engine | `armed=false`, `paused=false`, `kill_switch=false`; health and readiness HTTP 200; zero container restarts |
+| Venue state | IBKR and Polymarket connected; fresh reconciliation CLEAN; all portfolio positions reconciled |
+| Orders and hedges | Active batch IDLE; zero unresolved hedge obligations; working order cancellation confirmed before shutdown |
+| Margin | AVAILABLE, quantity 5, qualified for the next batch |
+| Event processing | Consumer running, empty queue, no failed events and no unresolved alerts |
+| Configuration | Preserved; callback deadline 2 seconds and execution/account-refresh timeout 10 seconds |
+| Activation | Left disarmed under the operator's explicit deployment approval; no ARM action sent |
+
+Shutdown reconciled before promotion and a final consistent backup passed integrity checks. These observations validate startup and reconciliation, not a new live-fill exercise under the updated code. The state field `polymarket.authenticated` is overwritten by public market events in `state.py`; authenticated account reconciliation and successful venue evidence, rather than that transient display field alone, establish the account-read result.
+
+The following morning observation is historical and predates the callback-fix deployment:
 
 | Observation | Evidence at 08:04:44 UTC / 16:04:44 Taipei, September 14 |
 |---|---|
@@ -539,6 +559,7 @@ Use one acceptance record for each immutable release. A container health check i
 | September 11–12 | Added callback convergence and opening-inventory recovery evidence. The published `d5fee99` identity mismatch was reproduced and fixed with the normalized account hash; offline and isolated real-Gateway validation are recorded in Section 11.4. |
 | Successor release | Published/deployed the verified `710c55b` artifact recorded in Section 4.2 and completed the ledger handoff without an identity rewrite or purge. Historical “awaiting publication / stopped” instructions no longer describe the September 14 production state. |
 | September 14 | Registered VPS Passless, verified attended Linux Gateway login, promoted the repaired image/device mapping, enabled the host services and startup ordering, and stopped temporary enrollment components. Preserved the existing engine artifact, ledger, identities and limits; armed at 08:03:44 UTC and verified a new submitted batch at 08:04:44 UTC. |
+| September 14, 13:15 UTC | Deployed callback timer fix `0c4718e` after explicit approval to disarm and cancel the unfilled working order. Preserved configuration, Gateway and ledger; verified clean shutdown and backup. Post-deployment health, readiness, reconciliation, hedge state and margin passed at 13:17 UTC. Left the engine disarmed. |
 | Documentation consolidation | Combined the readiness task, its implementation outcome, the tracked September 12 handoff note, and this deployment/security record. Historical findings, current observations, accepted deferrals and missing evidence now share one maintained status register. |
 
 
@@ -556,7 +577,7 @@ Use one acceptance record for each immutable release. A container health check i
 | `ib-gateway-novnc.service` | Loopback-only Gateway desktop web access |
 | `ib-passkey-display.service`, `ib-passkey-desktop.service` | Private display and approval desktop with session-readiness ordering |
 | `ib-passkey.service`, `ib-passkey-novnc.service` | Restricted host authenticator and loopback port-6090 desktop access |
-| `IBKR_GATEWAY_PASSLESS.md` | Startup behavior, Windows SSH forwarding, attended login, and trading recovery runbook |
+| `IBKR_GATEWAY_PASSLESS.md` | Startup behavior, macOS SSH forwarding, attended login, and trading recovery runbook |
 | `execution-safety.md` | Detailed order identity, fill accounting, simulation isolation, halt/drain, and reconciliation invariants |
 | `OPENING_INVENTORY.md` | Evidenced opening-balance adoption into an eligible empty ledger |
 | `ibkr-callback-reconciliation.md` | Focused callback convergence regression evidence |

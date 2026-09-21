@@ -1,3 +1,5 @@
+# Opening inventory adoption
+
 Existing venue holdings can be adopted once into an empty execution ledger with
 `scripts/adopt_opening_inventory.py`. The import is an opening balance, with venue
 average costs and captured source history; it does not fabricate orders or fills.
@@ -7,10 +9,13 @@ average costs and captured source history; it does not fabricate orders or fills
    complete and stable balances, no open orders, and settled Polymarket history.
    Both PM legs must cover the existing ZQ position under the strategy model.
 
-2. Run a capture from the repository root:
+2. Run a capture from the repository root (`code/` in the current workspace), using
+   the configured macOS environment from [local development](local-development-macos.md).
+   Keep the evidence and backup outside OneDrive:
 
-   ```powershell
-   uv run python scripts/adopt_opening_inventory.py --output-dir <backup-directory>
+   ```sh
+   uv run --locked python scripts/adopt_opening_inventory.py \
+     --output-dir "$HOME/Library/Application Support/ZQArb/opening-inventory"
    ```
 
    Review the evidence before applying. To collect a fresh snapshot and import it,

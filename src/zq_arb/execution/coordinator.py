@@ -25,7 +25,7 @@ from zq_arb.analytics.payoff import (
 )
 from zq_arb.analytics.portfolio import value_strategy_portfolio
 from zq_arb.config import Settings
-from zq_arb.domain.enums import AlertSeverity, BatchState, MarginPreviewStatus
+from zq_arb.domain.enums import AlertSeverity, BatchState, ConnectionStatus, MarginPreviewStatus
 from zq_arb.domain.models import (
     EngineSnapshot,
     HedgeObligationView,
@@ -34,6 +34,7 @@ from zq_arb.domain.models import (
     PortfolioView,
     utc_now,
 )
+from zq_arb.execution.maintenance import MaintenanceHold
 from zq_arb.persistence.hedge_ledger import normalize_status, order_resolved
 from zq_arb.persistence.repository import Repository
 from zq_arb.services.state import StateStore
@@ -125,6 +126,9 @@ class ExecutionCoordinator:
         self._ibkr_gap_deadline: float | None = None
         self._ibkr_gap_expired = False
         self._ibkr_gap_watchdog: asyncio.Task[None] | None = None
+        self.maintenance = MaintenanceHold(settings)
+        self._last_maintenance_check = float("-inf")
+        self.ibkr_connection_ready = asyncio.Event()
 
     async def recover(self) -> None:
         """Validate provenance before any replay; startup stays blocked pending venue reads."""
@@ -168,11 +172,160 @@ class ExecutionCoordinator:
                 raise TimeoutError("IBKR refresh completion is ambiguous; reconnect required")
             if self._ibkr_refresh_started is not None and (
                 asyncio.get_running_loop().time() - self._ibkr_refresh_started
-                >= self.settings.execution_request_timeout_seconds
+                >= self.settings.ibkr_account_refresh_timeout_seconds
             ):
-                self._ibkr_refresh_ambiguous = True
+                self._mark_ibkr_refresh_timeout()
                 await self._attempt_automated_reconciliation()
                 raise TimeoutError("IBKR account snapshot incomplete; reconnect required")
+
+    def _mark_ibkr_refresh_timeout(self) -> None:
+        if not self._ibkr_refresh_ambiguous:
+            LOGGER.warning(
+                "ibkr_account_refresh_timeout",
+                elapsed_seconds=(
+                    asyncio.get_running_loop().time() - self._ibkr_refresh_started
+                    if self._ibkr_refresh_started is not None
+                    else None
+                ),
+                timeout_seconds=self.settings.ibkr_account_refresh_timeout_seconds,
+                missing=[
+                    name
+                    for name, complete in (
+                        ("open_orders", self._ibkr_open_orders_complete),
+                        ("completed_orders", self._ibkr_completed_orders_complete),
+                        ("executions", self._ibkr_executions_complete),
+                        ("positions", self._ibkr_positions_complete),
+                    )
+                    if not complete
+                ],
+            )
+        self._ibkr_refresh_ambiguous = True
+
+    async def maintenance_recovery_allowed(self) -> bool:
+        """Only a drained, bounded restart episode may avoid a latched timeout pause."""
+        now = self.maintenance.now()
+        self.maintenance.observe_interruption(now)
+        current = await self.state.get()
+        if (
+            not self.maintenance.recovering(now)
+            or current.paused
+            or current.kill_switch
+            or self._halt_requested
+            or self.ibkr.event_queue_overflowed is True
+            or any(
+                a.severity is AlertSeverity.CRITICAL
+                and not a.resolved
+                and not a.acknowledged
+                and not self._expected_maintenance_alert(a.code, a.created_at)
+                for a in current.alerts
+            )
+        ):
+            return False
+        return await self._maintenance_execution_clear()
+
+    def _expected_maintenance_alert(self, code: str, created_at: datetime) -> bool:
+        window = self.maintenance.window
+        return bool(
+            window is not None
+            and self.maintenance.recovering(self.maintenance.now())
+            and code == "IBKR_1100"
+            and window.restart_at - timedelta(minutes=1) <= created_at < window.deadline
+        )
+
+    async def _maintenance_execution_clear(self) -> bool:
+        orders = await self.repository.ledger_orders()
+        return (
+            all(
+                order.state in IBKR_TERMINAL if order.venue == "IBKR" else order_resolved(order)
+                for order in orders
+            )
+            and (await self.repository.active_batch_view()).batch_id is None
+            and not await self.repository.unresolved_hedge_obligation_count()
+            and not await self.repository.hedge_safety_differences()
+        )
+
+    async def maintain(self) -> None:
+        async with self._lock:
+            now = self.maintenance.now()
+            if self.maintenance.enter(now):
+                await self.repository.audit(
+                    actor="SYSTEM",
+                    action="MAINTENANCE_STARTED",
+                    reason="Scheduled Gateway maintenance; operator arming state preserved",
+                    details=self.maintenance.view(now),
+                )
+            window = self.maintenance.window
+            if window is not None:
+                await self.cancel_working_zq("scheduled maintenance drain")
+                current = await self.state.get()
+                ready = (
+                    bool(self.ibkr.connected)
+                    and current.ibkr.status is ConnectionStatus.CONNECTED
+                    and not current.metadata.get("ibkr_connectivity_recovery_pending")
+                    and not self._ibkr_reconciliation_in_progress
+                    and not self._ibkr_refresh_ambiguous
+                    and self.ibkr.event_queue_overflowed is not True
+                    and self._ibkr_snapshot_at is not None
+                    and (utc_now() - self._ibkr_snapshot_at).total_seconds()
+                    <= self.settings.reconciliation_max_age_seconds
+                    and (
+                        self.settings.simulate_polymarket_fills
+                        or (
+                            self._polymarket_snapshot_at is not None
+                            and (utc_now() - self._polymarket_snapshot_at).total_seconds()
+                            <= self.settings.reconciliation_max_age_seconds
+                        )
+                    )
+                    and not any(
+                        a.severity is AlertSeverity.CRITICAL
+                        and not a.resolved
+                        and not a.acknowledged
+                        and not self._expected_maintenance_alert(a.code, a.created_at)
+                        for a in current.alerts
+                    )
+                    and await self.shutdown_ready()
+                )
+                if not self.maintenance.failed:
+                    if not self.maintenance.drained and now < window.close_at and ready:
+                        self.maintenance.drained = True
+                    if self.maintenance.drained and not await self._maintenance_execution_clear():
+                        self.maintenance.drained = False
+                    if not self.maintenance.drained and now >= window.close_at:
+                        await self._latch_reconciliation_pause(
+                            "Safety pause: maintenance drain was not confirmed before close"
+                        )
+                    elif self.maintenance.recovering(now) and ready:
+                        # A fresh full read on a restored connection proves this episode recovered.
+                        # Never resolve an older/unrelated connectivity alert here.
+                        if any(
+                            self._expected_maintenance_alert(a.code, a.created_at)
+                            for a in current.alerts
+                        ):
+                            await self.state.resolve_alerts("IBKR_1100")
+                        self.maintenance.recovered = True
+                    elif ready and not self.maintenance.recovered:
+                        # A resolved earlier outage must not taint the later scheduled restart.
+                        self.maintenance.interruption_at = None
+                if now >= window.reopen_at:
+                    if self.maintenance.failed or current.paused or current.kill_switch:
+                        self.maintenance.finish()
+                    elif now >= window.deadline:
+                        await self._latch_reconciliation_pause(
+                            "Safety pause: maintenance recovery deadline expired"
+                        )
+                        self.maintenance.finish()
+                    elif ready:
+                        await self.repository.audit(
+                            actor="SYSTEM",
+                            action="MAINTENANCE_COMPLETED",
+                            reason="Maintenance complete; operator arming state preserved",
+                            details={
+                                "armed": (await self.state.get()).armed,
+                                "weekend_closed": self.maintenance.weekend_closed(now),
+                            },
+                        )
+                        self.maintenance.finish()
+            await self.state.set_maintenance(self.maintenance.view(now))
 
     async def handle_ibkr_event(self, event: VenueEvent) -> None:
         async with self._lock:
@@ -180,7 +333,20 @@ class ExecutionCoordinator:
             # not query/rebuild the execution ledger for market-data ticks.
             if event.kind in {"tick_price", "tick_size"}:
                 return
+            if event.kind == "error" and event.payload.get("code") == 1100:
+                self.maintenance.observe_interruption(self.maintenance.now())
+            if (
+                event.kind
+                in {"open_order_end", "completed_order_end", "execution_end", "position_end"}
+                and self._ibkr_refresh_started is not None
+                and asyncio.get_running_loop().time() - self._ibkr_refresh_started
+                >= self.settings.ibkr_account_refresh_timeout_seconds
+            ):
+                self._mark_ibkr_refresh_timeout()
             if event.kind == "connection" and event.payload.get("status") != "CONNECTED":
+                self.ibkr_connection_ready.clear()
+                if event.payload.get("status") == "DISCONNECTED":
+                    self.maintenance.observe_interruption(self.maintenance.now())
                 self._venue_revision += 1
                 self._recovery_ready = False
                 self._ibkr_open_orders_complete = False
@@ -192,6 +358,8 @@ class ExecutionCoordinator:
                 self._ibkr_matched_zq = None
                 self._ibkr_callback_positions = None
                 self._ibkr_refresh_ambiguous = False
+            elif event.kind == "connection":
+                self.ibkr_connection_ready.set()
             if event.kind in {
                 "execution",
                 "order_status",
@@ -276,6 +444,9 @@ class ExecutionCoordinator:
             async with self._lock:
                 await self._attempt_automated_reconciliation()
             self._last_reconciliation_check = now
+        if now - self._last_maintenance_check >= 1:
+            await self.maintain()
+            self._last_maintenance_check = now
         batch = await self.repository.active_batch_view()
         if batch.batch_id is not None:
             await self._cancel_unprofitable_residual(await self.state.get(), batch)
@@ -724,6 +895,8 @@ class ExecutionCoordinator:
             await self._reconcile_ledger_snapshot()
 
     async def _latch_reconciliation_pause(self, reason: str) -> None:
+        if self.maintenance.window is not None:
+            self.maintenance.failed = True
         current = await self.state.get()
         if not current.metadata.get("pause_reason"):
             await self.repository.audit(
@@ -933,22 +1106,24 @@ class ExecutionCoordinator:
         }
         if self._ibkr_refresh_started is not None and (
             asyncio.get_running_loop().time() - self._ibkr_refresh_started
-            >= self.settings.execution_request_timeout_seconds
+            >= self.settings.ibkr_account_refresh_timeout_seconds
         ):
-            self._ibkr_refresh_ambiguous = True
-        if self._ibkr_refresh_ambiguous:
-            self._recovery_ready = False
-            await self._latch_reconciliation_pause(
-                "Safety pause: IBKR account refresh timed out; reconnect required"
-            )
-            await self.state.invalidate_reconciliation("IBKR refresh timed out; reconnect required")
-            return
+            self._mark_ibkr_refresh_timeout()
+        # An expected timeout must never hide independent evidence of a safety fault.
         early_unsafe = (unsafe_keys & differences.keys()) - transient
         if early_unsafe:
             self._recovery_ready = False
             await self._latch_reconciliation_pause(
                 f"Safety pause: unexplained venue evidence {differences}"
             )
+        if self._ibkr_refresh_ambiguous:
+            self._recovery_ready = False
+            if not await self.maintenance_recovery_allowed():
+                await self._latch_reconciliation_pause(
+                    "Safety pause: IBKR account refresh timed out; reconnect required"
+                )
+            await self.state.invalidate_reconciliation("IBKR refresh timed out; reconnect required")
+            return
         simulated = self.settings.simulate_polymarket_fills
         fresh = simulated or (
             self._polymarket_snapshot_at is not None
@@ -1652,6 +1827,7 @@ class ExecutionCoordinator:
         )
         return (
             snapshot.armed
+            and not self.maintenance.blocks_entry(self.maintenance.now())
             and self._ibkr_gap is None
             and not self._ibkr_reconciliation_in_progress
             and not self._ibkr_refresh_ambiguous

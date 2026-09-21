@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from zq_arb.adapters.events import VenueEvent
-from zq_arb.adapters.ibkr import IbkrAdapter
+from zq_arb.adapters.ibkr import IbkrAdapter, IbkrAdapterError
 from zq_arb.adapters.nyfed import NewYorkFedEffrAdapter
 from zq_arb.adapters.polymarket import PolymarketAdapter, PolymarketProtocolError
 from zq_arb.analytics.payoff import (
@@ -343,7 +343,14 @@ class EngineRuntime:
         while not self._stopping.is_set():
             try:
                 await self.state.set_ibkr_health(ConnectionStatus.CONNECTING, "connecting to TWS")
+                self.execution.ibkr_connection_ready.clear()
                 await self.ibkr.connect()
+                # Process CONNECTING/CONNECTED before starting a new unscoped account read.
+                # Otherwise a queued reset can erase the read we just started.
+                await asyncio.wait_for(
+                    self.execution.ibkr_connection_ready.wait(),
+                    timeout=self.settings.ibkr_connect_timeout_seconds,
+                )
                 await self.state.begin_ibkr_subscriptions()
                 self.ibkr.request_contracts_and_market_data()
                 await self.state.set_ibkr_resubscribe_required(False)
@@ -380,7 +387,14 @@ class EngineRuntime:
                 await self.state.set_ibkr_health(
                     ConnectionStatus.FAILED, f"TWS: {type(exc).__name__}"
                 )
-                if attempts >= self.settings.ibkr_reconnect_max_attempts:
+                maintenance_recovery = (
+                    isinstance(exc, (TimeoutError, ConnectionError, IbkrAdapterError))
+                    and await self.execution.maintenance_recovery_allowed()
+                )
+                if (
+                    attempts >= self.settings.ibkr_reconnect_max_attempts
+                    and not maintenance_recovery
+                ):
                     await self.state.add_alert(
                         AlertSeverity.CRITICAL,
                         "IBKR_RECONNECT_EXHAUSTED",
@@ -388,7 +402,11 @@ class EngineRuntime:
                         flashing=True,
                     )
                     return
-                await asyncio.sleep(self.settings.ibkr_reconnect_backoff_seconds)
+                await asyncio.sleep(
+                    min(15, max(1, self.settings.ibkr_reconnect_backoff_seconds) * attempts)
+                    if maintenance_recovery
+                    else self.settings.ibkr_reconnect_backoff_seconds
+                )
 
     async def _ibkr_market_data_supervisor_loop(self) -> None:
         """Recreate current-generation streams after a socket or farm recovery."""
@@ -1428,6 +1446,9 @@ class EngineRuntime:
             ),
             paused=snapshot.paused,
             kill_switch=snapshot.kill_switch,
+            maintenance_hold=self.execution.maintenance.blocks_entry(
+                self.execution.maintenance.now()
+            ),
             cross_venue_checks=cross_venue_checks,
         )
 

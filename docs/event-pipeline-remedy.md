@@ -1,5 +1,9 @@
 # Venue event overflow remedy — repository implementation
 
+Historical implementation and measurement report. The validation and rollout statements
+below describe the original work; see the [dated deployment record](../deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md)
+for later releases. Reproduction commands were updated for macOS on 2026-09-21.
+
 1. **Outcome and scope**
 
    This patch removes the measured per-tick bottleneck on IBKR and the repeated full-book copying cost shared by both venues. It is a local repository change. Production code, services, credentials, deployment configuration, and the existing 1 GiB container memory limit were not changed. No TWS or live Polymarket connection was used for validation.
@@ -55,13 +59,13 @@
 
    The combined run's IBKR buffer peaked at 378/10,000 and its maximum observed event-loop lag was 16.4 ms. All queues drained. Raw results: [IBKR](validation/event-pipeline-ibkr.json), [Polymarket](validation/event-pipeline-polymarket.json), [combined](validation/event-pipeline-mixed.json). Arrival targets were chosen for synthetic stress; production peak arrival rates have not been established. Disk SQLite, real venue latency, and a large historical ledger are not represented by these replay results.
 
-   Reproduce from the repository using the installed environment:
+   Rerun from the repository root using the [macOS environment](local-development-macos.md).
+   The timings above are historical Windows measurements, not Mac performance targets:
 
-   ```powershell
-   $env:PYTHONPATH = 'src'
-   .venv/Scripts/python.exe scripts/benchmark_event_pipeline.py --mode ibkr --events 30000 --rate 10000
-   .venv/Scripts/python.exe scripts/benchmark_event_pipeline.py --mode polymarket --events 30000 --rate 5000
-   .venv/Scripts/python.exe scripts/benchmark_event_pipeline.py --mode mixed --events 150000 --rate 2500
+   ```sh
+   uv run --locked python scripts/benchmark_event_pipeline.py --mode ibkr --events 30000 --rate 10000
+   uv run --locked python scripts/benchmark_event_pipeline.py --mode polymarket --events 30000 --rate 5000
+   uv run --locked python scripts/benchmark_event_pipeline.py --mode mixed --events 150000 --rate 2500
    ```
 
 6. **Validation and remaining operational work**

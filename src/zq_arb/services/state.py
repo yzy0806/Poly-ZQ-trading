@@ -961,6 +961,18 @@ class StateStore:
 
         await self._update_fields(apply)
 
+    async def set_maintenance(self, maintenance: dict[str, object]) -> None:
+        current = await self.get()
+        if current.metadata.get("maintenance") == maintenance:
+            return
+
+        def apply(snapshot: EngineSnapshot) -> EngineSnapshot:
+            return snapshot.model_copy(
+                update={"metadata": {**snapshot.metadata, "maintenance": maintenance}}
+            )
+
+        await self._update_fields(apply)
+
     async def set_operating_state(
         self,
         *,

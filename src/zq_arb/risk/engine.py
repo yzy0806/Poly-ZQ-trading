@@ -46,6 +46,7 @@ class GateContext(BaseModel):
     critical_alert_active: bool
     paused: bool
     kill_switch: bool
+    maintenance_hold: bool = False
     cross_venue_checks: tuple[GateCheck, ...] = ()
 
 
@@ -430,6 +431,16 @@ class RiskEngine:
             "==",
             False,
             "critical alert is active",
+        )
+        add(
+            "MAINTENANCE_HOLD",
+            "OPERATIONS",
+            "Scheduled maintenance hold",
+            not context.maintenance_hold,
+            context.maintenance_hold,
+            "==",
+            False,
+            "scheduled maintenance or regular weekend closure blocks new entries",
         )
         add(
             "PAUSE_STATE",

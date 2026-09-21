@@ -410,7 +410,7 @@ async def test_contradictory_position_during_refresh_pauses_immediately(live_fil
 async def test_full_refresh_timeout_survives_callback_gap_resolution(live_fill):
     h = live_fill
     await partial_fill_during_refresh(h)
-    h.c._ibkr_refresh_started -= h.settings.execution_request_timeout_seconds + 1
+    h.c._ibkr_refresh_started -= h.settings.ibkr_account_refresh_timeout_seconds + 1
     with pytest.raises(TimeoutError):
         await h.c.check_ibkr_refresh_timeout()
     current = await h.state.get()
@@ -576,7 +576,7 @@ async def test_independent_fault_interrupts_pending_gap_immediately(
 async def test_refresh_timeout_cannot_be_cleared_by_late_end_markers(live_fill):
     h = live_fill
     assert await h.c.begin_ibkr_reconciliation(9004)
-    h.c._ibkr_refresh_started -= h.settings.execution_request_timeout_seconds + 1
+    h.c._ibkr_refresh_started -= h.settings.ibkr_account_refresh_timeout_seconds + 1
     with pytest.raises(TimeoutError):
         await h.c.check_ibkr_refresh_timeout()
     await h.c.handle_ibkr_event(event(h, "position", position="23"))

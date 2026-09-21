@@ -1,6 +1,11 @@
 **Plan: prevent false trading pauses during IBKR fill reconciliation**
 
-Prepared and approved 2026-09-11. Status: implemented locally. The plan below records the approved design; implementation validation is in `docs/validation/ibkr-callback-reconciliation.md`. The required timeout was added to the local and example environments. The running trading process and live ledger were not changed or restarted during implementation.
+Historical plan prepared and approved 2026-09-11. Status at implementation: completed locally. The plan below records the approved design; implementation validation is in `docs/validation/ibkr-callback-reconciliation.md`. The required timeout was added to the local and example environments. The running trading process and live ledger were not changed or restarted during implementation.
+
+Subsequent callback deployment and validation are recorded in the
+[production record](../../deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md) and
+[September 14 follow-up](../validation/ibkr-callback-refresh-2026-09-14.md).
+The implementation/deployment statements below refer to the original work, not current VPS status.
 
 1. **Problem and evidence**
 

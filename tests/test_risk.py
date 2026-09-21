@@ -63,6 +63,14 @@ def test_every_clear_gate_allows_paper_qualification(settings: Settings) -> None
     assert result.reasons == ()
 
 
+def test_maintenance_blocks_an_otherwise_qualified_opportunity(settings):
+    paper = settings.model_copy(update={"run_mode": RunMode.PAPER})
+    context = clear_context().model_copy(update={"maintenance_hold": True})
+    result = RiskEngine(paper).qualify(profitable_opportunity(), context)
+    assert not result.tradeable
+    assert any(check.code == "MAINTENANCE_HOLD" for check in result.checks)
+
+
 @pytest.mark.parametrize("held,allowed", [(23, True), (24, True), (25, False)])
 def test_one_contract_entry_respects_total_25_contract_cap(settings, held, allowed):
     configured = settings.model_copy(

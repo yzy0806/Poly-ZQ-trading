@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import type { EngineSnapshot } from '../types'
 import { Header } from './Header'
@@ -21,6 +21,20 @@ function snapshot(update: Partial<EngineSnapshot> = {}): EngineSnapshot {
 }
 
 describe('Header operating status', () => {
+  afterEach(cleanup)
+
+  it('shows maintenance without hiding operator pause or halt', () => {
+    const maintenance = { active: true, reopen_at: '2026-09-14T22:00:00Z', reason: 'Scheduled maintenance' }
+    const state = snapshot({ metadata: { maintenance } })
+    const { rerender } = render(<Header state={state} onControl={() => undefined} />)
+    expect(screen.getByText('ARMED · MAINTENANCE')).toBeTruthy()
+    expect(screen.getByText(/Scheduled reopening/)).toBeTruthy()
+    rerender(<Header state={{ ...state, paused: true, armed: false }} onControl={() => undefined} />)
+    expect(screen.getByText('PAUSED')).toBeTruthy()
+    rerender(<Header state={{ ...state, kill_switch: true }} onControl={() => undefined} />)
+    expect(screen.getByText('HALTED')).toBeTruthy()
+  })
+
   it('shows an armed system waiting for qualification', () => {
     render(<Header state={snapshot()} onControl={() => undefined} />)
 

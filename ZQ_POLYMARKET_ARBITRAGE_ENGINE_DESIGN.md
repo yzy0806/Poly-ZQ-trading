@@ -1,9 +1,31 @@
 # ZQ–Polymarket Arbitrage Engine
 
-Version: 0.6 Approved for READ_ONLY and PAPER Implementation<br>
-Date: 2026-09-04<br>
-Status: READ_ONLY and PAPER implementation authorized; live trading remains unauthorized
+Version: 0.6 historical design baseline<br>
+Design date: 2026-09-04; documentation context reviewed 2026-09-21<br>
+Status at the design date: READ_ONLY and PAPER implementation authorized; live trading remained unauthorized
 Primary reference strategy: September 16, 2026 FOMC decision, September 2026 30-Day Federal Funds futures (`ZQU6`)
+
+## How to use this historical design
+
+This document preserves the original strategy model, decisions, and approval history.
+Subsequent implementation and production changes supersede several operational statements
+below. Use the [README](README.md) and [macOS setup guide](docs/local-development-macos.md)
+for current development, and the [dated production record](deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md)
+for deployed state and release acceptance.
+
+| Original design statement | Current implementation / record |
+|---|---|
+| READ_ONLY/PAPER-only authorization | Later live deployment is recorded in the production runbook; the original approval boundary describes its own date. |
+| Restart forces READ_ONLY | Startup retains the configured run mode but always starts disarmed and requires fresh reconciliation. New bootstrap configuration is READ_ONLY. |
+| Fixed 10-contract child and 100-contract position | Child quantity and position cap are configured. The code caps the latter at 100; September 14 production used 5 and 60, while the bootstrap example uses 10 and 20. |
+| Exact lowest-ask depth for both hedge legs | INC25 uses the lowest ask; INC50PLUS may also consume exactly one tick above it within its cap. See the README for actual price/quantity accounting. |
+| Credential setup and reserved builder fields | The current SDK authentication/optional relayer configuration is described in the README. Old provisioning attempts below are historical records, not current setup instructions. |
+| Planned local-only deployment | Native macOS development and the Linux container/VPS deployment have separate runbooks. |
+| September 16 event and entry window | The configured entry cutoff has passed as of September 21. The historical market mapping is not an automatic next-meeting configuration. |
+
+The execution-safety guide and its dated validation records also cover later ledger,
+callback-reconciliation, opening-inventory, and maintenance work. None of these documents
+replace the required runtime gates or an operator's trading authorization.
 
 ## 1. Executive Decision
 

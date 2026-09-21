@@ -1,5 +1,11 @@
 **IBKR callback reconciliation validation — 2026-09-11**
 
+Historical implementation evidence. For subsequent publication and deployment, see the
+[September 14 follow-up](ibkr-callback-refresh-2026-09-14.md) and the
+[dated production record](../../deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md).
+References below to local files, unavailable Docker, and pending deployment describe the
+original validation session.
+
 1. **Reproduced incident.** A temporary database starts with verified opening inventory of 23 ZQ and the two Polymarket positions. The pre-fix regression test failed when a known one-contract order's position callback arrived before its execution: the engine disarmed immediately. The implementation passes all six permutations of position, execution, and status callbacks without a lasting pause, records exactly one IBKR execution and two hedge obligations, and reaches CLEAN after confirmed hedge evidence.
 
 2. **Additional behavior.** Tests cover terminal and delayed working callbacks; a fresh read that still conflicts; unique execution request IDs; overlapping refresh prevention; stale completion markers; independent deadline expiry without incoming callbacks; duplicate callbacks that cannot extend the deadline; unknown orders, executions, foreign clients, and identity conflicts during a pending gap; partial fills and late fills after cancellation; manual pause preservation; restart disarming; and rejection of cached clean authorization during a refresh. Existing execution recovery, inventory, hedge reservation, risk, and shutdown tests also pass.

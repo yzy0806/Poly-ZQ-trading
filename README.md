@@ -2,9 +2,21 @@
 
 Production-oriented Python and TypeScript implementation of the approved September 2026 ZQ/Polymarket design. The repository is deliberately fail-closed: source checkout, dependency installation, process restart, missing credentials, unqualified subscriptions, or unsynchronized books cannot enable live orders.
 
-## Authorized Stage
+## Current scope and documentation
 
-Implementation is authorized through `READ_ONLY` and `PAPER`. The local `.env` disables both venue order paths. Live trading is not authorized.
+The code supports read-only, paper, and gated live operation. New installations default to
+`READ_ONLY` with submission disabled; an existing local `.env` may have different settings.
+Every engine process starts disarmed, including when its configured mode is live.
+
+- [macOS development](docs/local-development-macos.md): workstation setup, configuration, tests, and local startup.
+- [Deployment and production readiness](deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md): dated VPS observations, approved production limits, and release acceptance.
+- [Execution safety](docs/execution-safety.md): ledger identity, reconciliation, halt, and recovery.
+- [Original strategy design](ZQ_POLYMARKET_ARBITRAGE_ENGINE_DESIGN.md): historical design baseline and a guide to superseding implementation records.
+
+The example configuration still targets the September 16, 2026 FOMC event and September ZQ
+contract. Its entry cutoff has passed as of this documentation review on September 21.
+It remains useful for offline tests; a new event requires an explicit strategy/configuration
+review, including market identities, rules, dates, and contract months.
 
 ## Repository Layout
 
@@ -23,55 +35,46 @@ tests/                   Deterministic unit, integration, and safety tests
 scripts/                 Controlled operational and connectivity checks
 ```
 
-## Local Setup
+## Local setup on macOS
 
-1. Keep the real `.env` untracked and local. Every runtime parameter is loaded from that file or an operating-system secret injected under the same variable name.
+Use Terminal with zsh. Run commands from the Git repository root: `code/` in the current
+OneDrive workspace, where `pyproject.toml` and `uv.lock` live. Follow the
+[macOS guide](docs/local-development-macos.md) first to select Python 3.12 and Node 24,
+rebuild native dependencies, and configure paths outside OneDrive for runtime data.
 
-Runtime, tests, schema validation, and operational scripts use the same local `.env` as their single configuration source.
+After that setup, the offline checks matching CI are:
 
-2. Confirm that `IBKR_PYTHON_API_PATH` points to the official TWS Python API installation. The current machine uses TWS API 10.39.1 at `C:/TWS API/source/pythonclient`.
-
-3. Create and synchronize the Python environment:
-
-```powershell
-$env:UV_CACHE_DIR='.uv-cache'
-uv sync --extra dev
+```sh
+uv run --locked ruff check src tests
+uv run --locked mypy src
+uv run --locked pytest
+(cd web && npm run lint && npm test -- --run && npm run build)
 ```
 
-4. Install the dashboard dependencies:
+Tests load the non-secret `deploy/zq-arb.env.example` fixture and use isolated databases and
+mocked venues. They do not require a credentialed `.env`, TWS, or the official IBKR API files.
+Run them from a shell without exported trading settings, which can override fixture values.
+The additional `uv run --locked pytest --cov` check enforces the configured 85% threshold;
+the current GitHub Actions job runs pytest without coverage. CI types `src`, not `tests`.
 
-```powershell
-Set-Location web
-npm ci
+Only after completing the guide's local configuration and optional read-only connectivity
+check, start these in **two separate terminals**, each initially at the repository root:
+
+```sh
+# Terminal 1: backend
+uv run --locked zq-arb
 ```
 
-5. Run backend validation and tests:
-
-```powershell
-uv run ruff check src tests
-uv run mypy src tests
-uv run pytest --cov
-```
-
-6. Run the public-data and TWS paper connectivity check without placing orders:
-
-```powershell
-uv run python scripts/smoke_read_only.py
-```
-
-7. Start the backend and dashboard:
-
-```powershell
-uv run zq-arb
-Set-Location web
+```sh
+# Terminal 2: dashboard
+cd web
 npm run dev
 ```
 
-The dashboard is served at the origin configured by `DASHBOARD_ORIGIN`. The backend binds only to `API_HOST` and `API_PORT` from `.env`.
-
-The coverage gate applies to deterministic pricing, risk, state, security, persistence, and public-data code. The official IBKR callback bridge, long-running orchestration loops, and process entrypoint are excluded from line coverage and are verified by the read-only integration smoke test. That smoke test contains no routing order call; when `IBKR_ACCOUNT_ID` is configured it requests one non-routing `whatIf=True` margin preview.
-
-Before starting the operator terminal, fill the still-required local values for `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, `SESSION_SIGNING_KEY`, `CONTROL_CONFIRMATION_SECRET`, and `IBKR_ACCOUNT_ID`. Authenticated CLOB values remain unnecessary for the current `READ_ONLY` stage.
+The local dashboard is at `http://127.0.0.1:5173`; Vite proxies API and WebSocket requests to
+the backend port from the root `.env` (8765 by default). `DASHBOARD_ORIGIN` and
+`CORS_ALLOWED_ORIGINS` must match that origin; they do not configure Vite's listening port.
+The backend binds to `API_HOST` and `API_PORT`.
 
 ## Market Data and Signal Authority
 
@@ -87,11 +90,11 @@ Before starting the operator terminal, fill the still-required local values for 
 
 6. A TWS socket connection does not by itself qualify a quote. Qualification also requires market-data type 1, the current subscription generation, an active subscription, a healthy relevant `usfuture*` market-data farm, and a complete uncrossed bid/ask rebuilt after startup or reconnect. The dashboard displays provisional calculations but marks them `NOT EXECUTION-QUALIFIED` whenever those gates are incomplete.
 
-7. The latest IBKR `BUY 10 ZQU6` what-if margin preview is requested no faster than once per minute and refreshed after connectivity recovery or a changed candidate. The dashboard shows `REFRESHING` while awaiting a matching response. It never uses an expired raw `AVAILABLE` response or substitutes zero margin for committed-capital and return calculations.
+7. The latest IBKR BUY what-if margin preview for the configured child quantity and ZQ contract is requested no faster than once per minute and refreshed after connectivity recovery or a changed candidate. The dashboard shows `REFRESHING` while awaiting a matching response. It never uses an expired raw `AVAILABLE` response or substitutes zero margin for committed-capital and return calculations.
 
 8. IBKR open and completed orders, `execId` history, and the target-contract position are reconciled with authenticated Polymarket orders, trades, and event-token positions after startup, reconnect, and periodically. Execution events invalidate the previous clean result. Missing, stale, or incomplete evidence is `UNKNOWN`; unexplained inventory, orders, or excess fills block new entries and cancel working strategy ZQ orders.
 
-9. `IBKR_COMMISSION_ESTIMATE=3.64` is the conservative per-contract round-trip ZQ cost floor derived from the published non-member low-volume schedule. For a 10-contract batch the model deducts at least `$36.40`; twice a higher current IBKR entry what-if commission overrides that floor.
+9. `IBKR_COMMISSION_ESTIMATE` sets the per-contract round-trip ZQ cost floor (3.64 in the example environment). At that setting a five-contract batch deducts at least `$18.20`; twice a higher current IBKR entry what-if commission overrides that floor. This configured estimate is not a fresh verification of broker pricing.
 
 10. The cross-venue portfolio aggregates every durable strategy execution, compares the result with venue-reported quantities, and marks long ZQ and Polymarket Yes holdings to their executable best bids every 500 milliseconds. Its combined unrealized P&L is gross of commissions and fees and remains informational.
 
@@ -101,9 +104,9 @@ Before starting the operator terminal, fill the still-required local values for 
 
 2. `ARM` authorizes the engine to wait for a qualifying entry; it does not require the current snapshot to be profitable and it does not itself place an order. The dashboard distinguishes `ARMED · WAITING`, `ARMED · READY`, and `ARMED · WORKING`. Structural routing blockers such as read-only or shadow mode, emergency halt, disabled venue submission, or a disabled live-trading switch reject the action with their exact cause.
 
-3. Exactly 10 ZQ contracts are permitted per child batch, only one batch may be active, and aggregate exposure is capped at 100. The aggregate ZQ position comes from authenticated IBKR portfolio callbacks and therefore includes both hedged and unhedged contracts. A new batch is prohibited whenever any durable hedge obligation remains below its required confirmed share quantity, even if that obligation is not part of the batch currently displayed.
+3. `IBKR_ZQ_CHILD_ORDER_QUANTITY` sets the original child quantity, only one batch may be active, and `MAX_ZQ_POSITION` caps aggregate exposure (with a code ceiling of 100). The September 14 production record specifies five-contract children and a 60-contract cap; the bootstrap example uses 10 and 20. The aggregate ZQ position comes from authenticated IBKR portfolio callbacks and therefore includes both hedged and unhedged contracts. A new batch is prohibited whenever any durable hedge obligation remains below its required confirmed share quantity, even if that obligation is not part of the batch currently displayed.
 
-4. ZQ orders are `BUY LMT/DAY` at the qualified best bid and are never automatically repriced. If the still-resting quantity no longer passes the scaled profit, return, fee, and exact-ask hedge-size gates, only that unfilled remainder is cancelled. Once IBKR confirms the cancellation and every fill is hedged and reconciled, the still-armed engine may submit a fresh 10-contract order when a later snapshot passes every gate.
+4. ZQ orders are `BUY LMT/DAY` at the qualified best bid and are never automatically repriced. If the still-resting quantity no longer passes the scaled profit, return, fee, and exact-ask hedge-size gates, only that unfilled remainder is cancelled. Once IBKR confirms the cancellation and every fill is hedged and reconciled, the still-armed engine may submit a fresh order for the configured child quantity when a later snapshot passes every gate.
 
 5. Version 1 is structurally long-only: the engine can submit only `BUY` ZQ entries and may hedge confirmed fills only by buying the approved Polymarket Yes legs. Bid-side and No-token data are diagnostic and cannot create an order.
 
@@ -138,8 +141,9 @@ Before starting the operator terminal, fill the still-required local values for 
 ## VPS deployment
 
 The production container, immutable GHCR workflow, loopback-only Compose service, fail-closed
-environment template, and SQLite backup timer are documented in `deploy/README.md`. The initial VPS
-release remains `READ_ONLY`; deployment does not authorize paper or live order submission.
+environment template, and SQLite backup timer are documented in [deploy/README.md](deploy/README.md). A new bootstrap starts `READ_ONLY`;
+existing deployments retain their configured mode and start disarmed. See the
+[dated deployment record](deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md) for production status.
 
 ## Event pipeline performance and recovery
 
@@ -156,17 +160,18 @@ The September 2026 overflow remedy, safety boundaries, authenticated event diagn
 4. Builder credentials are unnecessary for this configuration. Remove obsolete `POLYMARKET_BUILDER_API_KEY`, `POLYMARKET_BUILDER_API_SECRET`, `POLYMARKET_BUILDER_API_PASSPHRASE`, `POLYMARKET_BUILDER_CODE`, `POLYMARKET_RELAYER_HOST`, and `POLYMARKET_RELAYER_TX_TYPE` from environment files when adopting this version. They were previously declared but unused. The official SDK selects its relayer endpoint and wallet transaction type. Unknown environment variables remain rejected to catch configuration mistakes.
 
 5. The integration follows the [official Python SDK](https://docs.polymarket.com/getting-started/python) and [wallet authentication documentation](https://docs.polymarket.com/trading/wallets-auth). Automated authentication tests replace the SDK network boundary; they do not create live credentials or submit wallet transactions.
-# Local Polymarket credential diagnostic
+
+## Local Polymarket credential diagnostic
 
 For an operator-run five-share real-order test, see
 [Manual Polymarket order test](docs/manual-polymarket-order-test.md). The script
 provides preview, placement and cancellation commands; it does not start the engine.
 
-From the repository directory, run in PowerShell:
+From a configured, unsynchronized development checkout in macOS Terminal:
 
-```powershell
-$env:PYTHONPATH='src'
-.venv/Scripts/python.exe scripts/check_polymarket_auth.py
+```sh
+uv run --locked python scripts/check_polymarket_auth.py \
+  --output "$HOME/Library/Application Support/ZQArb/diagnostics/polymarket-auth-check.json"
 ```
 
 This uses the local `.env` to check that the private key matches the configured signer,
@@ -178,11 +183,12 @@ SDK's create-or-derive credential flow; its only POST is `/auth/api-key`.
 Explicit credentials are tested as supplied, without silently replacing them.
 
 The command prints and saves HTTP statuses and JSON response bodies to
-`runtime/polymarket-auth-check.json`, with credentials/signatures redacted. Exit 0
+the selected output file, with credentials/signatures redacted. Without `--output`, the default is
+`runtime/polymarket-auth-check.json` relative to the working directory. Exit 0
 means both checks passed; exit 1 indicates failure or incomplete verification.
 Network failures are local errors, not venue responses. Non-JSON response bodies
 are withheld because they cannot be safely redacted. The report can contain wallet
-addresses, balances and open orders, so it stays in the ignored runtime directory.
+addresses, balances and open orders; keep it outside Git and cloud-synchronized folders.
 Use `--env-file` and `--output` to select different local paths.
 Add `--include-history` to test authenticated CLOB trade history (first page) and
 public Polymarket wallet activity (latest 20 records, including transaction hashes).

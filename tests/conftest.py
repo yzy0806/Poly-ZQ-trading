@@ -15,6 +15,8 @@ def settings() -> Settings:
     return configured.model_copy(
         update={
             "effr_source": "MANUAL",
+            # Other suites must not depend on the wall-clock trading session.
+            "ibkr_maintenance_enabled": False,
             "cookie_secure": False,
             "polymarket_funder_address": SecretStr("0x0000000000000000000000000000000000000001"),
             "pre_meeting_effr_percent": Decimal("3.625"),

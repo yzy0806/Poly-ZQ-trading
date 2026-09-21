@@ -7,13 +7,18 @@ specified order. It is separate from the strategy engine and does not connect to
 IBKR. Do not run it alongside a strategy trading the same account: these manual
 orders are recorded in a separate journal, outside the coordinator's ledger.
 
+The examples use macOS Terminal and the installed environment from
+[local development](local-development-macos.md). The repository's example event is
+September 16, 2026 and its configured entry cutoff has passed. These commands describe
+the tool; review the intended market mapping and authorization before a new real-order test.
+
 The script was tested with mocked venue calls only. No real order was submitted
 during development. The paper script remains available for local simulation.
 
 ## Configuration
 
-Use a separate local `.env.order-test` if the engine should retain its current
-configuration. `--env-file` selects it; the script never edits environment files.
+Use a separate `.env.order-test` in an unsynchronized checkout if the engine should
+retain its current configuration, or pass an absolute path to a protected file outside OneDrive. `--env-file` selects it; the script never edits environment files.
 Real placement and cancellation require the following settings in the selected file:
 
 ```dotenv
@@ -31,11 +36,12 @@ prove order acceptance. No approvals or wallet setup transactions are requested.
 
 ## Preview
 
-From the `code` directory in PowerShell:
+From the repository root (`code/` in the current workspace) in macOS Terminal:
 
-```powershell
-$env:PYTHONPATH='src'
-.venv/Scripts/python.exe scripts/test_polymarket_order.py --env-file .env.order-test preview --leg INC50PLUS --outcome YES --best-ask --max-price 0.10
+```sh
+uv run --locked python scripts/test_polymarket_order.py --env-file .env.order-test \
+  --output-dir "$HOME/Library/Application Support/ZQArb/manual-order-tests" \
+  preview --leg INC50PLUS --outcome YES --best-ask --max-price 0.10
 ```
 
 This example selects the configured September 50bp+ increase YES token. The 0.10
@@ -48,8 +54,10 @@ not authenticate or submit an order. To choose a fixed limit, replace
 
 Only run this command yourself when you intend to submit a real order:
 
-```powershell
-.venv/Scripts/python.exe scripts/test_polymarket_order.py --env-file .env.order-test place --leg INC50PLUS --outcome YES --best-ask --max-price 0.10 --test-id september-test-001 --confirm-real-money
+```sh
+uv run --locked python scripts/test_polymarket_order.py --env-file .env.order-test \
+  --output-dir "$HOME/Library/Application Support/ZQArb/manual-order-tests" \
+  place --leg INC50PLUS --outcome YES --best-ask --max-price 0.10 --test-id manual-test-001 --confirm-real-money
 ```
 
 Placement keeps the adapter's market mapping, eligibility, price cap, collateral
@@ -79,8 +87,10 @@ orders; verify fills from the venue order/trade history, not that field.
 
 Use the order ID returned by placement and a new journal ID:
 
-```powershell
-.venv/Scripts/python.exe scripts/test_polymarket_order.py --env-file .env.order-test cancel --order-id YOUR_ORDER_ID --test-id september-cancel-001 --confirm-real-money
+```sh
+uv run --locked python scripts/test_polymarket_order.py --env-file .env.order-test \
+  --output-dir "$HOME/Library/Application Support/ZQArb/manual-order-tests" \
+  cancel --order-id YOUR_ORDER_ID --test-id manual-cancel-001 --confirm-real-money
 ```
 
 Cancellation is confirmed only if the venue lists the order as canceled. A
@@ -89,8 +99,9 @@ Cancellation cannot reverse fills that already occurred.
 
 ## Results and interrupted attempts
 
-Each mutation requires a unique `--test-id`. Its JSON journal is stored under
-`runtime/manual-order-tests/`; existing IDs cannot be reused. Journals contain
+Each mutation requires a unique `--test-id`. The commands above store its JSON journal
+under the selected `--output-dir`, outside OneDrive. Without that option the default is
+`runtime/manual-order-tests/` relative to the working directory. Existing IDs cannot be reused. Journals contain
 the selected order details, authentication responses with credentials redacted,
 the eligibility country, raw parsed `blocked` value and decision reason,
 and the normalized adapter result. Signed order payloads are never logged.

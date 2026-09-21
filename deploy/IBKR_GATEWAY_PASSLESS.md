@@ -1,7 +1,8 @@
 # IB Gateway and Passless operations
 
 Verified on 14 September 2026 on VPS **78.142.195.87** (`s62219`, Debian 13, x86_64).
-This describes the installed production configuration. The generic `install_vps.sh` bootstrap
+macOS access instructions reviewed on 21 September 2026; VPS state was not rechecked.
+This describes the recorded installed production configuration. The generic `install_vps.sh` bootstrap
 does not provision Passless on a new host.
 
 ## Automatic startup and ownership
@@ -27,22 +28,22 @@ Service startup was verified and the units were validated. A full host reboot an
 daily/weekly authentication recovery have **not** been tested. The installed login remains
 attended: an available virtual device does not automatically unlock its encrypted credential store.
 
-## Access from Windows
+## Access from macOS
 
 | Browser port | Purpose | Possible prompt |
 |---|---|---|
 | `6080` | IB Gateway desktop | Gateway VNC password; IBKR authentication screen |
 | `6090` | Passless approval desktop | GPG storage passphrase; authentication approval |
 
-Both services remain bound to loopback on the VPS. The Windows `127.0.0.1` addresses work only
-while an SSH local-forward connection is running. From a **local Windows PowerShell terminal**,
+Both services remain bound to loopback on the VPS. The Mac browser's `127.0.0.1` addresses work only
+while an SSH local-forward connection is running. From a **local macOS Terminal (zsh)**,
 with both local ports free, run:
 
-```powershell
+```sh
 ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:6080:127.0.0.1:6080 -L 127.0.0.1:6090:127.0.0.1:6090 root@78.142.195.87
 ```
 
-Keep that terminal connection running, then open both desktops:
+Keep that terminal connection running, then open both desktops in your Mac browser:
 
 1. [Gateway desktop](http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale).
 2. [Passless desktop](http://127.0.0.1:6090/vnc.html?autoconnect=true&resize=scale).
@@ -50,13 +51,24 @@ Keep that terminal connection running, then open both desktops:
 Reuse existing forwards instead of starting duplicates. If 6080 is already forwarded and only
 6090 is missing, use a separate local terminal with:
 
-```powershell
+```sh
 ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 127.0.0.1:6090:127.0.0.1:6090 root@78.142.195.87
 ```
 
-If Windows restarts or the SSH connection closes, reopen the required tunnel. This restores
+If the Mac restarts, sleeps and loses its connection, or the SSH connection closes, reopen the required tunnel. This restores
 workstation access; it does not start Passless. Closing either browser tab does not stop the VPS
 services, but keep the approval desktop open during authentication so prompts are visible.
+
+From a second local Mac terminal, the same browser pages can be opened with:
+
+```sh
+open 'http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale'
+open 'http://127.0.0.1:6090/vnc.html?autoconnect=true&resize=scale'
+```
+
+Quote these URLs because `&` has a special meaning in the shell. SSH uses the Mac's own
+keys/configuration; a Windows key-file path does not carry over. If authentication fails,
+configure the approved key for this workstation rather than changing VPS authentication.
 
 ## Fresh Gateway login
 
@@ -88,7 +100,7 @@ restarting the engine; a Gateway reconnect is not evidence that venue state is r
 
 If the engine has exhausted its IBKR reconnect attempts, complete Gateway login first. For a
 confirmed-disarmed engine with no unfinished batch, restart it with enough time for the configured
-20-second shutdown drain:
+20-second shutdown drain. Run this **on the VPS**, after connecting over SSH:
 
 ```sh
 sudo docker restart -t 35 zq-arb-engine

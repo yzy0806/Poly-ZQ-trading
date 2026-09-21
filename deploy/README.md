@@ -10,6 +10,10 @@ implemented fixes, dated VPS validation, accepted deferrals, and outstanding ope
 The [combined release acceptance procedure](CURRENT_DEPLOYMENT_AND_SECURITY.md#12-release-acceptance-and-recovery-procedure)
 applies alongside the deployment commands below.
 
+For native workstation setup, use [macOS development](../docs/local-development-macos.md).
+Host preparation, service management, and rollout commands below run on the **Linux VPS**,
+not in a local Mac terminal. Connect from the Mac with `ssh root@78.142.195.87` first.
+
 ## Safety state
 
 The bootstrap configuration is `READ_ONLY`. `LIVE_TRADING_ENABLED`,
@@ -34,13 +38,22 @@ application no longer supplies fallback values for them:
 
 ```dotenv
 EXECUTION_REQUEST_TIMEOUT_SECONDS=10
+IBKR_ACCOUNT_REFRESH_TIMEOUT_SECONDS=30
+IBKR_MAINTENANCE_ENABLED=true
+IBKR_MAINTENANCE_TIMEZONE=America/Chicago
+IBKR_MAINTENANCE_START=16:00
+IBKR_MAINTENANCE_END=17:00
+IBKR_GATEWAY_RESTART_TIME=16:10
+IBKR_MAINTENANCE_DRAIN_SECONDS=60
+IBKR_MAINTENANCE_RECOVERY_SECONDS=300
 RECONCILIATION_MAX_AGE_SECONDS=60
+IBKR_CALLBACK_SETTLE_SECONDS=2
 SHUTDOWN_DRAIN_SECONDS=20
 ```
 
 ## Initial host preparation
 
-Copy the repository deployment directory to `/opt/zq-arb`, then run:
+Copy the repository `deploy/` directory to `/opt/zq-arb/deploy/` on the VPS, then run there:
 
 ```sh
 sudo /opt/zq-arb/deploy/install_vps.sh
@@ -110,8 +123,8 @@ Gateway's apply service starts after Passless and attaches the current virtual H
 
 Gateway's desktop is on port **6080**. A fresh passkey login can require the operator to unlock
 the encrypted Passless store and approve authentication on **6090**. These localhost browser
-addresses depend on an SSH tunnel from Windows; reopen the tunnel if its connection ends or
-Windows restarts. Automatic service startup does not make login fully unattended.
+addresses depend on an SSH tunnel from the Mac; reopen the tunnel if its connection ends,
+the Mac restarts, or sleep interrupts the connection. Automatic service startup does not make login fully unattended.
 
 See [IBKR_GATEWAY_PASSLESS.md](IBKR_GATEWAY_PASSLESS.md) for the two-port SSH command, password
 distinctions, login procedure, and service checks. The last verified production state and image

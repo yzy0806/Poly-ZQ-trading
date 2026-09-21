@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, time
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -67,6 +68,14 @@ class Settings(BaseSettings):
     sqlite_busy_timeout_ms: int = 5_000
     sqlite_wal_autocheckpoint_pages: int = 1_000
     execution_request_timeout_seconds: int = Field(ge=1, le=20)
+    ibkr_account_refresh_timeout_seconds: int = Field(ge=1, le=120)
+    ibkr_maintenance_enabled: bool
+    ibkr_maintenance_timezone: str
+    ibkr_maintenance_start: time
+    ibkr_maintenance_end: time
+    ibkr_gateway_restart_time: time
+    ibkr_maintenance_drain_seconds: int = Field(ge=1, le=600)
+    ibkr_maintenance_recovery_seconds: int = Field(ge=1, le=900)
     reconciliation_max_age_seconds: int = Field(ge=5, le=300)
     ibkr_callback_settle_seconds: float = Field(gt=0, le=10)
     shutdown_drain_seconds: int = Field(ge=1, le=25)
@@ -251,6 +260,26 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def enforce_safety_invariants(self) -> Self:
         errors: list[str] = []
+        try:
+            ZoneInfo(self.ibkr_maintenance_timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            errors.append("IBKR_MAINTENANCE_TIMEZONE must be a valid IANA time zone")
+        maintenance_times = (
+            self.ibkr_maintenance_start,
+            self.ibkr_gateway_restart_time,
+            self.ibkr_maintenance_end,
+        )
+        if any(value.tzinfo is not None for value in maintenance_times):
+            errors.append("IBKR maintenance times must be local times without UTC offsets")
+        elif not maintenance_times[0] < maintenance_times[1] < maintenance_times[2]:
+            errors.append("IBKR maintenance start must precede Gateway restart and end")
+        start_seconds = (
+            self.ibkr_maintenance_start.hour * 3600
+            + self.ibkr_maintenance_start.minute * 60
+            + self.ibkr_maintenance_start.second
+        )
+        if start_seconds < self.ibkr_maintenance_drain_seconds:
+            errors.append("IBKR maintenance drain must begin on the same local calendar day")
         if self.env_file_version != 9:
             errors.append("ENV_FILE_VERSION must be 9")
         if self.api_workers != 1:

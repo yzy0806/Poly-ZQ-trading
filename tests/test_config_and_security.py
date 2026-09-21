@@ -52,6 +52,44 @@ def test_live_mode_requires_an_explicit_ibkr_account(settings: Settings) -> None
     assert "IBKR_ACCOUNT_ID is absent" in configured.live_readiness_errors()
 
 
+@pytest.mark.parametrize("seconds", [0, -1, 121])
+def test_account_refresh_timeout_is_bounded(settings, seconds):
+    payload = settings_payload(settings)
+    payload["ibkr_account_refresh_timeout_seconds"] = seconds
+    with pytest.raises(ValidationError, match="ibkr_account_refresh_timeout_seconds"):
+        Settings.model_validate(payload)
+
+
+def test_account_refresh_timeout_is_explicit_and_independent(settings, monkeypatch):
+    payload = settings_payload(settings)
+    payload["ibkr_account_refresh_timeout_seconds"] = 30
+    configured = Settings.model_validate(payload)
+    assert configured.execution_request_timeout_seconds == 10
+    assert configured.ibkr_callback_settle_seconds == 2
+    monkeypatch.delenv("IBKR_ACCOUNT_REFRESH_TIMEOUT_SECONDS", raising=False)
+    payload.pop("ibkr_account_refresh_timeout_seconds")
+    with pytest.raises(ValidationError, match="ibkr_account_refresh_timeout_seconds"):
+        Settings(_env_file=None, **payload)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("ibkr_maintenance_timezone", "Missing/Timezone"),
+        ("ibkr_gateway_restart_time", "18:00"),
+        ("ibkr_maintenance_start", "16:00+08:00"),
+        ("ibkr_maintenance_start", "00:00"),
+        ("ibkr_maintenance_drain_seconds", 0),
+        ("ibkr_maintenance_recovery_seconds", 0),
+    ],
+)
+def test_maintenance_configuration_rejects_invalid_schedule(settings, field, value):
+    payload = settings_payload(settings)
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        Settings.model_validate(payload)
+
+
 def test_subscription_months_are_target_plus_two_diagnostics(
     settings: Settings,
 ) -> None:
