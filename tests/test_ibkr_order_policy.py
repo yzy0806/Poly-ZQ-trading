@@ -119,8 +119,8 @@ def test_ibkr_cancellations_use_typed_order_cancel_payload(settings: Settings) -
 
     adapter._event_queue_overflowed = True
     adapter.cancel_order(915)
-    adapter.cancel_margin_preview(7001)
+    adapter.finish_margin_preview(7001)
 
     calls = adapter._client.cancelOrder.call_args_list
-    assert [call.args[0] for call in calls] == [915, 7001]
+    assert [call.args[0] for call in calls] == [915]
     assert all(isinstance(call.args[1], FakeOrderCancel) for call in calls)

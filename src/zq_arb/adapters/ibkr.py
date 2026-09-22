@@ -77,7 +77,10 @@ class IbkrAdapter:
         self._request_to_month: dict[int, str] = {}
         self._stream_request_ids: set[int] = set()
         self._margin_preview_context: dict[int, dict[str, Any]] = {}
-        self._completed_margin_preview_ids: deque[int] = deque(maxlen=100)
+        # Keep issued identities for this adapter's lifetime, including reconnects.
+        # Order IDs are monotonic; evicting an old preview can turn a late callback
+        # into an unexplained live order. Retain only integers after completion.
+        self._margin_preview_ids: set[int] = set()
         self._stopped = False
         self._pnl_requested = False
         self._event_queue_overflowed = False
@@ -186,8 +189,12 @@ class IbkrAdapter:
 
             def error(self, *args: Any) -> None:
                 req_id, code, message, advanced = adapter._normalize_error(args)
-                if req_id is not None and req_id in adapter._completed_margin_preview_ids:
-                    adapter._completed_margin_preview_ids.remove(req_id)
+                if (
+                    req_id in adapter._margin_preview_ids
+                    and req_id not in adapter._margin_preview_context
+                    and code in {202, 10147, 10148}
+                ):
+                    # A cancellation acknowledgement must not erase classification.
                     return
                 month = adapter._request_to_month.get(req_id) if req_id is not None else None
                 preview = adapter._margin_preview_context.get(req_id or -1)
@@ -196,7 +203,9 @@ class IbkrAdapter:
                     {
                         "request_id": req_id,
                         "month": month,
-                        "margin_preview": preview is not None,
+                        "margin_preview": preview is not None or (
+                            req_id in adapter._margin_preview_ids and code == 201
+                        ),
                         "margin_preview_context": preview,
                         "code": code,
                         "message": message,
@@ -244,7 +253,13 @@ class IbkrAdapter:
                 )
 
             def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:
-                context = adapter._margin_preview_context.get(orderId)
+                is_preview = adapter._is_margin_preview_order(orderId, order)
+                context = adapter._margin_preview_context.get(orderId) if is_preview else None
+                if is_preview and context is None:
+                    LOGGER.info(
+                        "ibkr_margin_preview_late_callback", order_id=orderId, kind="open_order"
+                    )
+                    return
                 if context is None:
                     with adapter._order_id_lock:
                         adapter._next_order_id = max(adapter._next_order_id or 0, orderId + 1)
@@ -266,6 +281,7 @@ class IbkrAdapter:
                             "quantity": str(getattr(order, "totalQuantity", "")),
                             "limit_price": str(getattr(order, "lmtPrice", "")),
                             "order_ref": str(getattr(order, "orderRef", "")),
+                            "what_if": bool(getattr(order, "whatIf", False)),
                             "status": str(getattr(orderState, "status", "")),
                         },
                     )
@@ -307,6 +323,8 @@ class IbkrAdapter:
                 adapter._emit("open_order_end", {})
 
             def completedOrder(self, contract: Any, order: Any, orderState: Any) -> None:
+                if adapter._is_margin_preview_order(getattr(order, "orderId", None), order):
+                    return
                 adapter._emit(
                     "completed_order",
                     {
@@ -359,10 +377,8 @@ class IbkrAdapter:
 
             def orderStatus(self, *args: Any) -> None:
                 order_id = int(args[0]) if args else -1
-                if (
-                    order_id in adapter._margin_preview_context
-                    or order_id in adapter._completed_margin_preview_ids
-                ):
+                client_id = args[8] if len(args) > 8 else None
+                if adapter._is_margin_preview_id(order_id, client_id):
                     return
                 names = (
                     "order_id",
@@ -706,7 +722,6 @@ class IbkrAdapter:
             "quantity": quantity,
             "limit_price": str(limit_price),
         }
-        self._margin_preview_context[order_id] = context
         order = self._api.order.Order()
         order.action = "BUY"
         order.orderType = "LMT"
@@ -717,16 +732,42 @@ class IbkrAdapter:
         order.orderRef = f"ZQ-MARGIN-PREVIEW-{order_id}"
         order.whatIf = True
         order.transmit = True
+        self._margin_preview_context[order_id] = context
+        self._margin_preview_ids.add(order_id)
         self._emit("margin_preview_requested", {**context, "order_id": order_id})
-        self._client.placeOrder(order_id, contract, order)
+        LOGGER.info("ibkr_margin_preview_requested", order_id=order_id, **context)
+        try:
+            self._client.placeOrder(order_id, contract, order)
+        except Exception:
+            self.finish_margin_preview(order_id)
+            raise
         return order_id
 
-    def cancel_margin_preview(self, order_id: int) -> None:
-        self._completed_margin_preview_ids.append(order_id)
-        if self._client is not None and self.connected:
-            with contextlib.suppress(Exception):
-                self._client.cancelOrder(order_id, self._new_order_cancel())
+    def finish_margin_preview(self, order_id: int) -> None:
+        """Release the pending request; a non-routing what-if has no live order to cancel."""
+
+        if self._margin_preview_context.pop(order_id, None) is not None:
+            LOGGER.info("ibkr_margin_preview_finished", order_id=order_id)
+
+    def _is_margin_preview_id(self, order_id: Any, client_id: Any) -> bool:
+        return (
+            str(client_id) == str(self.settings.ibkr_client_id)
+            and order_id in self._margin_preview_ids
+        )
+
+    def _is_margin_preview_order(self, order_id: Any, order: Any) -> bool:
+        if not self._is_margin_preview_id(order_id, getattr(order, "clientId", None)):
+            return False
+        if getattr(order, "whatIf", False) is True and (
+            getattr(order, "orderRef", "") == f"ZQ-MARGIN-PREVIEW-{order_id}"
+        ):
+            return True
+        # Explicit live/conflicting order evidence overrides remembered preview scope.
+        # Preserve this callback and all subsequent statuses for reconciliation.
+        self._margin_preview_ids.discard(order_id)
         self._margin_preview_context.pop(order_id, None)
+        LOGGER.error("ibkr_margin_preview_identity_conflict", order_id=order_id)
+        return False
 
     def cancel_order(self, order_id: int) -> None:
         if not self.settings.ibkr_order_submission_enabled:
@@ -751,6 +792,8 @@ class IbkrAdapter:
         with self._ingress_lock:
             self._ingress.clear()
             self._drain_scheduled = False
+        for order_id in tuple(self._margin_preview_context):
+            self.finish_margin_preview(order_id)
         if self._client is not None:
             with contextlib.suppress(Exception):
                 if self.connected:
@@ -759,8 +802,6 @@ class IbkrAdapter:
                         self._client.cancelPnL(9_002)
                     for request_id in tuple(self._stream_request_ids):
                         self._client.cancelMktData(request_id)
-                    self._margin_preview_context.clear()
-                    self._completed_margin_preview_ids.clear()
                     self._stream_request_ids.clear()
                     self._client.disconnect()
         if self._network_thread is not None:

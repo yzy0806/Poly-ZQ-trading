@@ -643,7 +643,10 @@ class StateStore:
     async def _apply_margin_preview(self, event: VenueEvent) -> None:
         order_id = int(event.payload["order_id"])
         current = await self.get()
-        if current.margin_preview.order_id != order_id:
+        if (
+            current.margin_preview.order_id != order_id
+            or current.margin_preview.status is not MarginPreviewStatus.PENDING
+        ):
             return
         fields = {
             name: self._margin_decimal(event.payload.get(name))
@@ -679,7 +682,14 @@ class StateStore:
             received_at=event.received_at,
             **fields,
         )
-        await self.update(lambda snapshot: snapshot.model_copy(update={"margin_preview": preview}))
+        # Recheck under the update lock: timeout or a new request may have won
+        # while this callback was queued or waiting for the state lock.
+        await self.update(
+            lambda snapshot: snapshot.model_copy(update={"margin_preview": preview})
+            if snapshot.margin_preview.order_id == order_id
+            and snapshot.margin_preview.status is MarginPreviewStatus.PENDING
+            else snapshot
+        )
 
     async def fail_margin_preview(self, order_id: int | None, error: str) -> None:
         def apply(snapshot: EngineSnapshot) -> EngineSnapshot:

@@ -528,7 +528,7 @@ class EngineRuntime:
                 )
             finally:
                 if order_id is not None:
-                    self.ibkr.cancel_margin_preview(order_id)
+                    self.ibkr.finish_margin_preview(order_id)
             await asyncio.sleep(0.25)
 
     async def _polymarket_reference_loop(self) -> None:
