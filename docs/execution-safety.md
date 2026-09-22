@@ -11,6 +11,8 @@ For dated deployment status, see the [production record](../deploy/CURRENT_DEPLO
 
 4. **Reconciliation.** All durable batches and obligations participate, including older completed batches whose fills later require attention. The comparison includes IBKR open/completed orders, executions and target-contract inventory, plus Polymarket open orders, full paginated trade history and all configured event-token positions. Unknown orders are not automatically cancelled on the other account/client's behalf. They block new entries and trigger cancellation of this strategy's working ZQ. Missing completion evidence, pending settlement, stale snapshots, or interrupted reads cannot produce CLEAN. `RECONCILIATION_MAX_AGE_SECONDS` is required; the example environment sets it to 60 seconds. A saved clean result cannot authorize entry after another execution-ledger mutation.
 
+    Foreign-client orders explicitly identified as ZQ futures in a different contract month are outside this strategy's order comparison. An October strategy therefore permits an independently managed September ZQ order. Identification requires a valid contract month, security type and positive permanent order ID; a permanent ID matching a strategy ledger order is never excluded. Status callbacks have no contract details, so they inherit scope only from the exact client/order/permanent-ID combination. During a fresh open-order read, an unidentified status blocks entry until contract details or the end marker arrive; anything still unidentified then retains the safety pause. Disconnect discards remembered scope. Current-month and unidentified orders remain blocking, and account-wide margin and excess-liquidity checks still include all account exposure.
+
 5. **Restart.** The process starts disarmed. Before real hedge submission resumes, fresh venue evidence must rule out unexplained inventory, excess, unknown orders and unidentified fills. Known outstanding obligations may then be hedged while new ZQ entries remain blocked. This prevents blindly buying another hedge when an operator placed one while the engine was offline. IBKR open-order absence is not cancellation evidence; recovery requires a matching completion/status callback. Historical data outside the venue's available execution/completion window may require operator reconstruction.
 
 6. **Halt and shutdown.** Emergency halt immediately prevents new ZQ entry and requests cancellation of every working strategy ZQ order, independent of residual profitability or slow hedge requests. It keeps processing late fills and permits the existing capped hedge mandate. Application shutdown does the same while keeping callbacks and hedge workers alive for up to `SHUTDOWN_DRAIN_SECONDS` (required; example value 20). `ENGINE_STOP` records whether reconciliation completed. A deadline, disconnect, or forced termination cannot guarantee cancellation at the venue; unresolved state must be recovered after restart. Keep the drain deadline below the container's 30-second grace period. Network execution operations use `EXECUTION_REQUEST_TIMEOUT_SECONDS` (required; example value 10).
@@ -36,9 +38,9 @@ For dated deployment status, see the [production record](../deploy/CURRENT_DEPLO
 Historical validation on 2026-09-10: 255 Python tests passed on Windows/Python 3.13.12, with 85.99% coverage against the existing 85% threshold. Later evidence is recorded in the [callback report](validation/ibkr-callback-reconciliation.md),
 [September 14 deployment follow-up](validation/ibkr-callback-refresh-2026-09-14.md), and
 [September 21 macOS maintenance validation](validation/ibkr-maintenance-2026-09-21.md).
-The maintenance implementation is local and has not been deployed; historical production
-checks do not establish acceptance of that newer working tree.
+The maintenance implementation was included in the September 22 production release;
+dated deployment checks are in the [production record](../deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md).
 
 For the current local toolchain, October calendar and fresh development ledger, see the
-[September 21 Mac/October validation](validation/macos-october-2026-09-21.md). These changes
-have not been deployed to the VPS.
+[September 21 Mac/October validation](validation/macos-october-2026-09-21.md). The matching
+toolchain and October configuration were deployed to the VPS on September 22.

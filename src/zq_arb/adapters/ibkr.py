@@ -258,6 +258,7 @@ class IbkrAdapter:
                             "perm_id": getattr(order, "permId", None),
                             "contract_id": getattr(contract, "conId", None),
                             "symbol": str(getattr(contract, "symbol", "")),
+                            "security_type": str(getattr(contract, "secType", "")),
                             "contract_month": str(
                                 getattr(contract, "lastTradeDateOrContractMonth", "")
                             ),

@@ -100,6 +100,8 @@ class ExecutionCoordinator:
         self._ibkr_snapshot_at: datetime | None = None
         self._ibkr_reconciliation_in_progress = False
         self._ibkr_foreign_orders: set[str] = set()
+        self._ibkr_other_month_orders: set[str] = set()
+        self._ibkr_unscoped_status_orders: set[str] = set()
         self._ibkr_unknown_orders: set[int] = set()
         self._ibkr_identity_conflicts: set[str] = set()
         self._ibkr_executions_complete = False
@@ -155,6 +157,7 @@ class ExecutionCoordinator:
             await self.state.invalidate_reconciliation("IBKR reconciliation in progress")
             self._ibkr_open_order_ids.clear()
             self._ibkr_foreign_orders.clear()
+            self._ibkr_unscoped_status_orders.clear()
             self._ibkr_unknown_orders.clear()
             self._ibkr_open_orders_complete = False
             self._ibkr_completed_orders_complete = False
@@ -333,6 +336,10 @@ class ExecutionCoordinator:
             # not query/rebuild the execution ledger for market-data ticks.
             if event.kind in {"tick_price", "tick_size"}:
                 return
+            if event.kind in {"open_order", "order_status"} and (
+                await self._ignore_other_month_foreign_order(event)
+            ):
+                return
             if event.kind == "error" and event.payload.get("code") == 1100:
                 self.maintenance.observe_interruption(self.maintenance.now())
             if (
@@ -344,6 +351,8 @@ class ExecutionCoordinator:
             ):
                 self._mark_ibkr_refresh_timeout()
             if event.kind == "connection" and event.payload.get("status") != "CONNECTED":
+                self._ibkr_other_month_orders.clear()
+                self._ibkr_unscoped_status_orders.clear()
                 self.ibkr_connection_ready.clear()
                 if event.payload.get("status") == "DISCONNECTED":
                     self.maintenance.observe_interruption(self.maintenance.now())
@@ -759,7 +768,7 @@ class ExecutionCoordinator:
             return
         status = str(payload.get("status") or "UNKNOWN")
         if not self._ibkr_own_client(payload):
-            identity = f"{payload.get('client_id')}:{int(order_id)}"
+            identity = self._ibkr_foreign_order_key(payload)
             if status.upper() in IBKR_TERMINAL:
                 self._ibkr_foreign_orders.discard(identity)
             else:
@@ -783,7 +792,7 @@ class ExecutionCoordinator:
         if order_id is None:
             return
         if not self._ibkr_own_client(payload):
-            self._ibkr_foreign_orders.add(f"{payload.get('client_id')}:{int(order_id)}")
+            self._ibkr_foreign_orders.add(self._ibkr_foreign_order_key(payload))
             return
         if not await self._ibkr_identity_valid(payload):
             return
@@ -794,6 +803,59 @@ class ExecutionCoordinator:
             permanent_id=str(payload.get("perm_id") or "") or None,
         )
         self._observe_ibkr_order(int(order_id), status, effective)
+
+    @staticmethod
+    def _ibkr_foreign_order_key(payload: dict[str, Any]) -> str:
+        # Manual TWS orders can share clientId=0/orderId=0. Their permIds differ.
+        key = f"{payload.get('client_id')}:{payload.get('order_id')}"
+        permanent_id = _decimal(payload.get("perm_id"))
+        if permanent_id is not None and permanent_id > 0:
+            key += f":{permanent_id}"
+        return key
+
+    async def _ignore_other_month_foreign_order(self, event: VenueEvent) -> bool:
+        payload = event.payload
+        if self._ibkr_own_client(payload):
+            return False
+        key = self._ibkr_foreign_order_key(payload)
+        if event.kind == "open_order":
+            self._ibkr_other_month_orders.discard(key)
+        if event.kind == "order_status" and key in self._ibkr_other_month_orders:
+            return True  # Status inherits scope only from an exact identified order.
+        self._ibkr_unscoped_status_orders.discard(key)
+        permanent_id = _decimal(payload.get("perm_id"))
+        if permanent_id is None or permanent_id <= 0:
+            return False  # An unidentified manual order must continue to block entries.
+        if any(
+            _decimal(order.permanent_id) == permanent_id
+            for order in await self.repository.ledger_orders("IBKR")
+        ):
+            return False  # A conflicting callback for a strategy order is never ignored.
+        if event.kind == "order_status":
+            if (
+                self._ibkr_reconciliation_in_progress
+                and not self._ibkr_open_orders_complete
+                and self._ibkr_gap is None
+                and not any(payload.get(k) for k in ("symbol", "security_type", "contract_month"))
+            ):
+                self._ibkr_unscoped_status_orders.add(key)
+            return False
+        month = str(payload.get("contract_month") or "")
+        if (
+            payload.get("symbol") != "ZQ"
+            or payload.get("security_type") != "FUT"
+            or len(month) not in {6, 8}
+            or not month.isdigit()
+            or month.startswith(self.settings.ibkr_zq_contract_month)
+        ):
+            return False
+        try:
+            datetime.strptime(month, "%Y%m" if len(month) == 6 else "%Y%m%d")
+        except ValueError:
+            return False
+        self._ibkr_other_month_orders.add(key)
+        self._ibkr_foreign_orders.discard(key)
+        return True
 
     def _observe_ibkr_order(self, order_id: int, status: str, effective: str | None) -> None:
         if effective is None and status.upper() not in IBKR_TERMINAL:
@@ -1115,6 +1177,15 @@ class ExecutionCoordinator:
             self._mark_ibkr_refresh_timeout()
         # An expected timeout must never hide independent evidence of a safety fault.
         early_unsafe = (unsafe_keys & differences.keys()) - transient
+        if (
+            self._ibkr_reconciliation_in_progress
+            and not self._ibkr_open_orders_complete
+            and self._ibkr_gap is None
+            and self._ibkr_foreign_orders <= self._ibkr_unscoped_status_orders
+        ):
+            # A status callback may precede its contract-bearing openOrder callback.
+            # The incomplete snapshot already blocks entry; classify it before latching pause.
+            early_unsafe.discard("unexpected_ibkr_clients")
         if early_unsafe:
             self._recovery_ready = False
             await self._latch_reconciliation_pause(
