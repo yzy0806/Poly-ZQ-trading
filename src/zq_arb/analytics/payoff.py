@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
 
 from zq_arb.analytics.probability import theoretical_settlement
+from zq_arb.domain.calendar import MeetingCalendar
 from zq_arb.domain.enums import GateStatus
 from zq_arb.domain.models import (
     BookLevel,
@@ -74,10 +75,14 @@ def conservative_ibkr_round_trip_commission(
     return max(configured_total, entry_preview_commission * Decimal("2"))
 
 
-def hedge_shares_per_contract(move_bps: int) -> Decimal:
-    # Multiply before division so the approved $41.67 approximation does not
-    # create a repeating Decimal that rounds 486.15 up by an unintended cent.
-    return Decimal(abs(move_bps)) * Decimal(14) * FULL_MONTH_BP_VALUE / Decimal(30)
+def hedge_shares_per_contract(move_bps: int, *, calendar: MeetingCalendar) -> Decimal:
+    # Multiply before division, then round only the total obligation upward.
+    return (
+        Decimal(abs(move_bps))
+        * Decimal(calendar.days_after)
+        * FULL_MONTH_BP_VALUE
+        / Decimal(calendar.total_days)
+    )
 
 
 def round_shares_up(shares: Decimal, precision: Decimal = Decimal("0.01")) -> Decimal:
@@ -173,6 +178,7 @@ def _payout(outcome_code: str, move_bps: int) -> Decimal:
 def build_three_state_opportunity(
     *,
     contracts: int,
+    calendar: MeetingCalendar,
     zq_price: Decimal,
     pre_meeting_effr: Decimal,
     inc25_book: OrderBook,
@@ -185,8 +191,8 @@ def build_three_state_opportunity(
 ) -> Opportunity:
     if contracts <= 0:
         raise ValueError("contracts must be positive")
-    q25 = round_shares_up(hedge_shares_per_contract(25) * Decimal(contracts))
-    q50 = round_shares_up(hedge_shares_per_contract(50) * Decimal(contracts))
+    q25 = round_shares_up(hedge_shares_per_contract(25, calendar=calendar) * Decimal(contracts))
+    q50 = round_shares_up(hedge_shares_per_contract(50, calendar=calendar) * Decimal(contracts))
     entry25 = plan_hedge_entry(inc25_book, q25, post_price_cap)
     entry50 = plan_hedge_entry(inc50_book, q50, post_price_cap, allow_one_tick=True)
     post25 = entry25.limit_price
@@ -307,7 +313,7 @@ def build_three_state_opportunity(
         scenarios: list[ScenarioPnl] = []
         explicit_costs = cost_inputs.explicit_costs
         for move in APPROVED_SCENARIOS:
-            settlement = theoretical_settlement(pre_meeting_effr, Decimal(move))
+            settlement = theoretical_settlement(pre_meeting_effr, Decimal(move), calendar=calendar)
             futures_price_change = settlement - zq_price
             futures_pnl = Decimal(contracts) * FUTURES_POINT_VALUE * futures_price_change
             inc25_payout = _payout("INC25", move)
@@ -371,8 +377,10 @@ def build_three_state_opportunity(
         else None
     )
     calculation = OpportunityCalculation(
-        inc25_shares_per_contract=round_shares_up(hedge_shares_per_contract(25)),
-        inc50plus_shares_per_contract=round_shares_up(hedge_shares_per_contract(50)),
+        inc25_shares_per_contract=round_shares_up(hedge_shares_per_contract(25, calendar=calendar)),
+        inc50plus_shares_per_contract=round_shares_up(
+            hedge_shares_per_contract(50, calendar=calendar)
+        ),
         inc25_emergency_hedge_cash=depth25.total_cost,
         inc50plus_emergency_hedge_cash=depth50.total_cost,
         emergency_hedge_cash=emergency_hedge_cash,

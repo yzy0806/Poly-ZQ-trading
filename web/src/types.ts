@@ -102,9 +102,10 @@ export interface OrderBook {
 
 export interface FedWatchDiagnostic {
   rates: Record<string, DecimalValue>
-  september_start_effr: DecimalValue
-  september_end_effr: DecimalValue
-  october_start_effr: DecimalValue
+  target_contract_month: string | null
+  anchor_contract_month: string | null
+  start_effr: DecimalValue
+  end_effr: DecimalValue
   expected_move_bps: DecimalValue
   expected_steps: DecimalValue
   lower_step_bps: number | null
@@ -112,7 +113,7 @@ export interface FedWatchDiagnostic {
   upper_step_bps: number | null
   upper_probability: DecimalValue
   bucket_probabilities: Record<string, DecimalValue>
-  september_residual_bps: DecimalValue
+  target_residual_bps: DecimalValue
   valid: boolean
   reason: string
 }

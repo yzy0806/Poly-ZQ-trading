@@ -1,0 +1,25 @@
+{
+  "health_http": 200,
+  "unauthenticated_state_http": 401,
+  "authenticated_state_http": 200,
+  "ready_http": 200,
+  "run_mode": "READ_ONLY",
+  "armed": false,
+  "event_title": "Fed Decision in October?",
+  "target_contract_month": "202610",
+  "post_decision_weight": "0.09677419354838709677419354839",
+  "direct_model_valid": true,
+  "diagnostic_valid": true,
+  "quote_months": [
+    "202610",
+    "202611",
+    "202612"
+  ],
+  "book_count": 10,
+  "synchronized_books": 10,
+  "mapping_verified": true,
+  "effr_valid": true,
+  "margin_preview_status": "FAILED",
+  "active_batch_id": null,
+  "live_submission_switches_enabled": false
+}

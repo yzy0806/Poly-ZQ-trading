@@ -220,7 +220,7 @@ class MarginPreview(StrictModel):
     received_at: datetime | None = None
     qualification_status: MarginQualificationStatus = MarginQualificationStatus.NOT_REQUESTED
     qualified_for_next_batch: bool = False
-    qualification_detail: str = "IBKR BUY-10 what-if preview has not been requested"
+    qualification_detail: str = "IBKR BUY what-if preview has not been requested"
     qualification_age_seconds: int | None = None
 
     @computed_field  # type: ignore[prop-decorator]
@@ -287,9 +287,10 @@ class HedgeDepthView(StrictModel):
 
 class FedWatchDiagnostic(StrictModel):
     rates: dict[str, Decimal] = Field(default_factory=dict)
-    september_start_effr: Decimal | None = None
-    september_end_effr: Decimal | None = None
-    october_start_effr: Decimal | None = None
+    target_contract_month: str | None = None
+    anchor_contract_month: str | None = None
+    start_effr: Decimal | None = None
+    end_effr: Decimal | None = None
     expected_move_bps: Decimal | None = None
     expected_steps: Decimal | None = None
     lower_step_bps: int | None = None
@@ -297,9 +298,9 @@ class FedWatchDiagnostic(StrictModel):
     upper_step_bps: int | None = None
     upper_probability: Decimal | None = None
     bucket_probabilities: dict[str, Decimal] = Field(default_factory=dict)
-    september_residual_bps: Decimal | None = None
+    target_residual_bps: Decimal | None = None
     valid: bool = False
-    reason: str = "awaiting September-November reference quotes"
+    reason: str = "awaiting target and configured non-meeting anchor quotes"
 
 
 class ProbabilitySnapshot(StrictModel):

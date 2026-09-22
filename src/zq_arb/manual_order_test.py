@@ -17,7 +17,7 @@ from pydantic import SecretStr, ValidationError
 
 from zq_arb.adapters.polymarket import PolymarketAdapter, PolymarketProtocolError
 from zq_arb.auth_diagnostic import check_auth
-from zq_arb.config import Settings
+from zq_arb.config import Settings, environment_file
 
 TEST_SHARES = Decimal("5")
 
@@ -34,7 +34,7 @@ def positive_decimal(value: str) -> Decimal:
 
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("--env-file", type=Path, default=Path(".env"))
+    cli.add_argument("--env-file", type=Path, default=environment_file())
     cli.add_argument("--output-dir", type=Path, default=Path("runtime/manual-order-tests"))
     commands = cli.add_subparsers(dest="command", required=True)
     for name in ("preview", "place"):

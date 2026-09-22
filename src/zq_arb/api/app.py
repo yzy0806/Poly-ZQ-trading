@@ -143,7 +143,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             target_quote = snapshot.quotes[target_month]
             if not target_quote.analytics_qualified:
-                reasons.append(f"ZQU6 subscription not qualified: {target_quote.validation_reason}")
+                reasons.append(
+                    f"{configured.meeting_calendar.symbol} subscription not qualified: "
+                    f"{target_quote.validation_reason}"
+                )
         if not snapshot.effr.valid:
             reasons.append(f"pre-meeting EFFR not qualified: {snapshot.effr.reason}")
         expected_tokens = {

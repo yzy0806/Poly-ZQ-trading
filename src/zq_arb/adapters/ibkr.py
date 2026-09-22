@@ -689,7 +689,10 @@ class IbkrAdapter:
         if not self.settings.ibkr_account_configured:
             raise IbkrAdapterError("IBKR_ACCOUNT_ID is not configured")
         if quantity != self.settings.ibkr_zq_child_order_quantity:
-            raise ValueError("margin preview quantity must match the 10-contract child order")
+            raise ValueError(
+                "margin preview quantity must match the configured child order "
+                f"({self.settings.ibkr_zq_child_order_quantity} contracts)"
+            )
         contract = self._contracts.get(month)
         if contract is None:
             raise IbkrAdapterError("verified ZQ contract is unavailable for margin preview")

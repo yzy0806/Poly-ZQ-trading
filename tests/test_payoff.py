@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -14,6 +15,7 @@ from zq_arb.analytics.payoff import (
     round_shares_up,
     walk_asks,
 )
+from zq_arb.domain.calendar import MeetingCalendar
 from zq_arb.domain.models import BookLevel, OrderBook
 
 TEST_ASSET_ID = "test-market-asset"
@@ -39,8 +41,12 @@ def book(token_id: str, prices: tuple[tuple[str, str], ...]) -> OrderBook:
 
 
 def test_approved_hedge_share_ratios() -> None:
-    assert round_shares_up(hedge_shares_per_contract(25)) == Decimal("486.15")
-    assert round_shares_up(hedge_shares_per_contract(50)) == Decimal("972.30")
+    assert round_shares_up(
+        hedge_shares_per_contract(25, calendar=MeetingCalendar("202609", date(2026, 9, 17)))
+    ) == Decimal("486.15")
+    assert round_shares_up(
+        hedge_shares_per_contract(50, calendar=MeetingCalendar("202609", date(2026, 9, 17)))
+    ) == Decimal("972.30")
 
 
 def test_commission_uses_configured_round_trip_floor_or_higher_live_preview() -> None:
@@ -92,6 +98,7 @@ def test_three_state_profit_contains_every_approved_state() -> None:
         emergency_cash_reserve=Decimal("0"),
         post_price_cap=Decimal("0.95"),
         emergency_price_cap=Decimal("0.99"),
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     assert [row.move_bps for row in opportunity.scenarios] == [0, 25, 50]
     assert opportunity.token_requirements == {
@@ -157,6 +164,7 @@ def test_empty_book_fails_closed() -> None:
         emergency_cash_reserve=Decimal("0"),
         post_price_cap=Decimal("0.95"),
         emergency_price_cap=Decimal("0.99"),
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     assert not opportunity.tradeable
     assert any(check.code == "INC25_YES_BEST_ASK_SIZE" for check in opportunity.gate_checks)
@@ -177,6 +185,7 @@ def test_entry_requires_full_hedge_size_at_the_exact_lowest_ask() -> None:
         emergency_cash_reserve=Decimal("0"),
         post_price_cap=Decimal("0.95"),
         emergency_price_cap=Decimal("0.99"),
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     inc25 = next(item for item in opportunity.hedge_depth if item.leg_code == "INC25 YES")
     assert inc25.available_shares == Decimal("100")
@@ -199,6 +208,7 @@ def test_missing_margin_preserves_profit_but_withholds_capital_and_return() -> N
         emergency_cash_reserve=Decimal("0"),
         post_price_cap=Decimal("0.95"),
         emergency_price_cap=Decimal("0.99"),
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
 
     assert opportunity.minimum_net_profit is not None
@@ -254,7 +264,9 @@ def test_depth_cost_aggregates_duplicate_price_levels() -> None:
     market = book("50", (("0.009", "80"), ("0.009", "20"), ("0.01", "1100")))
     plan = plan_hedge_entry(
         market.model_copy(update={"tick_size": Decimal("0.001")}),
-        Decimal("1000"), Decimal("0.95"), allow_one_tick=True,
+        Decimal("1000"),
+        Decimal("0.95"),
+        allow_one_tick=True,
     )
     assert plan.available_shares == Decimal("1200")
     assert plan.depth.total_cost == Decimal("9.90")
@@ -277,6 +289,7 @@ def test_inc50_scenarios_use_full_two_price_cost_only_within_one_tick(next_ask: 
         emergency_cash_reserve=Decimal("0"),
         post_price_cap=Decimal("0.95"),
         emergency_price_cap=Decimal("0.99"),
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     depth = opportunity.hedge_depth[1]
     assert depth.best_ask_shares == Decimal("90.18")

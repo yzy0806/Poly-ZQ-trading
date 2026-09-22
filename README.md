@@ -1,6 +1,6 @@
 # ZQ–Polymarket Arbitrage Engine
 
-Production-oriented Python and TypeScript implementation of the approved September 2026 ZQ/Polymarket design. The repository is deliberately fail-closed: source checkout, dependency installation, process restart, missing credentials, unqualified subscriptions, or unsynchronized books cannot enable live orders.
+Python and TypeScript ZQ/Polymarket engine, configured for the October 28, 2026 FOMC decision and October ZQ (`ZQV6`). The repository is deliberately fail-closed: source checkout, dependency installation, process restart, missing credentials, unqualified subscriptions, or unsynchronized books cannot enable live orders.
 
 ## Current scope and documentation
 
@@ -13,10 +13,12 @@ Every engine process starts disarmed, including when its configured mode is live
 - [Execution safety](docs/execution-safety.md): ledger identity, reconciliation, halt, and recovery.
 - [Original strategy design](ZQ_POLYMARKET_ARBITRAGE_ENGINE_DESIGN.md): historical design baseline and a guide to superseding implementation records.
 
-The example configuration still targets the September 16, 2026 FOMC event and September ZQ
-contract. Its entry cutoff has passed as of this documentation review on September 21.
-It remains useful for offline tests; a new event requires an explicit strategy/configuration
-review, including market identities, rules, dates, and contract months.
+The local and example configurations target October ZQ (`202610`) and Polymarket event
+`606422`, **Fed Decision in October?**. The statement is scheduled for October 28 at
+18:00 UTC; new entries stop at 17:00 UTC. The configured rate-effective date is October 29,
+so the settlement model uses **28 pre-decision and 3 post-decision calendar days**.
+The October rollout changes the calculation and hedge quantities as well as the market IDs.
+See [migration and validation](docs/validation/macos-october-2026-09-21.md).
 
 ## Repository Layout
 
@@ -37,44 +39,42 @@ scripts/                 Controlled operational and connectivity checks
 
 ## Local setup on macOS
 
-Use Terminal with zsh. Run commands from the Git repository root: `code/` in the current
-OneDrive workspace, where `pyproject.toml` and `uv.lock` live. Follow the
-[macOS guide](docs/local-development-macos.md) first to select Python 3.12 and Node 24,
-rebuild native dependencies, and configure paths outside OneDrive for runtime data.
-
-After that setup, the offline checks matching CI are:
+Run from the Git repository root (`code/` in this workspace). The Mac uses its installed
+**Python 3.14.7 and Node 26.9.0** natively. The Ubuntu production build uses the same
+versions and dependency lockfiles; Docker is only used for production. The
+[macOS guide](docs/local-development-macos.md) documents the external Python environment,
+protected configuration, fresh SQLite database, IBKR API, and verification results.
 
 ```sh
-uv run --locked ruff check src tests
-uv run --locked mypy src
-uv run --locked pytest
-(cd web && npm run lint && npm test -- --run && npm run build)
+scripts/dev.sh sync    # reproduce locked dependencies
+scripts/dev.sh check   # lint, types, backend coverage, dashboard tests and build
 ```
 
-Tests load the non-secret `deploy/zq-arb.env.example` fixture and use isolated databases and
-mocked venues. They do not require a credentialed `.env`, TWS, or the official IBKR API files.
-Run them from a shell without exported trading settings, which can override fixture values.
-The additional `uv run --locked pytest --cov` check enforces the configured 85% threshold;
-the current GitHub Actions job runs pytest without coverage. CI types `src`, not `tests`.
+Tests use the explicit historical fixture `tests/fixtures/september-2026.env` plus
+October regression cases, isolated databases and mocked venues. They need no broker login.
+Use a shell without exported trading settings, which override env-file values.
+The coverage threshold is 85%. CI validates both Ubuntu and macOS with Python 3.14.7
+and Node 26.9.0, reading the exact versions from `.python-version` and `.node-version`.
+The production Dockerfile pins those same versions. This repository update does not
+change the running VPS until a new image is built and deployed.
 
-Only after completing the guide's local configuration and optional read-only connectivity
-check, start these in **two separate terminals**, each initially at the repository root:
+Start these in **two separate terminals**, each at the repository root:
 
 ```sh
-# Terminal 1: backend
-uv run --locked zq-arb
+scripts/dev.sh backend
 ```
 
 ```sh
-# Terminal 2: dashboard
-cd web
-npm run dev
+scripts/dev.sh web
 ```
 
-The local dashboard is at `http://127.0.0.1:5173`; Vite proxies API and WebSocket requests to
-the backend port from the root `.env` (8765 by default). `DASHBOARD_ORIGIN` and
-`CORS_ALLOWED_ORIGINS` must match that origin; they do not configure Vite's listening port.
-The backend binds to `API_HOST` and `API_PORT`.
+Open `http://127.0.0.1:5173`. The launcher defaults to
+`~/.config/zq-arb/development.env`. The ignored root `.env` supplies Vite configuration
+and can be selected explicitly with `ZQ_ENV_FILE="$PWD/.env" scripts/dev.sh backend`.
+These files are independent; updating one does not update the other. The backend and Vite
+proxy both use port 8765. Both local configurations are `READ_ONLY`, start disarmed, and
+have all order-submission switches disabled. The latest successful margin check used the
+owner-updated repo `.env`; see the [validation report](docs/validation/macos-october-2026-09-21.md).
 
 ## Market Data and Signal Authority
 
@@ -82,7 +82,7 @@ The backend binds to `API_HOST` and `API_PORT`.
 
 2. A WebSocket disconnect or book-integrity failure marks every affected book unsynchronized. REST data may remain visible for diagnosis, but a new ZQ order remains prohibited until a valid WebSocket update restores synchronization.
 
-3. The primary rate signal uses the current `ZQU6` bid, ask, and midpoint against a validated pre-meeting EFFR observation. By default the backend refreshes EFFR from the official New York Fed Markets API; `EFFR_SOURCE=MANUAL` with `PRE_MEETING_EFFR_PERCENT` is the explicit fallback. October and November are optional inputs for the secondary FedWatch diagnostic and are not required for the direct signal.
+3. The primary rate signal uses the configured `ZQV6` bid, ask, and midpoint against a validated pre-meeting EFFR observation. By default the backend refreshes EFFR from the official New York Fed Markets API; `EFFR_SOURCE=MANUAL` with `PRE_MEETING_EFFR_PERCENT` is the explicit fallback. The secondary FedWatch diagnostic uses November as the non-meeting anchor; December is displayed as diagnostic data but is not used as an October post-meeting rate. Only October is required for the direct signal.
 
 4. The adjacent-state ZQ probabilities and normalized Polymarket expected move explain the cross-venue difference. Only conservative terminal scenario P&L and the full risk-gate result can qualify an opportunity.
 
@@ -167,14 +167,14 @@ For an operator-run five-share real-order test, see
 [Manual Polymarket order test](docs/manual-polymarket-order-test.md). The script
 provides preview, placement and cancellation commands; it does not start the engine.
 
-From a configured, unsynchronized development checkout in macOS Terminal:
+From the configured Mac development checkout:
 
 ```sh
-uv run --locked python scripts/check_polymarket_auth.py \
+scripts/dev.sh run python scripts/check_polymarket_auth.py \
   --output "$HOME/Library/Application Support/ZQArb/diagnostics/polymarket-auth-check.json"
 ```
 
-This uses the local `.env` to check that the private key matches the configured signer,
+This uses the protected `ZQ_ENV_FILE` selected by the launcher to check that the private key matches the configured signer,
 that the funder is a supported wallet for that signer, and that a contract wallet is
 already deployed. It then validates CLOB authentication through active API keys,
 the first page of open orders, and collateral balance/allowances. It does not start

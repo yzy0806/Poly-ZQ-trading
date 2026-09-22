@@ -502,7 +502,7 @@ class PolymarketAdapter:
 
     async def public_market_stream(
         self, token_ids: Sequence[str]
-    ) -> AsyncGenerator[VenueEvent, None]:
+    ) -> AsyncGenerator[VenueEvent]:
         """Use the official unified SDK; callers reconnect or fall back to REST snapshots."""
 
         try:

@@ -14,6 +14,21 @@ For native workstation setup, use [macOS development](../docs/local-development-
 Host preparation, service management, and rollout commands below run on the **Linux VPS**,
 not in a local Mac terminal. Connect from the Mac with `ssh root@78.142.195.87` first.
 
+## Shared development and production toolchain
+
+The native Mac and Ubuntu production build use **Python 3.14.7, Node 26.9.0 and
+uv 0.12.17**, with the same `uv.lock` and `web/package-lock.json`. CI tests the exact
+Python and Node versions on both Ubuntu and macOS using `.python-version` and
+`.node-version`. The Dockerfile pins the matching base images by version and digest.
+Node is needed only to build the dashboard; the final image serves the compiled files
+from Python. No Node installation on the Ubuntu host is required.
+
+Mac development continues to use `scripts/dev.sh backend` and `scripts/dev.sh web`
+natively. Host paths, credentials and venue endpoints remain environment-specific.
+This change updates the production build definition; the running VPS keeps its current
+image until the normal immutable rollout below. When upgrading toolchains again, update
+the version files and Dockerfile pins together, then pass both CI jobs before rollout.
+
 ## Safety state
 
 The bootstrap configuration is `READ_ONLY`. `LIVE_TRADING_ENABLED`,
@@ -50,6 +65,29 @@ RECONCILIATION_MAX_AGE_SECONDS=60
 IBKR_CALLBACK_SETTLE_SECONDS=2
 SHUTDOWN_DRAIN_SECONDS=20
 ```
+
+## October calendar upgrade (not deployed by the Mac setup)
+
+The current example targets October 28, 2026 and requires explicit calendar settings:
+
+```dotenv
+FOMC_RATE_EFFECTIVE_DATE=2026-10-29
+FEDWATCH_ANCHOR_CONTRACT_MONTH=202611
+FEDWATCH_INTERVENING_RATE_EFFECTIVE_DATES=
+```
+
+For October these must accompany target/subscription months `202610` / `202610,202611,202612`,
+statement/cutoff `2026-10-28T18:00:00Z` / `2026-10-28T17:00:00Z`, and the complete current
+Polymarket mapping. Use the [migration report](../docs/validation/macos-october-2026-09-21.md)
+and reviewed example together; changing only the cutoff or contract is insufficient.
+A process intentionally inspecting the September strategy needs its September settings,
+including effective date September 17, November anchor and intervening effective date October 29.
+
+Ledger identity now includes event ID, contract month and rate-effective date. Existing
+identities do not gain these fields automatically. Preserve old ledgers for inspection;
+reconcile any outstanding positions and orders before a separate October execution ledger
+is authorized. Do not initialize an empty ledger to ignore an existing obligation.
+The Mac setup created only a fresh local read-only database and did not change the VPS.
 
 ## Initial host preparation
 

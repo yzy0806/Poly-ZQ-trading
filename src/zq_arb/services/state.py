@@ -81,6 +81,11 @@ class StateStore:
                 "SECDEF": IbkrFarmHealth(name="secdef", service="SECURITY_DEFINITION"),
             },
             metadata={
+                "event_title": settings.polymarket_event_title,
+                "fomc_statement_utc": settings.fomc_statement_utc.isoformat(),
+                "rate_effective_date": settings.fomc_rate_effective_date.isoformat(),
+                "target_contract_month": settings.ibkr_zq_contract_month,
+                "zq_symbol": settings.meeting_calendar.symbol,
                 "contract_verification": {},
                 "ibkr_market_data_type": None,
                 "ibkr_subscription_generation": 0,
@@ -162,7 +167,7 @@ class StateStore:
         self._fan_out(published, subscribers)
         return published.model_copy(deep=True)
 
-    async def subscribe(self) -> AsyncGenerator[EngineSnapshot, None]:
+    async def subscribe(self) -> AsyncGenerator[EngineSnapshot]:
         queue: asyncio.Queue[EngineSnapshot] = asyncio.Queue(maxsize=1)
         async with self._lock:
             self._subscribers.add(queue)

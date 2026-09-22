@@ -102,7 +102,10 @@ def validate_opening_inventory(
     for leg in settings.market_legs:
         if leg.code in {"INC25", "INC50PLUS"}:
             bps = 25 if leg.code == "INC25" else 50
-            if quantities[("POLYMARKET", leg.yes_token_id)] < hedge_shares_per_contract(bps) * zq:
+            if (
+                quantities[("POLYMARKET", leg.yes_token_id)]
+                < hedge_shares_per_contract(bps, calendar=settings.meeting_calendar) * zq
+            ):
                 raise RuntimeError("Opening inventory is not fully hedged under the strategy model")
     receipts = snapshot.get("receipts")
     if not isinstance(receipts, dict) or set(receipts) != {"IBKR", "POLYMARKET"}:

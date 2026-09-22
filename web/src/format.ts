@@ -37,3 +37,14 @@ export function tone(value: DecimalValue): string {
   if (value === null) return ''
   return Number(value) >= 0 ? 'positive' : 'negative'
 }
+
+export function contractLabel(month: string | null | undefined): string {
+  if (!month || !/^\d{4}(0[1-9]|1[0-2])$/.test(month)) return 'ZQ'
+  return new Intl.DateTimeFormat('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' })
+    .format(new Date(`${month.slice(0, 4)}-${month.slice(4)}-01T00:00:00Z`)).toUpperCase()
+}
+
+export function contractSymbol(month: string | null | undefined): string {
+  if (!month || !/^\d{4}(0[1-9]|1[0-2])$/.test(month)) return 'ZQ'
+  return `ZQ${'FGHJKMNQUVXZ'[Number(month.slice(4)) - 1]}${month[3]}`
+}

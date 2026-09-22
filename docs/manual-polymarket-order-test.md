@@ -9,8 +9,9 @@ orders are recorded in a separate journal, outside the coordinator's ledger.
 
 The examples use macOS Terminal and the installed environment from
 [local development](local-development-macos.md). The repository's example event is
-September 16, 2026 and its configured entry cutoff has passed. These commands describe
-the tool; review the intended market mapping and authorization before a new real-order test.
+October 28, 2026. The Mac environment remains READ_ONLY; these commands describe the tool
+and were not run against real orders during the Mac migration. Review the selected market
+and use an explicitly authorized separate configuration for a real-order test.
 
 The script was tested with mocked venue calls only. No real order was submitted
 during development. The paper script remains available for local simulation.
@@ -39,12 +40,12 @@ prove order acceptance. No approvals or wallet setup transactions are requested.
 From the repository root (`code/` in the current workspace) in macOS Terminal:
 
 ```sh
-uv run --locked python scripts/test_polymarket_order.py --env-file .env.order-test \
+scripts/dev.sh run python scripts/test_polymarket_order.py --env-file .env.order-test \
   --output-dir "$HOME/Library/Application Support/ZQArb/manual-order-tests" \
   preview --leg INC50PLUS --outcome YES --best-ask --max-price 0.10
 ```
 
-This example selects the configured September 50bp+ increase YES token. The 0.10
+This example selects the configured October 50bp+ increase YES token. The 0.10
 cap is an example, not a recommended price. Choose your own maximum price.
 Preview checks the configured market mapping and current order book, and does
 not authenticate or submit an order. To choose a fixed limit, replace
@@ -55,7 +56,7 @@ not authenticate or submit an order. To choose a fixed limit, replace
 Only run this command yourself when you intend to submit a real order:
 
 ```sh
-uv run --locked python scripts/test_polymarket_order.py --env-file .env.order-test \
+scripts/dev.sh run python scripts/test_polymarket_order.py --env-file .env.order-test \
   --output-dir "$HOME/Library/Application Support/ZQArb/manual-order-tests" \
   place --leg INC50PLUS --outcome YES --best-ask --max-price 0.10 --test-id manual-test-001 --confirm-real-money
 ```
@@ -88,7 +89,7 @@ orders; verify fills from the venue order/trade history, not that field.
 Use the order ID returned by placement and a new journal ID:
 
 ```sh
-uv run --locked python scripts/test_polymarket_order.py --env-file .env.order-test \
+scripts/dev.sh run python scripts/test_polymarket_order.py --env-file .env.order-test \
   --output-dir "$HOME/Library/Application Support/ZQArb/manual-order-tests" \
   cancel --order-id YOUR_ORDER_ID --test-id manual-cancel-001 --confirm-real-money
 ```

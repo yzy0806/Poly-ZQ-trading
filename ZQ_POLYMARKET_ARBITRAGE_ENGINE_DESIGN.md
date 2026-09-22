@@ -21,7 +21,7 @@ for deployed state and release acceptance.
 | Exact lowest-ask depth for both hedge legs | INC25 uses the lowest ask; INC50PLUS may also consume exactly one tick above it within its cap. See the README for actual price/quantity accounting. |
 | Credential setup and reserved builder fields | The current SDK authentication/optional relayer configuration is described in the README. Old provisioning attempts below are historical records, not current setup instructions. |
 | Planned local-only deployment | Native macOS development and the Linux container/VPS deployment have separate runbooks. |
-| September 16 event and entry window | The configured entry cutoff has passed as of September 21. The historical market mapping is not an automatic next-meeting configuration. |
+| September 16 event and entry window | The historical September configuration is retained in test fixtures. Current local/example settings use October 28, October ZQ and a 3/31 post-decision weight; see the [migration report](docs/validation/macos-october-2026-09-21.md). |
 
 The execution-safety guide and its dated validation records also cover later ledger,
 callback-reconciliation, opening-inventory, and maintenance work. None of these documents

@@ -23,6 +23,17 @@ function snapshot(update: Partial<EngineSnapshot> = {}): EngineSnapshot {
 describe('Header operating status', () => {
   afterEach(cleanup)
 
+  it('identifies the configured October event and disables read-only arming', () => {
+    render(<Header state={snapshot({
+      run_mode: 'READ_ONLY',
+      armed: false,
+      metadata: { event_title: 'Fed Decision in October?' },
+    })} onControl={() => undefined} />)
+
+    expect(screen.getByText('Fed Decision in October? · control terminal')).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Arm' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it('shows maintenance without hiding operator pause or halt', () => {
     const maintenance = { active: true, reopen_at: '2026-09-14T22:00:00Z', reason: 'Scheduled maintenance' }
     const state = snapshot({ metadata: { maintenance } })

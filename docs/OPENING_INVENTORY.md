@@ -5,7 +5,7 @@ Existing venue holdings can be adopted once into an empty execution ledger with
 average costs and captured source history; it does not fabricate orders or fills.
 
 1. Stop the engine and confirm the intended live IBKR account, wallet, contract
-   month, and position cap in `.env`. The collector reads both venues, requires
+   month, and position cap in the protected `ZQ_ENV_FILE`. The collector reads both venues, requires
    complete and stable balances, no open orders, and settled Polymarket history.
    Both PM legs must cover the existing ZQ position under the strategy model.
 
@@ -14,7 +14,7 @@ average costs and captured source history; it does not fabricate orders or fills
    Keep the evidence and backup outside OneDrive:
 
    ```sh
-   uv run --locked python scripts/adopt_opening_inventory.py \
+   scripts/dev.sh run python scripts/adopt_opening_inventory.py \
      --output-dir "$HOME/Library/Application Support/ZQArb/opening-inventory"
    ```
 

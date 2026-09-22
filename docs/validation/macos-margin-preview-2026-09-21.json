@@ -1,0 +1,47 @@
+{
+  "configuration_source": "repository .env",
+  "margin_preview_request": {
+    "requested_at_utc": "2026-09-21T08:12:22.439484+00:00",
+    "host": "127.0.0.1",
+    "port": 7496,
+    "client_id": 61027,
+    "order_id": 2,
+    "symbol": "ZQ",
+    "security_type": "FUT",
+    "contract_id": 523805377,
+    "local_symbol": "ZQV6",
+    "expiry": "20261030",
+    "exchange": "CBOT",
+    "currency": "USD",
+    "trading_class": "ZQ",
+    "multiplier": "4167",
+    "action": "BUY",
+    "quantity": "10",
+    "order_type": "LMT",
+    "time_in_force": "DAY",
+    "limit_price": 96.105,
+    "what_if": true,
+    "transmit": true,
+    "outside_rth": false,
+    "order_reference": "ZQ-MARGIN-PREVIEW-2"
+  },
+  "ibkr_margin_preview": {
+    "available": true,
+    "error": null,
+    "next_batch_initial_margin": "5923.12",
+    "order_id": 2,
+    "status": "AVAILABLE"
+  },
+  "run_mode": "READ_ONLY",
+  "order_submission_enabled": false,
+  "tws_connected": true,
+  "ibkr_current_live_streams": {
+    "202610": true
+  },
+  "polymarket_mapping_verified": true,
+  "polymarket_rule_hash_match": true,
+  "polymarket_book_count": 10,
+  "polymarket_stream_synchronized_book_count": 10,
+  "check_exit_code": 0,
+  "note": "Read-only smoke check using the owner-updated repository .env and a temporary diagnostic client ID. No executable order was routed. The earlier API snapshot predates this successful check. Margin amount currency was not captured."
+}

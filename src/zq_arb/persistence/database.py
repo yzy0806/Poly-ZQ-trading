@@ -30,6 +30,9 @@ from zq_arb.persistence.models import (
 
 def execution_identity(settings: Settings) -> dict[str, str]:
     return {
+        "strategy_contract_month": settings.ibkr_zq_contract_month,
+        "strategy_event_id": settings.polymarket_event_id,
+        "strategy_rate_effective_date": settings.fomc_rate_effective_date.isoformat(),
         "ibkr_mode": settings.ibkr_trading_mode.lower(),
         "ibkr_client_id": str(settings.ibkr_client_id),
         "ibkr_account": identity_fingerprint(settings.ibkr_account_id.get_secret_value()),

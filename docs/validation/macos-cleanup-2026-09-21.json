@@ -1,0 +1,230 @@
+{
+  "date": "2026-09-21",
+  "removed": [
+    {
+      "path": "node_modules",
+      "files": 7796,
+      "bytes": 335197677
+    },
+    {
+      "path": ".pnpm-store",
+      "files": 4,
+      "bytes": 45153
+    },
+    {
+      "path": ".uv-cache",
+      "files": 4,
+      "bytes": 1627
+    },
+    {
+      "path": ".pytest_cache",
+      "files": 0,
+      "bytes": 0
+    },
+    {
+      "path": ".playwright-cli",
+      "files": 6,
+      "bytes": 73360
+    },
+    {
+      "path": ".artifact-zq-aug17",
+      "files": 2,
+      "bytes": 14506
+    },
+    {
+      "path": ".artifact-zq-whitebox-cleanup",
+      "files": 1,
+      "bytes": 5391
+    },
+    {
+      "path": "tmp/callback-build-cache",
+      "files": 218,
+      "bytes": 1726960
+    },
+    {
+      "path": "tmp/passless-review-20260914",
+      "files": 338,
+      "bytes": 6865767
+    },
+    {
+      "path": "tmp/callback-release",
+      "files": 3,
+      "bytes": 529915
+    },
+    {
+      "path": "tmp/passless-source-trial.tar.gz",
+      "files": 1,
+      "bytes": 1073124
+    },
+    {
+      "path": "tmp/passless-persistence-patch.tar.gz",
+      "files": 1,
+      "bytes": 16956
+    },
+    {
+      "path": "code/.venv",
+      "files": 6549,
+      "bytes": 174695209
+    },
+    {
+      "path": "code/.uv-cache",
+      "files": 4,
+      "bytes": 1627
+    },
+    {
+      "path": "code/.pytest_cache",
+      "files": 1,
+      "bytes": 41639
+    },
+    {
+      "path": "code/.mypy_cache",
+      "files": 3,
+      "bytes": 45175013
+    },
+    {
+      "path": "code/.ruff_cache",
+      "files": 9,
+      "bytes": 9242
+    },
+    {
+      "path": "code/.hypothesis",
+      "files": 76,
+      "bytes": 65255
+    },
+    {
+      "path": "code/.coverage",
+      "files": 1,
+      "bytes": 352256
+    },
+    {
+      "path": "CURRENT_DEPLOYMENT_AND_SECURITY.md",
+      "files": 1,
+      "bytes": 0
+    },
+    {
+      "path": "tmp/cleanup-local-repository.ps1",
+      "files": 1,
+      "bytes": 4788
+    },
+    {
+      "path": "tmp/database-reset-20260911/perform_reset.ps1",
+      "files": 1,
+      "bytes": 1980
+    },
+    {
+      "path": "tmp/restart-depth-update.ps1",
+      "files": 1,
+      "bytes": 1717
+    },
+    {
+      "path": "tmp/zq-settlement-01a0a43f/verify_excel.ps1",
+      "files": 1,
+      "bytes": 5118
+    },
+    {
+      "path": "outputs/vps-migration-2026-09-08/Transfer-SshStream.ps1",
+      "files": 1,
+      "bytes": 2106
+    },
+    {
+      "path": "code/deploy/__pycache__",
+      "files": 3,
+      "bytes": 9390
+    },
+    {
+      "path": "code/scripts/__pycache__",
+      "files": 1,
+      "bytes": 16619
+    },
+    {
+      "path": "code/src/zq_arb/__pycache__",
+      "files": 18,
+      "bytes": 228006
+    },
+    {
+      "path": "code/src/zq_arb/adapters/__pycache__",
+      "files": 15,
+      "bytes": 322799
+    },
+    {
+      "path": "code/src/zq_arb/analytics/__pycache__",
+      "files": 12,
+      "bytes": 109427
+    },
+    {
+      "path": "code/src/zq_arb/api/__pycache__",
+      "files": 9,
+      "bytes": 94567
+    },
+    {
+      "path": "code/src/zq_arb/domain/__pycache__",
+      "files": 16,
+      "bytes": 115584
+    },
+    {
+      "path": "code/src/zq_arb/execution/__pycache__",
+      "files": 11,
+      "bytes": 391520
+    },
+    {
+      "path": "code/src/zq_arb/persistence/__pycache__",
+      "files": 18,
+      "bytes": 363539
+    },
+    {
+      "path": "code/src/zq_arb/risk/__pycache__",
+      "files": 6,
+      "bytes": 53519
+    },
+    {
+      "path": "code/src/zq_arb/services/__pycache__",
+      "files": 9,
+      "bytes": 489942
+    },
+    {
+      "path": "code/tests/__pycache__",
+      "files": 81,
+      "bytes": 2904631
+    },
+    {
+      "path": "output/ib-passkey-enrollment/__pycache__",
+      "files": 3,
+      "bytes": 37790
+    },
+    {
+      "path": "tmp/__pycache__",
+      "files": 6,
+      "bytes": 82961
+    },
+    {
+      "path": "work/pdf/__pycache__",
+      "files": 1,
+      "bytes": 14943
+    }
+  ],
+  "moved_existing_history": [
+    {
+      "path": "code/D:",
+      "destination": "/Users/leoying/Library/Application Support/ZQArb/history/code/D:",
+      "files": 1
+    },
+    {
+      "path": "code/runtime",
+      "destination": "/Users/leoying/Library/Application Support/ZQArb/history/code/runtime",
+      "files": 8
+    },
+    {
+      "path": "local-archive",
+      "destination": "/Users/leoying/Library/Application Support/ZQArb/history/local-archive",
+      "files": 119
+    },
+    {
+      "path": "output/ib-passkey-enrollment",
+      "destination": "/Users/leoying/Library/Application Support/ZQArb/history/output/ib-passkey-enrollment",
+      "files": 19
+    }
+  ],
+  "removed_file_count": 15232,
+  "removed_bytes": 571141623,
+  "note": "No new backup of Windows utilities or committed source was created. Existing history was moved, not duplicated. User spreadsheets, articles, source and Git history retained."
+}

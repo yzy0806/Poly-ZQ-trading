@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import type { EngineSnapshot, GateCheck } from '../types'
 import { ProbabilityPanel } from './ProbabilityPanel'
@@ -81,6 +81,21 @@ function stateFixture(): EngineSnapshot {
 }
 
 describe('ProbabilityPanel', () => {
+  afterEach(cleanup)
+
+  it('labels October calculations from the target contract and displays its calendar weight', () => {
+    const state = stateFixture()
+    state.probabilities.target_contract_month = '202610'
+    state.probabilities.post_decision_weight = String(3 / 31)
+    state.probabilities.qualification_checks = []
+    render(<ProbabilityPanel state={state} />)
+
+    expect(screen.getByText('Direct ZQV6 signal & middle calculation')).toBeTruthy()
+    expect(screen.getByText('1 · OCT 26 CONTRACT')).toBeTruthy()
+    expect(screen.getByText('9.68%')).toBeTruthy()
+    expect(screen.queryByText(/ZQU6/)).toBeNull()
+  })
+
   it('shows the exact failed qualification against its configured threshold', () => {
     render(<ProbabilityPanel state={stateFixture()} />)
 

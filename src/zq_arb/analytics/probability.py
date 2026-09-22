@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from datetime import date
 from decimal import ROUND_FLOOR, Decimal
 
+from zq_arb.domain.calendar import MeetingCalendar, next_contract_month
 from zq_arb.domain.models import FedWatchDiagnostic, ProbabilitySnapshot
 
 ONE_HUNDRED = Decimal("100")
-TWENTY_FIVE_BPS_PERCENT = Decimal("0.25")
 TWENTY_FIVE_BPS = Decimal("25")
 MIN_MODELED_MOVE_BPS = Decimal("-50")
 MAX_MODELED_MOVE_BPS = Decimal("50")
@@ -20,13 +20,6 @@ MOVE_BY_BUCKET = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class DiagnosticPrices:
-    september: Decimal
-    october: Decimal
-    november: Decimal
-
-
 def implied_average_effr(futures_price: Decimal) -> Decimal:
     return ONE_HUNDRED - futures_price
 
@@ -35,13 +28,13 @@ def theoretical_settlement(
     pre_meeting_effr_percent: Decimal,
     move_bps: Decimal,
     *,
-    days_before: int = 16,
-    days_after: int = 14,
+    calendar: MeetingCalendar,
 ) -> Decimal:
-    total_days = Decimal(days_before + days_after)
+    total_days = Decimal(calendar.total_days)
     post_rate = pre_meeting_effr_percent + move_bps / ONE_HUNDRED
     average_rate = (
-        Decimal(days_before) * pre_meeting_effr_percent + Decimal(days_after) * post_rate
+        Decimal(calendar.days_before) * pre_meeting_effr_percent
+        + Decimal(calendar.days_after) * post_rate
     ) / total_days
     return ONE_HUNDRED - average_rate
 
@@ -61,18 +54,15 @@ def implied_decision_move_bps(
     futures_price: Decimal,
     pre_meeting_effr_percent: Decimal,
     *,
-    days_before: int = 16,
-    days_after: int = 14,
+    calendar: MeetingCalendar,
 ) -> Decimal:
-    if days_before < 0 or days_after <= 0:
-        raise ValueError("calendar weights must include positive post-decision days")
-    total_days = Decimal(days_before + days_after)
+    total_days = Decimal(calendar.total_days)
     monthly_average = implied_average_effr(futures_price)
     return (
         (monthly_average - pre_meeting_effr_percent)
         * ONE_HUNDRED
         * total_days
-        / Decimal(days_after)
+        / Decimal(calendar.days_after)
     )
 
 
@@ -117,29 +107,27 @@ def direct_zq_probability(
     target_ask: Decimal,
     pre_meeting_effr: Decimal,
     fedwatch: FedWatchDiagnostic | None = None,
-    days_before: int = 16,
-    days_after: int = 14,
+    calendar: MeetingCalendar,
 ) -> ProbabilitySnapshot:
+    if target_contract_month != calendar.contract_month:
+        raise ValueError("target contract and meeting calendar differ")
     if target_bid <= 0 or target_ask <= 0 or target_bid > target_ask:
         raise ValueError("target ZQ bid and ask must form a positive, non-crossed market")
     target_mid = (target_bid + target_ask) / Decimal("2")
     move_mid = implied_decision_move_bps(
         target_mid,
         pre_meeting_effr,
-        days_before=days_before,
-        days_after=days_after,
+        calendar=calendar,
     )
     move_buy = implied_decision_move_bps(
         target_bid,
         pre_meeting_effr,
-        days_before=days_before,
-        days_after=days_after,
+        calendar=calendar,
     )
     move_bid_reference = implied_decision_move_bps(
         target_ask,
         pre_meeting_effr,
-        days_before=days_before,
-        days_after=days_after,
+        calendar=calendar,
     )
     lower, lower_probability, upper, upper_probability, buckets = adjacent_outcome_distribution(
         move_mid
@@ -166,7 +154,7 @@ def direct_zq_probability(
         target_ask=target_ask,
         target_mid=target_mid,
         pre_meeting_effr=pre_meeting_effr,
-        post_decision_weight=Decimal(days_after) / Decimal(days_before + days_after),
+        post_decision_weight=Decimal(calendar.days_after) / Decimal(calendar.total_days),
         implied_average_effr_bid=implied_average_effr(target_bid),
         implied_average_effr_ask=implied_average_effr(target_ask),
         implied_average_effr_mid=implied_average_effr(target_mid),
@@ -183,9 +171,9 @@ def direct_zq_probability(
         fedwatch=fedwatch or FedWatchDiagnostic(),
         valid=valid,
         reason=(
-            "direct ZQU6 adjacent-outcome model calculated"
+            f"direct {calendar.symbol} adjacent-outcome model calculated"
             if valid
-            else "direct ZQU6 result is outside the modeled adjacent-outcome range"
+            else f"direct {calendar.symbol} result is outside the modeled adjacent-outcome range"
         ),
     )
 
@@ -220,46 +208,66 @@ def with_polymarket_expectation(
 
 
 def fedwatch_reference(
-    prices: DiagnosticPrices,
+    prices: Mapping[str, Decimal],
     *,
     pre_meeting_effr: Decimal,
+    calendar: MeetingCalendar,
+    anchor_contract_month: str,
+    intervening_effective_dates: tuple[date, ...] = (),
 ) -> FedWatchDiagnostic:
-    rates = {
-        "202609": implied_average_effr(prices.september),
-        "202610": implied_average_effr(prices.october),
-        "202611": implied_average_effr(prices.november),
-    }
-    october_start = (Decimal(31) * rates["202610"] - Decimal(3) * rates["202611"]) / Decimal(28)
-    september_start = pre_meeting_effr
-    september_end = october_start
-    expected_move_percent = september_end - september_start
-    expected_steps = expected_move_percent / TWENTY_FIVE_BPS_PERCENT
-    lower_step = int(expected_steps.to_integral_value(rounding=ROUND_FLOOR))
-    fractional = expected_steps - Decimal(lower_step)
-    lower_probability = Decimal("1") - fractional
-    upper_probability = fractional
-    modeled_september = (Decimal(16) * september_start + Decimal(14) * september_end) / Decimal(30)
-    residual_bps = (rates["202609"] - modeled_september) * ONE_HUNDRED
-    bucket_probabilities = {code: Decimal("0") for code in MOVE_BY_BUCKET}
-    for move_bps, probability in (
-        (lower_step * 25, lower_probability),
-        ((lower_step + 1) * 25, upper_probability),
-    ):
-        bucket_probabilities[_bucket_for_move(move_bps)] += probability
+    """Infer the target end rate from an explicitly selected non-meeting anchor.
 
+    Work backwards over intervening monthly averages. A configured rate change
+    splits that month into pre/post days; a month with no change is an anchor.
+    This is a diagnostic only, never an execution-authorizing signal.
+    """
+    rates = {month: implied_average_effr(price) for month, price in prices.items()}
+    target = calendar.contract_month
+    if anchor_contract_month <= target:
+        raise ValueError("FedWatch anchor must follow the target month")
+    months: list[str] = []
+    month = next_contract_month(target)
+    while month <= anchor_contract_month:
+        months.append(month)
+        month = next_contract_month(month)
+    if target not in rates or any(month not in rates for month in months):
+        return FedWatchDiagnostic(reason="awaiting qualified target and anchor-path quotes")
+    changes = {value.strftime("%Y%m"): value for value in intervening_effective_dates}
+    if len(changes) != len(intervening_effective_dates) or any(
+        month not in months[:-1] for month in changes
+    ):
+        raise ValueError("invalid intervening calendar or non-meeting anchor")
+    post_rate = rates[anchor_contract_month]
+    for month in reversed(months[:-1]):
+        if month in changes:
+            interval = MeetingCalendar(month, changes[month])
+            post_rate = (
+                Decimal(interval.total_days) * rates[month]
+                - Decimal(interval.days_after) * post_rate
+            ) / Decimal(interval.days_before)
+        else:
+            post_rate = rates[month]
+    expected_move = (post_rate - pre_meeting_effr) * ONE_HUNDRED
+    lower, lower_probability, upper, upper_probability, buckets = adjacent_outcome_distribution(
+        expected_move
+    )
+    modeled_average = (
+        Decimal(calendar.days_before) * pre_meeting_effr + Decimal(calendar.days_after) * post_rate
+    ) / Decimal(calendar.total_days)
     return FedWatchDiagnostic(
         rates=rates,
-        september_start_effr=september_start,
-        september_end_effr=september_end,
-        october_start_effr=october_start,
-        expected_move_bps=expected_move_percent * ONE_HUNDRED,
-        expected_steps=expected_steps,
-        lower_step_bps=lower_step * 25,
+        target_contract_month=target,
+        anchor_contract_month=anchor_contract_month,
+        start_effr=pre_meeting_effr,
+        end_effr=post_rate,
+        expected_move_bps=expected_move,
+        expected_steps=expected_move / TWENTY_FIVE_BPS,
+        lower_step_bps=lower,
         lower_probability=lower_probability,
-        upper_step_bps=(lower_step + 1) * 25,
+        upper_step_bps=upper,
         upper_probability=upper_probability,
-        bucket_probabilities=bucket_probabilities,
-        september_residual_bps=residual_bps,
-        valid=True,
-        reason="manual or official EFFR plus September-November diagnostic calculated",
+        bucket_probabilities=buckets,
+        target_residual_bps=(rates[target] - modeled_average) * ONE_HUNDRED,
+        valid=lower is not None,
+        reason=f"{calendar.symbol} diagnostic using non-meeting anchor {anchor_contract_month}",
     )

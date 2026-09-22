@@ -1,244 +1,226 @@
 # Local development on macOS
 
-Reviewed against the working tree on 2026-09-21. The workstation is Apple Silicon
-(`Darwin arm64`); production remains Linux on an amd64 VPS. All local commands below
-use zsh/sh syntax. Linux `systemctl` and production Docker commands belong on the VPS.
+Configured and validated on 2026-09-21 on Apple Silicon. Source lives in the OneDrive
+workspace. The launcher uses a protected configuration and Python environment outside
+OneDrive; SQLite, logs and existing sensitive history are also outside OneDrive. The owner
+subsequently updated the repo `.env`, which is independent of the protected file. The
+Mac runs the app natively; the Ubuntu VPS retains its container deployment. Both use
+the same Python and Node versions and the same dependency lockfiles.
 
-## 1. Locate the repository and select the toolchain
-
-The current workspace contains archives and reports beside the actual Git repository.
-Start in `code/`, not its parent:
+## Installed toolchain and working directory
 
 ```sh
 cd "/Users/leoying/Library/CloudStorage/OneDrive-Personal/ZQ_Polymarket/code"
-git status --short
 ```
 
-For credentialed development, use an unsynchronized checkout, for example
-`$HOME/Developer/Poly-ZQ-trading`, and run all subsequent commands from that checkout's
-root. Git's `.gitignore` does not prevent OneDrive from uploading `.env`, databases,
-logs, or order journals. Keep secrets and runtime state outside cloud-synchronized
-folders; the existing OneDrive checkout can still be used for source review and offline tests.
+| Component | This Mac | Repository policy |
+|---|---|---|
+| Python | Homebrew 3.14.7 | `.python-version` pins 3.14.7; Python 3.14 supported |
+| Node / npm | 26.9.0 / 11.19.1 | `.node-version` pins 26.9.0; Node `>=26.9.0,<27`, npm 11 |
+| uv | 0.12.17 | `uv.lock`, `--locked`, development extra |
+| IBKR API | Official Mac/Unix 10.50.01 | Same distribution/checksum as the container |
+| Database | SQLite / aiosqlite | Fresh October ledger, no database server needed |
 
-| Component | Repository requirement / development target |
+Use the installed newer tools; the Mac does not need Docker or Colima. CI checks both
+Ubuntu and macOS with **Python 3.14.7 and Node 26.9.0**. The production Dockerfile pins
+those versions and uv 0.12.17. Node builds the dashboard; the final production image
+runs Python and serves the built static files. The VPS only adopts the upgraded
+toolchain after a new image is built and deployed. `/usr/bin/python3` is Apple's 3.9.6; use the launcher
+below so commands run under the project interpreter.
+
+## Daily commands
+
+`scripts/dev.sh` sets the project directory, Homebrew/uv PATH, external Python environment
+and protected env-file path. It works from any directory when invoked by its full path.
+It selects the pinned Python without automatically downloading another interpreter and
+checks the Node version before frontend commands. When upgrading the installed Mac
+toolchain, update `.python-version`, `.node-version` and the Dockerfile pins together;
+CI reads the version files on both operating systems.
+
+```sh
+scripts/dev.sh sync
+scripts/dev.sh check
+scripts/dev.sh run python --version
+scripts/dev.sh run python -c 'from zq_arb.config import get_settings; get_settings(); print("Configuration schema OK")'
+```
+
+`sync` installs the locked Python development dependencies and runs `npm ci --ignore-scripts`.
+`check` runs Ruff, mypy, all backend tests with coverage, ESLint, dashboard tests and the
+production dashboard build. Tests use isolated databases, mocked venues and the explicit
+historical September fixture; October regressions verify the new model and runtime.
+Do not export production/trading settings into the test shell: process variables override
+settings loaded from files. The 85% coverage gate excludes the IBKR adapter, runtime
+orchestrator and process entrypoint; dedicated tests still exercise those boundaries.
+
+The environment is at `$HOME/.local/share/zq-arb/venvs/mac-py314`. Set
+`UV_PROJECT_ENVIRONMENT` to a different path when using another checkout, because the
+project is installed editable. A plain `uv run` outside the launcher creates a checkout
+`.venv` unless this variable is exported. Windows virtual environments and native Node
+binaries must not be copied into this setup. Only `web/node_modules` is needed by the app.
+
+## Configuration and data locations
+
+| Purpose | Path |
 |---|---|
-| Python | `>=3.12,<3.15`; use **3.12** to match CI and the production image |
-| Python dependencies | `uv.lock`; install the `dev` extra with `--locked` |
-| Node.js | **24**, matching CI and the dashboard image build |
-| JavaScript dependencies | `web/package-lock.json`; install with `npm ci --ignore-scripts` |
-| IBKR Python API | Official Mac/Unix source; the Dockerfile pins **10.50.01** |
-| Database | SQLite through `aiosqlite`; no database server required |
+| Default launcher settings | `~/.config/zq-arb/development.env` (0600; parent 0700) |
+| Owner-edited local settings / Vite configuration | repository `.env` (ignored by Git) |
+| Python environment | `~/.local/share/zq-arb/venvs/mac-py314` |
+| IBKR source | `~/.local/share/zq-arb/twsapi-10.50.01/IBJts/source/pythonclient` |
+| New database | `~/Library/Application Support/ZQArb/october-2026-dev.sqlite3` |
+| Logs / audit output | `~/Library/Application Support/ZQArb/logs` and `audit` |
+| Existing historical records | `~/Library/Application Support/ZQArb/history` |
 
-At review time, `/usr/bin/python3` was 3.9.6, the repository `.venv` used 3.14.7,
-and the shell's Node was 26.9.0. These are not the CI toolchain. `uv` was installed
-at `$HOME/.local/bin/uv`; Homebrew was under `/opt/homebrew`. Select versions explicitly.
+`ZQ_ENV_FILE` selects the backend file and is also honored by operational scripts unless
+`--env-file` overrides it. An explicitly selected missing file is an error. A plain command
+without `ZQ_ENV_FILE` falls back to `.env`. The owner updated that file during margin
+verification; it is independent of the protected launcher configuration. To select it
+explicitly, run `ZQ_ENV_FILE="$PWD/.env" scripts/dev.sh backend` from the repo root.
+Process environment variables always take precedence. Use literal absolute paths inside dotenv
+values; `$HOME` and `~` are not expanded there. Absolute SQLite URLs use four slashes:
+`sqlite+aiosqlite:////Users/YOUR_USER/Library/Application Support/ZQArb/october-2026-dev.sqlite3`.
 
-If these tools are missing and Homebrew is installed:
+The protected file retains the original local risk limits (five ZQ contracts per child,
+60-contract cap); the latest owner-edited repo `.env` selects ten contracts per child.
+Confirm which file is selected before interpreting displayed limits. Local operation is
+`READ_ONLY`, with live trading,
+both venue submission switches, wallet deployment and simulated fills disabled. The new
+ledger contains no imported opening inventory or historical executions. It is bound to the
+configured account/client, wallet, event, contract month and rate-effective date.
 
-```sh
-brew install uv node@24
-```
+This Mac connects to the existing **live TWS socket at 127.0.0.1:7496**, using a separate
+API client ID, **61026**. `READ_ONLY` is the application's operating mode, not an assertion
+that TWS is a paper account. For paper development, configure the actual paper port/account
+and use a separate database. Preserve maintenance settings in `America/Chicago`; the Mac's
+Shanghai time zone does not change exchange maintenance or FOMC UTC deadlines.
 
-In each development terminal, make the installed tools available and select Node 24:
+For a different new workstation, generate a protected file with
+`deploy/bootstrap_env.py` from the current example, then review all paths, ports and venue
+identity before use. The bootstrap example is for Linux and must not be launched unchanged
+on macOS. Keep secrets and runtime files outside synchronized folders; `.gitignore` only
+controls Git. An unsynchronized source checkout is also supported.
 
-```sh
-export PATH="$HOME/.local/bin:$PATH"
-export PATH="$(brew --prefix node@24)/bin:$PATH"
-uv --version
-node --version
-npm --version
-```
+## October event and calculation
 
-Homebrew's [keg-only guidance](https://docs.brew.sh/How-to-Build-Software-Outside-Homebrew-with-Homebrew-keg-only-Dependencies)
-explains the version-specific PATH. Do not assume installing `node@24` changes the
-default `node` executable.
-
-## 2. Rebuild dependencies for macOS
-
-Windows `.venv/Scripts/python.exe` and native `node_modules` binaries cannot be reused
-on macOS. Keep the lockfiles and recreate dependencies for the host architecture.
-Use a dedicated Python environment outside OneDrive, with one environment per checkout:
-
-```sh
-export UV_PROJECT_ENVIRONMENT="$HOME/.local/share/zq-arb/venvs/code-py312"
-uv python install 3.12
-uv sync --locked --python 3.12 --extra dev
-uv run --locked python --version
-(cd web && npm ci --ignore-scripts)
-```
-
-Repeat the `UV_PROJECT_ENVIRONMENT` export in each backend/test terminal, including the
-terminal used to launch the backend. No virtual-environment activation or `PYTHONPATH`
-override is needed: uv installs this project as an editable package. Without the export,
-uv uses the checkout's `.venv`; on macOS its interpreter is `.venv/bin/python`.
-See uv's [project environment configuration](https://docs.astral.sh/uv/concepts/projects/config/)
-and [locked synchronization](https://docs.astral.sh/uv/concepts/projects/sync/).
-
-`npm ci` replaces `web/node_modules` using the lockfile. Avoid sharing generated
-dependencies between Windows and Mac; an unsynchronized checkout is preferable for
-day-to-day work. Native-module errors mentioning `win32`, `darwin`, esbuild, or Rolldown
-usually require reinstalling dependencies with the correct Node and architecture.
-
-## 3. Run offline checks first
-
-From the repository root, in a shell without exported application/trading variables:
-
-```sh
-uv run --locked ruff check src tests
-uv run --locked mypy src
-uv run --locked pytest
-(cd web && npm run lint && npm test -- --run && npm run build)
-git diff --check
-```
-
-The shared test fixture reads `deploy/zq-arb.env.example`, substitutes deterministic
-values, and uses mocked venues and temporary databases. A credentialed `.env`, running
-TWS/Gateway, and downloaded IBKR API source are unnecessary for these offline checks.
-Operating-system variables override values loaded from an env file, including in tests.
-
-For the separate configured coverage gate, run `uv run --locked pytest --cov`.
-The threshold is 85%; the IBKR callback adapter, engine orchestration, and entrypoint
-are excluded from line coverage. CI currently runs pytest without `--cov` and mypy on
-`src` only. Historical Windows validation counts remain historical; see the
-[September 21 maintenance validation](validation/ibkr-maintenance-2026-09-21.md)
-for the existing macOS/Python 3.12 evidence and its release scope.
-
-## 4. Prepare local configuration before starting the engine
-
-The engine loads `.env` relative to its working directory, with process environment
-variables taking precedence. Operational scripts with `--env-file` can select another
-file; the `zq-arb` entrypoint and read-only smoke script use the root `.env`.
-Do not copy the CI step that overwrites `.env` into a configured development checkout.
-
-For a **new unsynchronized checkout** without `.env`, generate local dashboard secrets:
-
-```sh
-uv run --locked python deploy/bootstrap_env.py deploy/zq-arb.env.example .env
-```
-
-The bootstrap refuses to overwrite an existing file. It generates three dashboard secrets
-and sets file mode `0600`, but otherwise copies the **Linux deployment** template. Edit
-its local settings before launch. For an existing `.env`, preserve the original securely
-and review it against the current example instead of replacing it wholesale.
-
-The following are local development values, not a complete env file. Replace
-`YOUR_MAC_USER` with the actual home-directory name and use literal absolute paths in
-`.env`; do not rely on shell expansion of `~` or `$HOME` in path fields.
+The [Federal Reserve calendar](https://www.federalreserve.gov/newsevents/2026-october.htm)
+lists the October 27–28 meeting and the October 28 statement at 14:00 New York time.
+The configured strategy values are:
 
 ```dotenv
-APP_ENV=development
-RUN_MODE=READ_ONLY
-LIVE_TRADING_ENABLED=false
-IBKR_ORDER_SUBMISSION_ENABLED=false
-POLYMARKET_ORDER_SUBMISSION_ENABLED=false
-API_HOST=127.0.0.1
-API_PORT=8765
-DASHBOARD_ORIGIN=http://127.0.0.1:5173
-CORS_ALLOWED_ORIGINS=http://127.0.0.1:5173
-COOKIE_SECURE=false
-RUNTIME_DATA_DIR="/Users/YOUR_MAC_USER/Library/Application Support/ZQArb"
-DATABASE_URL="sqlite+aiosqlite:////Users/YOUR_MAC_USER/Library/Application Support/ZQArb/read-only.sqlite3"
-LOG_DIR="/Users/YOUR_MAC_USER/Library/Application Support/ZQArb/logs"
-AUDIT_EXPORT_DIR="/Users/YOUR_MAC_USER/Library/Application Support/ZQArb/audit"
-IBKR_HOST=127.0.0.1
-IBKR_PORT=7497
-IBKR_TRADING_MODE=paper
-IBKR_PYTHON_API_PATH="/Users/YOUR_MAC_USER/.local/share/zq-arb/twsapi/IBJts/source/pythonclient"
+IBKR_ZQ_CONTRACT_MONTH=202610
+IBKR_ZQ_SUBSCRIPTION_MONTHS=202610,202611,202612
+FOMC_STATEMENT_UTC=2026-10-28T18:00:00Z
+FOMC_TRADING_CUTOFF_UTC=2026-10-28T17:00:00Z
+FOMC_RATE_EFFECTIVE_DATE=2026-10-29
+FEDWATCH_ANCHOR_CONTRACT_MONTH=202611
+FEDWATCH_INTERVENING_RATE_EFFECTIVE_DATES=
+POLYMARKET_EVENT_ID=606422
+POLYMARKET_EVENT_SLUG=fed-decision-in-october-20260617190323537
+POLYMARKET_EVENT_TITLE="Fed Decision in October?"
 ```
 
-The four slashes in the SQLite URL specify an absolute Unix filesystem path. Create
-the local data directories before launch:
+The October 29 effective date is an explicit modeling assumption pending the actual FOMC
+implementation notice. October has 31 calendar days, including weekends: 28 before and
+3 after the assumed change. The model, payoff matrix, actual-fill hedge obligations,
+opening-inventory checks and dashboard use this calendar. Per-contract hedge amounts are
+100.82 INC25 and 201.63 INC50PLUS shares when individually rounded up; a five-contract
+fill needs 504.08 and 1008.15 shares, calculated from unrounded quantities then rounded once.
+The implemented terminal states remain 0, +25 and +50 bp, as in the approved strategy.
+
+November is the non-meeting FedWatch anchor. December has its own scheduled FOMC meeting
+and is not a direct proxy for the post-October rate. The direct October signal does not
+require either diagnostic contract. EFFR refreshes from the New York Fed API; the old
+September manual rate is not reused. On September 21 the fetched observation was 3.88%,
+effective September 17; this is dated validation evidence, not a fixed strategy input.
+
+The example and local files contain all five refreshed market IDs, condition IDs, Yes/No
+token IDs, ticks, minimum sizes, event dates and rule hash. The public source snapshot is
+[october-2026-market.json](validation/october-2026-market.json). Review the
+[market's resolution rules](https://polymarket.com/event/fed-decision-in-october-20260617190323537)
+when changing events. Market selection is explicit; no automatic monthly rollover is enabled.
+A different event/calendar requires a separate ledger; see [execution safety](execution-safety.md).
+
+## IBKR API and network checks
+
+The official [Mac/Unix API](https://www.interactivebrokers.com/docs/tws-api/doc/download-the-tws-api/introduction)
+was installed outside the workspace and its archive SHA-256 matched the Dockerfile:
+`aa065722ca732a41aab202c7bb72932e179b86e7ec51cefa063eb1983fe9f597`.
+`IBKR_PYTHON_API_PATH` points to the directory containing `ibapi/`. `uv sync` does not
+install this vendor source. To reproduce the installation on another Mac:
 
 ```sh
-mkdir -p "$HOME/Library/Application Support/ZQArb/logs" \
-  "$HOME/Library/Application Support/ZQArb/audit"
-```
-
-Use the socket port actually configured in your paper TWS/Gateway; `7497` above is a
-paper-TWS example. The deployment hostname `ib-gateway` is a Docker-network name, not
-the local Mac hostname. Set `IBKR_ACCOUNT_ID` for that paper session and choose an API
-client ID that is not already in use. Use distinct ledgers for paper/live, accounts,
-wallets, and simulation modes; see [execution safety](execution-safety.md).
-
-Keep all required settings from the current example, including the separate execution,
-account-refresh, and callback deadlines and the eight September 21 maintenance settings.
-Maintenance times use `America/Chicago`, not the Mac's Shanghai time zone; they must
-agree with the Gateway schedule. Schema validation can run without connecting to venues:
-
-```sh
-uv run --locked python -c 'from zq_arb.config import get_settings; get_settings(); print("Configuration schema OK")'
-```
-
-Schema success does not check that an API directory exists, that a broker is reachable,
-or that event dates are current. At this review, the existing local `.env` still had
-Windows `C:/` and `D:/` paths and enabled live submission. These settings were not
-changed by the documentation update. They must be reviewed before a local engine launch.
-
-The checked-in market mapping and FOMC cutoff are for **September 16, 2026**. As of
-September 21, the configured entry window has ended. Keep the historical fixture for
-tests; do not extend a cutoff or change only a contract month to reuse it for a new event.
-
-## 5. Install the official IBKR API for connectivity checks
-
-Use the official [TWS API Mac/Unix distribution](https://www.interactivebrokers.com/docs/tws-api/doc/download-the-tws-api/introduction).
-The repository loads its source directory directly; it is not installed by `uv sync`.
-To match the version and checksum pinned in the Dockerfile, extract into a fresh
-`twsapi` directory (preserve any existing installation separately):
-
-```sh
-mkdir -p "$HOME/.local/share/zq-arb/twsapi"
+mkdir -p "$HOME/.local/share/zq-arb/twsapi-10.50.01"
 (
-  cd "$HOME/.local/share/zq-arb/twsapi" || exit 1
-  curl --fail --location \
-    https://interactivebrokers.github.io/downloads/twsapi_macunix.1050.01.zip \
-    --output twsapi.zip &&
+  cd "$HOME/.local/share/zq-arb/twsapi-10.50.01" || exit 1
+  curl --fail --location https://interactivebrokers.github.io/downloads/twsapi_macunix.1050.01.zip --output twsapi.zip &&
   printf '%s\n' 'aa065722ca732a41aab202c7bb72932e179b86e7ec51cefa063eb1983fe9f597  twsapi.zip' | shasum -a 256 -c - &&
   unzip -q -n twsapi.zip
 )
 ```
 
-`IBKR_PYTHON_API_PATH` must point to the parent of `ibapi/`, containing both
-`ibapi/client.py` and `ibapi/order_cancel.py`. After configuring `.env`, verify imports
-without opening a broker connection:
+With the intended TWS/Gateway session logged in and API sockets enabled:
 
 ```sh
-uv run --locked python -c 'from zq_arb.config import get_settings; from zq_arb.adapters.ibkr import _load_official_api; _load_official_api(get_settings().ibkr_python_api_path); print("Official IBKR API imports OK")'
+scripts/dev.sh run python scripts/smoke_read_only.py
 ```
 
-TWS/Gateway must be installed, logged in to the intended paper account, and configured
-to accept API socket connections for the optional network check. With `RUN_MODE=READ_ONLY`
-and all three submission/live switches false, run:
+This checks public Polymarket mapping, REST and WebSocket books, live ZQ quotes and a
+non-routing IBKR `whatIf=True` margin preview. It submits no routing order. The Mac's
+existing SOCKS proxy is supported by the locked `python-socks[asyncio]` dependency;
+no system proxy or routing settings were changed.
+
+On September 21, TWS connected, October live bid/ask arrived, the October mapping/rule hash
+matched and all ten books synchronized. Earlier margin requests returned IBKR error 201
+requiring Client Portal verification. The retry at **08:12:22 UTC succeeded**: BUY 10 ZQV6
+at 96.105 returned `AVAILABLE`, with reported initial-margin requirement 5923.12. The check
+did not capture the currency of the margin amount. It exited zero and routed no executable
+order. See the [sanitized request/result](validation/macos-margin-preview-2026-09-21.json).
+
+That successful retry explicitly selected the owner's repo `.env` and temporary client ID
+61027 because another process was already connected using the normal development client.
+To repeat with the same selection, use an unused diagnostic client ID:
 
 ```sh
-uv run --locked python scripts/smoke_read_only.py
+ZQ_ENV_FILE="$PWD/.env" IBKR_CLIENT_ID=61027 scripts/dev.sh run python scripts/smoke_read_only.py
 ```
 
-This contacts public Polymarket endpoints and IBKR; it submits no routing order. If an
-account ID and qualified quote are available, it requests a non-routing `whatIf=True`
-margin preview. A stale/resolved event may fail market checks even when connectivity works.
-The smoke result does not certify the full execution/recovery path.
+The client override applies only to this diagnostic process; it does not alter `.env` or
+the running engine. Passing this check does not certify live execution or reconciliation.
 
-## 6. Launch and operate
+## Start and stop
 
-From the repository root, run `uv run --locked zq-arb` in the configured backend terminal.
-In a second terminal, select Node 24, run `cd web`, then `npm run dev`. Open
-`http://127.0.0.1:5173` and use the local dashboard credentials. Vite listens on 5173
-and proxies API/WebSocket traffic to `127.0.0.1` and `API_PORT`; use the exact configured
-origin rather than switching between `localhost` and `127.0.0.1`.
+Run in two separate terminals at the repository root:
 
-Stop the frontend with Ctrl-C. Let the backend finish its configured shutdown drain
-after Ctrl-C. A restart always starts disarmed. Docker is optional for native local
-development; the production Compose file, Linux service installation, and deployment
-scripts are documented in [the VPS guide](../deploy/README.md).
+```sh
+# Terminal 1
+scripts/dev.sh backend
+```
 
-For remote Gateway/Passless desktops, use the [macOS SSH forwarding instructions](../deploy/IBKR_GATEWAY_PASSLESS.md#access-from-macos).
-Those desktops and services run on the VPS, independently of your local development process.
+```sh
+# Terminal 2
+scripts/dev.sh web
+```
 
-## Documentation review verification
+Open `http://127.0.0.1:5173` and use the existing dashboard login retained in the protected
+file. Vite listens on 5173 and proxies API/WebSocket traffic to `127.0.0.1:8765`. Use the
+configured origin consistently. If changing the backend port, update private `API_PORT`
+and the root `.env` used by Vite. `DASHBOARD_ORIGIN`/`CORS_ALLOWED_ORIGINS` must
+match the browser origin; `COOKIE_SECURE=false` is required for local HTTP.
 
-The September 21 documentation review checked local links and anchors, zsh syntax for
-shell examples, CLI option names, the Mac dotenv example against the current configuration
-schema, and the IBKR archive/checksum against the Dockerfile. All 24 configuration/security
-tests passed on macOS/Python 3.12. No broker connection, credential diagnostic, order command,
-engine startup, or VPS deployment was performed. Existing application and configuration
-changes were preserved.
+Stop with Ctrl-C and let backend shutdown finish. Restart starts disarmed. For Linux
+services, Docker deployment and remote desktop access, use the [VPS guide](../deploy/README.md)
+and [Mac SSH forwarding instructions](../deploy/IBKR_GATEWAY_PASSLESS.md#access-from-macos).
+
+## Cleanup and validation evidence
+
+Approved cleanup removed copied dependencies, caches, Windows launch/install utilities,
+obsolete downloaded sources and build output. No Windows backup was created. Existing
+ledgers, order journals, passkey material and historical records were moved rather than
+duplicated. Spreadsheets, articles, source and Git history were retained. See the
+[cleanup manifest](validation/macos-cleanup-2026-09-21.json) and
+[implementation validation](validation/macos-october-2026-09-21.md).
+
+After the owner closed TWS, follow-up cleanup stopped the remaining local backend and
+removed regenerated caches, the repo `.venv`, `web/node_modules` and `web/dist`. Both local
+env files, SQLite and historical records were preserved, as were the external Python
+environment and official IBKR API. Run `scripts/dev.sh sync` to restore the dashboard
+dependencies before launching; `scripts/dev.sh check` also rebuilds `web/dist`.

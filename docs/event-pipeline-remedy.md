@@ -63,9 +63,9 @@ for later releases. Reproduction commands were updated for macOS on 2026-09-21.
    The timings above are historical Windows measurements, not Mac performance targets:
 
    ```sh
-   uv run --locked python scripts/benchmark_event_pipeline.py --mode ibkr --events 30000 --rate 10000
-   uv run --locked python scripts/benchmark_event_pipeline.py --mode polymarket --events 30000 --rate 5000
-   uv run --locked python scripts/benchmark_event_pipeline.py --mode mixed --events 150000 --rate 2500
+   scripts/dev.sh run python scripts/benchmark_event_pipeline.py --mode ibkr --events 30000 --rate 10000
+   scripts/dev.sh run python scripts/benchmark_event_pipeline.py --mode polymarket --events 30000 --rate 5000
+   scripts/dev.sh run python scripts/benchmark_event_pipeline.py --mode mixed --events 150000 --rate 2500
    ```
 
 6. **Validation and remaining operational work**

@@ -28,7 +28,7 @@ export function Header({ state, onControl }: { state: EngineSnapshot; onControl:
           : { label: 'ARMED · WAITING', tone: 'amber' }
       : { label: 'DISARMED', tone: 'neutral' }
   return <header className="topbar">
-    <div className="brand"><div className="mark">ZQ</div><div><h1>Cross-Venue Arbitrage</h1><span>FOMC September 2026 · control terminal</span></div></div>
+    <div className="brand"><div className="mark">ZQ</div><div><h1>Cross-Venue Arbitrage</h1><span>{String(state.metadata?.event_title ?? 'FOMC')} · control terminal</span></div></div>
     <div className="top-status">
       <Pill tone={state.run_mode === 'READ_ONLY' ? 'amber' : 'blue'}>{state.run_mode}</Pill>
       <Pill tone={operatingStatus.tone}>{operatingStatus.label}</Pill>

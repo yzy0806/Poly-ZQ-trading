@@ -14,7 +14,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from zq_arb.adapters.polymarket import PolymarketAdapter
-from zq_arb.config import Settings
+from zq_arb.config import Settings, environment_file
 from zq_arb.domain.enums import RunMode
 
 
@@ -62,7 +62,7 @@ async def place_paper_order(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--env-file", type=Path, default=environment_file())
     parser.add_argument("--token-id", default="PAPER-TEST-TOKEN")
     parser.add_argument("--price", type=positive_decimal, required=True)
     parser.add_argument("--shares", type=positive_decimal, default=Decimal("1"))

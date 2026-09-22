@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 from hypothesis import given
 from hypothesis import strategies as st
 
 from zq_arb.analytics.probability import (
-    DiagnosticPrices,
     adjacent_outcome_distribution,
     direct_zq_probability,
     executable_probability,
@@ -16,6 +16,7 @@ from zq_arb.analytics.probability import (
     theoretical_settlement,
     with_polymarket_expectation,
 )
+from zq_arb.domain.calendar import MeetingCalendar
 
 
 def test_implied_rate_is_100_minus_price() -> None:
@@ -23,24 +24,29 @@ def test_implied_rate_is_100_minus_price() -> None:
 
 
 def test_settlement_uses_all_calendar_days() -> None:
-    result = theoretical_settlement(Decimal("3.625"), Decimal("25"))
+    result = theoretical_settlement(
+        Decimal("3.625"), Decimal("25"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
     assert result == Decimal("96.25833333333333333333333333")
 
 
 def test_executable_binary_probability_endpoints() -> None:
-    zero = theoretical_settlement(Decimal("3.625"), Decimal("0"))
-    higher = theoretical_settlement(Decimal("3.625"), Decimal("25"))
+    zero = theoretical_settlement(
+        Decimal("3.625"), Decimal("0"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
+    higher = theoretical_settlement(
+        Decimal("3.625"), Decimal("25"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
     assert executable_probability(zero, zero, higher) == 0
     assert executable_probability(higher, zero, higher) == 1
 
 
 def test_reference_tree_exposes_all_intermediates() -> None:
     snapshot = fedwatch_reference(
-        DiagnosticPrices(
-            september=Decimal("96.32"),
-            october=Decimal("96.25"),
-            november=Decimal("96.20"),
-        ),
+        {"202609": Decimal("96.32"), "202610": Decimal("96.25"), "202611": Decimal("96.20")},
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
+        anchor_contract_month="202611",
+        intervening_effective_dates=(date(2026, 10, 29),),
         pre_meeting_effr=Decimal("3.625"),
     )
     assert set(snapshot.rates) == {"202609", "202610", "202611"}
@@ -52,12 +58,15 @@ def test_reference_tree_exposes_all_intermediates() -> None:
 
 def test_direct_september_model_uses_calendar_weight_and_adjacent_states() -> None:
     pre_meeting_effr = Decimal("3.625")
-    midpoint = theoretical_settlement(pre_meeting_effr, Decimal("12.5"))
+    midpoint = theoretical_settlement(
+        pre_meeting_effr, Decimal("12.5"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
     snapshot = direct_zq_probability(
         target_contract_month="202609",
         target_bid=midpoint,
         target_ask=midpoint,
         pre_meeting_effr=pre_meeting_effr,
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     assert snapshot.expected_move_bps is not None
     assert snapshot.expected_move_bps.quantize(Decimal("0.001")) == Decimal("12.500")
@@ -78,23 +87,27 @@ def test_authorizing_long_entry_measure_uses_the_best_bid() -> None:
         target_bid=Decimal("96.320"),
         target_ask=Decimal("96.325"),
         pre_meeting_effr=Decimal("3.625"),
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     assert snapshot.executable_buy_expected_move_bps == implied_decision_move_bps(
-        Decimal("96.320"), Decimal("3.625")
+        Decimal("96.320"), Decimal("3.625"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
     )
     assert snapshot.bid_reference_expected_move_bps == implied_decision_move_bps(
-        Decimal("96.325"), Decimal("3.625")
+        Decimal("96.325"), Decimal("3.625"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
     )
 
 
 def test_direct_model_normalizes_polymarket_expected_move() -> None:
     pre_meeting_effr = Decimal("3.625")
-    midpoint = theoretical_settlement(pre_meeting_effr, Decimal("12.5"))
+    midpoint = theoretical_settlement(
+        pre_meeting_effr, Decimal("12.5"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
     direct = direct_zq_probability(
         target_contract_month="202609",
         target_bid=midpoint,
         target_ask=midpoint,
         pre_meeting_effr=pre_meeting_effr,
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     enriched = with_polymarket_expectation(
         direct,
@@ -114,12 +127,15 @@ def test_direct_model_normalizes_polymarket_expected_move() -> None:
 
 def test_direct_model_rejects_a_move_outside_version_one_scenarios() -> None:
     pre_meeting_effr = Decimal("3.625")
-    price = theoretical_settlement(pre_meeting_effr, Decimal("75"))
+    price = theoretical_settlement(
+        pre_meeting_effr, Decimal("75"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
     snapshot = direct_zq_probability(
         target_contract_month="202609",
         target_bid=price,
         target_ask=price,
         pre_meeting_effr=pre_meeting_effr,
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
     )
     assert not snapshot.valid
     assert not any(snapshot.bucket_probabilities.values())
@@ -132,9 +148,9 @@ def test_direct_helpers_cover_boundaries_and_invalid_calendar() -> None:
     assert (lower, upper) == (25, 50)
     assert (lower_probability, upper_probability) == (Decimal("0"), Decimal("1"))
     try:
-        implied_decision_move_bps(Decimal("96"), Decimal("4"), days_after=0)
+        MeetingCalendar("202609", date(2026, 10, 1))
     except ValueError as exc:
-        assert "calendar weights" in str(exc)
+        assert "rate effective date" in str(exc)
     else:
         raise AssertionError("zero post-decision weight must be rejected")
 
@@ -146,6 +162,10 @@ def test_direct_helpers_cover_boundaries_and_invalid_calendar() -> None:
 )
 def test_settlement_is_monotonic_in_rate_move(start: Decimal, first: int, second: int) -> None:
     low, high = sorted((first, second))
-    low_settlement = theoretical_settlement(start, Decimal(low))
-    high_settlement = theoretical_settlement(start, Decimal(high))
+    low_settlement = theoretical_settlement(
+        start, Decimal(low), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
+    high_settlement = theoretical_settlement(
+        start, Decimal(high), calendar=MeetingCalendar("202609", date(2026, 9, 17))
+    )
     assert low_settlement >= high_settlement

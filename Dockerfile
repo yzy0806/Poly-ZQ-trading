@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:24-bookworm-slim AS dashboard-build
+# Match the native Mac toolchain; update these pins with .python-version/.node-version.
+ARG PYTHON_IMAGE=python:3.14.7-slim-bookworm@sha256:82bc3c539b8813ada9d68c63b40158fa002f7f33de9bf3312a3dfdc0620dff56
+ARG NODE_IMAGE=node:26.9.0-bookworm-slim@sha256:582460f614631b59b824ac6020533b9bf339c7fdf3a6d7db31abb6b4065f0212
+
+FROM ${NODE_IMAGE} AS dashboard-build
 
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json ./
@@ -9,11 +13,13 @@ COPY web/ ./
 RUN npm run build
 
 
-FROM python:3.12-slim-bookworm AS python-deps
+FROM ${PYTHON_IMAGE} AS python-deps
 
-COPY --from=ghcr.io/astral-sh/uv:0.10.6 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.17 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_PYTHON=/usr/local/bin/python \
+    UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-dev --no-install-project
@@ -34,7 +40,7 @@ RUN apt-get update \
     && rm -f /tmp/twsapi.zip
 
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 
 ARG BUILD_REVISION=unknown
 LABEL org.opencontainers.image.title="ZQ Polymarket Arbitrage Monitor" \

@@ -10,12 +10,12 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from zq_arb.auth_diagnostic import check_auth
-from zq_arb.config import Settings
+from zq_arb.config import Settings, environment_file
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--env-file", type=Path, default=environment_file())
     parser.add_argument("--include-history", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("runtime/polymarket-auth-check.json"))
     args = parser.parse_args()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,10 +120,22 @@ async def test_armed_waiting_does_not_submit_without_a_tradeable_opportunity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("october", [False, True])
 async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late_fills(
     tmp_path: Path,
     settings: Settings,
+    october: bool,
 ) -> None:
+    if october:
+        settings = settings.model_copy(
+            update={
+                "ibkr_zq_contract_month": "202610",
+                "ibkr_zq_subscription_months": "202610,202611,202612",
+                "fomc_rate_effective_date": date(2026, 10, 29),
+            }
+        )
+    due25 = Decimal("302.45") if october else Decimal("1458.45")
+    due50 = Decimal("604.89") if october else Decimal("2916.90")
     database_path = tmp_path / "coordinator.sqlite3"
     configured = settings.model_copy(
         update={
@@ -195,8 +207,8 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
     assert batch.remaining_quantity == Decimal("7")
     assert len(batch.obligations) == 2
     assert [item.due_shares for item in batch.obligations] == [
-        Decimal("1458.45000000"),
-        Decimal("2916.90000000"),
+        due25,
+        due50,
     ]
     assert all(item.deficit_shares == 0 for item in batch.obligations)
     current = await state.get()
@@ -204,8 +216,8 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
     positions = {(item.venue, item.label): item for item in current.portfolio.positions}
     zq_position = positions[("IBKR", f"ZQ {configured.ibkr_zq_contract_month}")]
     assert zq_position.strategy_quantity == Decimal("3")
-    assert positions[("POLYMARKET", "INC25 YES")].strategy_quantity == Decimal("1458.45000000")
-    assert positions[("POLYMARKET", "INC50PLUS YES")].strategy_quantity == Decimal("2916.90000000")
+    assert positions[("POLYMARKET", "INC25 YES")].strategy_quantity == due25
+    assert positions[("POLYMARKET", "INC50PLUS YES")].strategy_quantity == due50
     assert positions[("POLYMARKET", "INC25 YES")].simulated
     assert positions[("POLYMARKET", "INC25 YES")].reconciled is True
 

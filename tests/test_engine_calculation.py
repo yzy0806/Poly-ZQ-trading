@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
 
+from zq_arb.analytics.probability import theoretical_settlement
 from zq_arb.config import Settings
 from zq_arb.domain.enums import (
     ConnectionStatus,
@@ -60,6 +62,43 @@ def book(token_id: str, bid: str, ask: str, market: str) -> OrderBook:
         source="WEBSOCKET",
         stream_synchronized=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_october_runtime_uses_calendar_for_signal_and_hedge_size(settings: Settings) -> None:
+    october = settings.model_copy(update={
+        "ibkr_zq_contract_month": "202610",
+        "ibkr_zq_subscription_months": "202610,202611,202612",
+        "fomc_rate_effective_date": date(2026, 10, 29),
+        "fedwatch_anchor_contract_month": "202611",
+        "fedwatch_intervening_rate_effective_dates": "",
+        "ibkr_zq_child_order_quantity": 5,
+    })
+    runtime = EngineRuntime(october)
+    try:
+        snapshot = await runtime.state.get()
+        mid = theoretical_settlement(
+            snapshot.effr.rate_percent, Decimal("12.5"), calendar=october.meeting_calendar
+        )
+        books = {
+            leg.yes_token_id: book(leg.yes_token_id, "0.01", "0.02", leg.code)
+            for leg in october.market_legs
+        }
+        calculated = runtime._calculate(snapshot.model_copy(update={
+            "quotes": {"202610": quote("202610", str(mid))},
+            "books": books,
+        }))
+        assert calculated.probabilities.target_contract_month == "202610"
+        assert calculated.probabilities.post_decision_weight == Decimal(3) / 31
+        probability = calculated.probabilities.upper_probability
+        assert probability.quantize(Decimal(".000001")) == Decimal(".5")
+        assert calculated.opportunities[0].token_requirements == {
+            "INC25": Decimal("504.08"), "INC50PLUS": Decimal("1008.15"),
+        }
+        assert not calculated.opportunities[0].tradeable
+    finally:
+        await runtime.polymarket.close()
+        await runtime.database.close()
 
 
 @pytest.mark.asyncio

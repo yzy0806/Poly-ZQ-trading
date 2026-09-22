@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, SecretStr, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from zq_arb.domain.calendar import MeetingCalendar
 from zq_arb.domain.enums import RunMode
 
 PLACEHOLDER_MARKERS = ("REPLACE_", "REQUIRED_", "<your-", "<")
@@ -211,6 +213,9 @@ class Settings(BaseSettings):
     cme_timezone: str
     fomc_trading_cutoff_utc: datetime
     fomc_statement_utc: datetime
+    fomc_rate_effective_date: date
+    fedwatch_anchor_contract_month: str
+    fedwatch_intervening_rate_effective_dates: str = ""
     fomc_post_decision_resume_enabled: bool
     fomc_trading_resume_utc: datetime | None = None
     geoblock_refresh_seconds: int
@@ -326,14 +331,62 @@ class Settings(BaseSettings):
             errors.append("POLYMARKET_HEDGE_MAX_REPRICES must be positive")
         if self.fomc_post_decision_resume_enabled:
             errors.append("post-decision resumption is prohibited for version 1")
-        if self.fomc_trading_cutoff_utc >= self.fomc_statement_utc:
-            errors.append("FOMC cutoff must precede the statement")
+        try:
+            calendar = self.meeting_calendar
+            if (
+                self.fomc_statement_utc.tzinfo is None
+                or self.fomc_trading_cutoff_utc.tzinfo is None
+            ):
+                errors.append("FOMC timestamps must include a UTC offset")
+            else:
+                if self.fomc_trading_cutoff_utc >= self.fomc_statement_utc:
+                    errors.append("FOMC cutoff must precede the statement")
+                statement_date = self.fomc_statement_utc.astimezone(
+                    ZoneInfo(self.fomc_timezone)
+                ).date()
+                if statement_date.strftime("%Y%m") != calendar.contract_month:
+                    errors.append("FOMC statement must be in the target contract month")
+                if calendar.rate_effective_date <= statement_date:
+                    errors.append("FOMC rate effective date must follow the statement date")
+            months = self.subscription_contract_months
+            if tuple(sorted(months)) != months:
+                errors.append("ZQ subscription months must be in chronological order")
+            for month in months:
+                date(int(month[:4]), int(month[4:]), 1)
+            if (
+                self.fedwatch_anchor_contract_month not in months[1:]
+                or self.fedwatch_anchor_contract_month <= calendar.contract_month
+            ):
+                errors.append("FedWatch anchor must be a subscribed month after the target")
+            effective_dates = self.fedwatch_intervening_dates
+            effective_months = [value.strftime("%Y%m") for value in effective_dates]
+            if len(effective_months) != len(set(effective_months)):
+                errors.append("FedWatch supports at most one rate change per intervening month")
+            for value in effective_dates:
+                month = value.strftime("%Y%m")
+                if not calendar.contract_month < month < self.fedwatch_anchor_contract_month:
+                    errors.append("FedWatch intervening dates must precede the non-meeting anchor")
+                MeetingCalendar(month, value)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            errors.append(str(exc))
         errors.extend(self.polymarket_auth_errors())
         if self.run_mode.is_live:
             errors.extend(self.live_readiness_errors())
         if errors:
             raise ValueError("; ".join(dict.fromkeys(errors)))
         return self
+
+    @property
+    def meeting_calendar(self) -> MeetingCalendar:
+        return MeetingCalendar(self.ibkr_zq_contract_month, self.fomc_rate_effective_date)
+
+    @property
+    def fedwatch_intervening_dates(self) -> tuple[date, ...]:
+        return tuple(
+            date.fromisoformat(value.strip())
+            for value in self.fedwatch_intervening_rate_effective_dates.split(",")
+            if value.strip()
+        )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -496,9 +549,15 @@ def validate_environment_schema(env_path: Path) -> None:
         raise ValueError("invalid .env schema: " + "; ".join(problems))
 
 
+def environment_file() -> Path:
+    return Path(os.environ.get("ZQ_ENV_FILE", ".env")).expanduser()
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    env_path = Path(".env")
+    env_path = environment_file()
+    if "ZQ_ENV_FILE" in os.environ and not env_path.is_file():
+        raise ValueError("Configured ZQ_ENV_FILE does not exist")
     if env_path.exists():
         validate_environment_schema(env_path)
     return Settings(_env_file=env_path)

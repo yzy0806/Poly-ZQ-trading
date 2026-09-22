@@ -191,7 +191,7 @@ The important trust boundaries are:
 
 The deployment workflow is defined in `container.yml`. It runs for pull requests, pushes to `main`, and manual workflow dispatches.
 
-The Python validation job uses Python 3.12 and a locked dependency set, then runs Ruff, MyPy, and the test suite. The dashboard validation job uses Node 24, installs the locked JavaScript dependencies, and runs linting, tests, and a production build.
+The September 21 repository update aligns native Mac development and the Ubuntu production build on Python 3.14.7, Node 26.9.0 and uv 0.12.17. CI reads `.python-version` and `.node-version` for both Ubuntu and macOS, installs the locked dependencies, and runs Ruff, MyPy, the backend suite with the coverage gate, dashboard lint/tests and the dashboard build. The Dockerfile pins the same runtime versions. This source change is pending publication and rollout; it does not replace the last observed production artifact in Section 4.2.
 
 For non-pull-request runs, GitHub Actions builds and publishes the application container to GHCR. The workflow uses Docker Buildx caching and emits provenance and an SBOM. Third-party GitHub Actions are pinned to full commit hashes. The workflow uses the repository-scoped `GITHUB_TOKEN`; read permission is the default, while package, attestation, and identity-token writes are limited to the image-publishing job.
 
@@ -525,7 +525,7 @@ The tracked September 12 readiness note has been consolidated into this section 
 Use one acceptance record for each immutable release. A container health check is only the start of acceptance, and an old test result or clean database snapshot cannot authorize a new runtime.
 
 1. Identify the intended commit and digest. Review its changes, outstanding findings in Section 11, account/venue mode, simulation setting, wallet identity, and the approved limits in Section 1.2. Preserve bootstrap READ_ONLY defaults for a new installation until live operation is authorized.
-2. Require the exact release's Linux/Python 3.12 locked-environment CI, lint/source types, tests and configured coverage threshold, dashboard tests/build, and compatible dependency review. Record what was actually tested; identify any excluded scope such as test-file typing or real-venue fault exercises.
+2. Require the exact release's Ubuntu and macOS CI with the shared Python 3.14.7/Node 26.9.0 pins and locked dependencies, lint/source types, tests and configured coverage threshold, dashboard tests/build, and compatible dependency review. Record what was actually tested; identify any excluded scope such as test-file typing or real-venue fault exercises.
 3. Inspect active orders, unresolved obligations, and both venues' positions. Preserve one writer per ledger. Complete or deliberately retain recovery state before stopping; allow the shutdown drain and retain its result. Do not infer venue cancellation from process termination.
 4. Take a consistent database backup and preserve the prior image digest, configuration identity, and schema/restore compatibility. If the release changes provenance or adopts opening inventory, use the reviewed transition procedure before startup; the normal update script starts the engine and does not install a staged ledger for you.
 5. Promote the exact artifact with the Section 5 procedure. Keep the restarted engine disarmed. Complete Gateway/Passless authentication, reopen workstation tunnels if needed, and verify the intended account. Do not blindly replace the repaired Gateway image during an engine release.

@@ -25,7 +25,6 @@ from zq_arb.analytics.payoff import (
 )
 from zq_arb.analytics.portfolio import value_strategy_portfolio
 from zq_arb.analytics.probability import (
-    DiagnosticPrices,
     direct_zq_probability,
     fedwatch_reference,
     with_polymarket_expectation,
@@ -447,7 +446,7 @@ class EngineRuntime:
             )
 
     async def _ibkr_margin_preview_loop(self) -> None:
-        """Maintain a paced, non-routing BUY-10 ZQ margin preview."""
+        """Maintain a paced, non-routing configured-quantity ZQ margin preview."""
 
         loop = asyncio.get_running_loop()
         last_requested = float("-inf")
@@ -872,17 +871,27 @@ class EngineRuntime:
                 }
             )
         diagnostic = FedWatchDiagnostic()
-        reference_quotes = [snapshot.quotes.get(month) for month in months]
+        reference_months = tuple(
+            month for month in months if month <= self.settings.fedwatch_anchor_contract_month
+        )
+        reference_quotes = [snapshot.quotes.get(month) for month in reference_months]
         reference_mids = [_mid(quote) if quote is not None else None for quote in reference_quotes]
         if all(
             quote is not None and quote.analytics_qualified for quote in reference_quotes
         ) and all(value is not None for value in reference_mids):
-            diagnostic_values = [value for value in reference_mids if value is not None]
             diagnostic = fedwatch_reference(
-                DiagnosticPrices(*diagnostic_values),
+                {
+                    month: value
+                    for month, value in zip(reference_months, reference_mids, strict=True)
+                    if value is not None
+                },
+                calendar=self.settings.meeting_calendar,
+                anchor_contract_month=self.settings.fedwatch_anchor_contract_month,
+                intervening_effective_dates=self.settings.fedwatch_intervening_dates,
                 pre_meeting_effr=effr.rate_percent,
             )
         probabilities = direct_zq_probability(
+            calendar=self.settings.meeting_calendar,
             target_contract_month=target_month,
             target_bid=target_quote.bid,
             target_ask=target_quote.ask,
@@ -941,10 +950,12 @@ class EngineRuntime:
         _, _, _, incremental_margin = self._margin_preview_qualification(snapshot, now)
         emergency_reserve = Decimal("0")
         q25 = round_shares_up(
-            hedge_shares_per_contract(25) * Decimal(self.settings.ibkr_zq_child_order_quantity)
+            hedge_shares_per_contract(25, calendar=self.settings.meeting_calendar)
+            * Decimal(self.settings.ibkr_zq_child_order_quantity)
         )
         q50 = round_shares_up(
-            hedge_shares_per_contract(50) * Decimal(self.settings.ibkr_zq_child_order_quantity)
+            hedge_shares_per_contract(50, calendar=self.settings.meeting_calendar)
+            * Decimal(self.settings.ibkr_zq_child_order_quantity)
         )
         fee_parameters_current, _ = self._polymarket_fee_parameter_status(now)
         polymarket_fees: Decimal | None = Decimal("0") if fee_parameters_current else None
@@ -1006,6 +1017,7 @@ class EngineRuntime:
             book50 = long_book_50
             if price is not None and book25 is not None and book50 is not None:
                 raw = build_three_state_opportunity(
+                    calendar=self.settings.meeting_calendar,
                     contracts=self.settings.ibkr_zq_child_order_quantity,
                     zq_price=price,
                     pre_meeting_effr=probabilities.pre_meeting_effr,
@@ -1041,9 +1053,15 @@ class EngineRuntime:
         if zq_farm is None or zq_farm.status is not FarmStatus.CONNECTED:
             health.append("US futures market-data farm disconnected")
         if target_quote.subscription_status is not SubscriptionStatus.ACTIVE:
-            health.append("ZQU6 current-generation live subscription is not qualified")
+            health.append(
+                f"{self.settings.meeting_calendar.symbol} current-generation live subscription "
+                "is not qualified"
+            )
         if not target_quote.analytics_qualified:
-            health.append(f"ZQU6 not qualified: {target_quote.validation_reason}")
+            health.append(
+                f"{self.settings.meeting_calendar.symbol} not qualified: "
+                f"{target_quote.validation_reason}"
+            )
         if not effr.valid:
             health.append(f"EFFR not qualified: {effr.reason}")
         if not books_fresh:
@@ -1190,7 +1208,7 @@ class EngineRuntime:
                 f"{label} bid/ask is incomplete or crossed",
             )
 
-        quote_checks("ZQU6", "ZQU6", target_quote)
+        quote_checks("ZQ_TARGET", self.settings.meeting_calendar.symbol, target_quote)
         add(
             "PRE_MEETING_EFFR",
             "Pre-meeting EFFR input",
@@ -1206,7 +1224,7 @@ class EngineRuntime:
         )
         add(
             "DIRECT_ZQ_MODEL",
-            "Direct ZQU6 adjacent-state probability model",
+            f"Direct {self.settings.meeting_calendar.symbol} adjacent-state probability model",
             probabilities.valid,
             (
                 f"move={probabilities.expected_move_bps}; "
@@ -1215,7 +1233,8 @@ class EngineRuntime:
             ),
             "within",
             "move [-50, 50] bp and probabilities [0, 1]",
-            "direct ZQU6 move or adjacent-state probability is outside the approved range",
+            f"direct {self.settings.meeting_calendar.symbol} move or adjacent-state probability "
+            "is outside the approved range",
         )
         polymarket_connected = snapshot.polymarket.status is ConnectionStatus.CONNECTED
         add(
@@ -1252,7 +1271,8 @@ class EngineRuntime:
         )
         add(
             "IBKR_COMMISSION_ESTIMATE",
-            "Conservative IBKR BUY-10 round-trip commission",
+            f"Conservative IBKR BUY-{self.settings.ibkr_zq_child_order_quantity} "
+            "round-trip commission",
             commission >= configured_commission,
             f"{commission} (entry what-if={entry_commission})",
             ">=",
@@ -1477,7 +1497,8 @@ class EngineRuntime:
         )
         if available:
             detail = (
-                "matching BUY-10 ZQ what-if preview is available and current; "
+                f"matching BUY-{self.settings.ibkr_zq_child_order_quantity} ZQ what-if "
+                "preview is available and current; "
                 f"limit={preview.limit_price}, age={age}s"
             )
             return True, "CURRENT; " + actual, detail, preview.next_batch_initial_margin
@@ -1492,16 +1513,14 @@ class EngineRuntime:
                     if preview.status is MarginPreviewStatus.PENDING
                     else "REFRESH_REQUIRED; " + actual
                 ),
-                preview.error or "IBKR BUY-10 ZQ what-if preview has not completed",
+                preview.error or "IBKR BUY ZQ what-if preview has not completed",
                 None,
             )
         reasons: list[str] = []
         if not preview.available:
             reasons.append(preview.error or "IBKR preview did not return usable margin")
         if not matches:
-            reasons.append(
-                "preview does not match the configured BUY-10 September batch and current limit"
-            )
+            reasons.append("preview does not match the configured BUY batch and current limit")
         if not fresh:
             reasons.append(
                 f"preview age exceeds {self.settings.ibkr_margin_preview_max_age_seconds}s"

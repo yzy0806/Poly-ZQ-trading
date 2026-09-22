@@ -210,14 +210,15 @@ class RiskEngine:
                 "Polymarket hedge books are WebSocket-unsynchronized",
             )
             add(
-                "ZQU6_SUBSCRIPTION_QUALIFIED",
+                "ZQ_TARGET_SUBSCRIPTION_QUALIFIED",
                 "CROSS_VENUE",
-                "ZQU6 subscription qualification",
+                f"{self.settings.meeting_calendar.symbol} subscription qualification",
                 context.target_subscription_qualified,
                 context.target_subscription_qualified,
                 "==",
                 True,
-                "ZQU6 current-generation live subscription is not qualified",
+                f"{self.settings.meeting_calendar.symbol} current-generation live subscription "
+                "is not qualified",
             )
             add(
                 "PRE_MEETING_EFFR",

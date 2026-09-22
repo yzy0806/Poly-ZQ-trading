@@ -720,8 +720,12 @@ class ExecutionCoordinator:
         if not known:
             return
         token_shares = {
-            self._token_id("INC25"): round_shares_up(hedge_shares_per_contract(25) * quantity),
-            self._token_id("INC50PLUS"): round_shares_up(hedge_shares_per_contract(50) * quantity),
+            self._token_id("INC25"): round_shares_up(
+                hedge_shares_per_contract(25, calendar=self.settings.meeting_calendar) * quantity
+            ),
+            self._token_id("INC50PLUS"): round_shares_up(
+                hedge_shares_per_contract(50, calendar=self.settings.meeting_calendar) * quantity
+            ),
         }
         obligations = await self.repository.record_ibkr_execution_and_obligations(
             order_id=int(order_id_value),
@@ -1614,8 +1618,14 @@ class ExecutionCoordinator:
             return
         scale = batch.remaining_quantity / Decimal(batch.original_quantity)
         margin = snapshot.margin_preview.next_batch_initial_margin
-        q25 = round_shares_up(hedge_shares_per_contract(25) * batch.remaining_quantity)
-        q50 = round_shares_up(hedge_shares_per_contract(50) * batch.remaining_quantity)
+        q25 = round_shares_up(
+            hedge_shares_per_contract(25, calendar=self.settings.meeting_calendar)
+            * batch.remaining_quantity
+        )
+        q50 = round_shares_up(
+            hedge_shares_per_contract(50, calendar=self.settings.meeting_calendar)
+            * batch.remaining_quantity
+        )
         emergency25 = walk_asks(
             book25.asks, q25, price_cap=self.settings.polymarket_emergency_max_price
         )
@@ -1646,6 +1656,7 @@ class ExecutionCoordinator:
             Decimal("0"),
         )
         residual = build_three_state_opportunity(
+            calendar=self.settings.meeting_calendar,
             contracts=contracts,
             zq_price=batch.limit_price,
             pre_meeting_effr=effr,
