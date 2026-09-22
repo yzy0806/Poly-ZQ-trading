@@ -1,0 +1,232 @@
+{
+  "checked_at": "2026-09-22T15:29:25.491232+00:00",
+  "python": "3.14.7",
+  "software_version": "e404b1c38e582aad13f63bae3a790b352bcd95f7",
+  "contract": "202610",
+  "event_id": "606422",
+  "child_quantity": 5,
+  "max_zq_position": 60,
+  "database": "sqlite+aiosqlite:////var/lib/zq-arb/october-2026-live.sqlite3",
+  "/healthz": {
+    "http_status": 200,
+    "data": {
+      "status": "ok",
+      "run_mode": "LIVE_ARMED"
+    }
+  },
+  "/readyz": {
+    "http_status": 200,
+    "data": {
+      "ready": true,
+      "snapshot_id": 611,
+      "reasons": []
+    }
+  },
+  "state": {
+    "armed": false,
+    "paused": false,
+    "kill_switch": false,
+    "ibkr": {
+      "status": "CONNECTED",
+      "authenticated": true,
+      "message": "TWS connected",
+      "reconnect_count": 0,
+      "last_message_at": "2026-09-22T15:28:41.930055Z"
+    },
+    "polymarket": {
+      "status": "CONNECTED",
+      "authenticated": false,
+      "message": "market WebSocket: price_change",
+      "reconnect_count": 0,
+      "last_message_at": "2026-09-22T15:29:24.280759Z"
+    },
+    "mapping": {
+      "verified": true,
+      "rule_hash_match": true,
+      "market_count_match": true,
+      "checked_at": "2026-09-22T15:28:35.825398Z",
+      "errors": []
+    },
+    "effr": {
+      "source": "NYFED_API",
+      "rate_percent": "3.88",
+      "effective_date": "2026-09-21",
+      "fetched_at": "2026-09-22T15:28:39.683543Z",
+      "target_rate_from": "3.75",
+      "target_rate_to": "4.0",
+      "revision_indicator": "",
+      "valid": true,
+      "reason": "New York Fed official EFFR effective 2026-09-21 (1 calendar days old)"
+    },
+    "margin_preview": {
+      "status": "AVAILABLE",
+      "order_id": 4334,
+      "contract_month": "202610",
+      "side": "BUY",
+      "quantity": 5,
+      "limit_price": "96.1",
+      "init_margin_change": "2961.41",
+      "maintenance_margin_change": "2575.14",
+      "commission": null,
+      "commission_currency": null,
+      "warning_text": null,
+      "error": null,
+      "requested_at": "2026-09-22T15:28:44.449103Z",
+      "received_at": "2026-09-22T15:28:44.742254Z",
+      "qualification_status": "CURRENT",
+      "qualified_for_next_batch": true,
+      "qualification_detail": "matching BUY-5 ZQ what-if preview is available and current; limit=96.1, age=40s",
+      "qualification_age_seconds": 40,
+      "available": true,
+      "next_batch_initial_margin": "2961.41"
+    },
+    "reconciliation": {
+      "clean": true,
+      "status": "CLEAN",
+      "method": "AUTHENTICATED_VENUE_LEDGER",
+      "confirmed_by": "SYSTEM",
+      "confirmed_at": "2026-09-22T15:29:13.567039Z",
+      "confirmed_snapshot_id": 499,
+      "reason": "venue ledger reconciliation d1bd830e-dad7-4f25-be3e-733c8c5e8638 is clean",
+      "invalidated_at": null
+    },
+    "active_batch": {
+      "batch_id": null,
+      "state": "IDLE",
+      "zq_order_id": null,
+      "original_quantity": 10,
+      "filled_quantity": "0",
+      "remaining_quantity": "0",
+      "limit_price": null,
+      "zq_order_status": null,
+      "cancel_reason": null,
+      "residual_minimum_net_profit": null,
+      "residual_required_profit": null,
+      "residual_return_on_capital_bps": null,
+      "obligations": [],
+      "updated_at": "2026-09-22T15:29:24.921646Z"
+    },
+    "synchronized_books": 10,
+    "quotes": {
+      "202610": {
+        "symbol": null,
+        "bid": "96.1",
+        "ask": "96.105",
+        "analytics_qualified": true,
+        "validation_reason": "current-generation live subscription qualified"
+      },
+      "202612": {
+        "symbol": null,
+        "bid": "95.84",
+        "ask": "95.845",
+        "analytics_qualified": true,
+        "validation_reason": "diagnostic live subscription qualified; never execution-authorizing"
+      },
+      "202611": {
+        "symbol": null,
+        "bid": "95.98",
+        "ask": "95.985",
+        "analytics_qualified": true,
+        "validation_reason": "diagnostic live subscription qualified; never execution-authorizing"
+      }
+    },
+    "position_count": 0,
+    "unresolved_alerts": []
+  },
+  "/api/v1/diagnostics/events": {
+    "http_status": 200,
+    "data": {
+      "queue_depth": 0,
+      "queue_capacity": 10000,
+      "queue_high_water": 47,
+      "maximum_event_wait_ms": 5065.26,
+      "maximum_handler_ms": 1402.0,
+      "maximum_event_loop_lag_ms": 2484.0,
+      "processed": {
+        "IBKR": 208,
+        "POLYMARKET": 85
+      },
+      "skipped": {},
+      "failed": {},
+      "ibkr_ingress": {
+        "received": 208,
+        "enqueued": 208,
+        "filtered_quote_ticks": 23,
+        "pending": 0,
+        "capacity": 10000,
+        "high_water": 12,
+        "overflowed": false
+      },
+      "consumer_running": true
+    }
+  },
+  "database_integrity": "ok",
+  "foreign_key_errors": 0,
+  "ledger_counts": {
+    "batches": 0,
+    "orders": 0,
+    "executions": 0,
+    "hedge_obligations": 0,
+    "opening_inventory": 0
+  },
+  "ledger_strategy_identity": {
+    "strategy_contract_month": "202610",
+    "strategy_event_id": "606422",
+    "strategy_rate_effective_date": "2026-10-29"
+  },
+  "image": "ghcr.io/yzy0806/poly-zq-trading@sha256:3cdbedfb3cb8942cf76bf3280d555f8daf2b320338a30d33cebcf7b99163d575",
+  "ci_run": "https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35746933580",
+  "ci_jobs": {
+    "validate (macos-latest)": "success",
+    "validate (ubuntu-latest)": "success",
+    "publish": "success"
+  },
+  "local_validation": {
+    "backend_tests_passed": 441,
+    "coverage_percent": 87.74,
+    "ruff": "passed",
+    "mypy": "passed"
+  },
+  "rollover_note": "Owner authorized a clean October ledger and confirmed the remaining September position and manual September order are intentional. The correction reused the October database, left September exposure unchanged, and restored clean October reconciliation. The engine remains disarmed.",
+  "manual_ibkr_review": {
+    "checked_at": "2026-09-22T15:29:41.918872+00:00",
+    "account_verified": true,
+    "positions_complete": true,
+    "orders_complete": true,
+    "contract": "ZQU6",
+    "contract_month": "20260930",
+    "position_quantity": "25",
+    "working_order_side": "SELL",
+    "working_order_quantity": "27",
+    "working_order_status": "Submitted",
+    "working_order_client_id": 0,
+    "polymarket_october_open_orders": 0,
+    "polymarket_october_position_count": 0,
+    "owner_instruction": "Intentional; leave the September position and manual order unchanged.",
+    "unchanged_before_and_after_scope_correction": true
+  },
+  "configuration_comparison": {
+    "initial_october_rollout": {
+      "reviewed_patch_fields": 67,
+      "preserved_original_fields": 113,
+      "unrelated_fields_changed": 0,
+      "secret_values_preserved": true,
+      "env_permissions": "0600"
+    },
+    "scope_correction": {
+      "changed_fields": [
+        "SOFTWARE_VERSION",
+        "CONFIG_VERSION"
+      ],
+      "all_other_values_preserved": true,
+      "env_permissions": "0600"
+    }
+  },
+  "scope_correction": {
+    "prior_image": "ghcr.io/yzy0806/poly-zq-trading@sha256:4f550338f00f47921ef25b2675569111360d06dc7c1a1b6bfea9ec268062bf81",
+    "prior_reconciliation_reason": "venue ledger differences: {'unexpected_ibkr_clients': ['0:0']}",
+    "database_preserved": true,
+    "backup_directory": "/opt/zq-arb/releases/e404b1c38e582aad13f63bae3a790b352bcd95f7",
+    "other_month_scope": "Explicitly identified foreign-client ZQ futures only; permanent order identity required. Current-month and unidentified orders remain guarded. Account-wide margin gates unchanged."
+  }
+}

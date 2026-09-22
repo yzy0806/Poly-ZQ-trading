@@ -55,8 +55,9 @@ October regression cases, isolated databases and mocked venues. They need no bro
 Use a shell without exported trading settings, which override env-file values.
 The coverage threshold is 85%. CI validates both Ubuntu and macOS with Python 3.14.7
 and Node 26.9.0, reading the exact versions from `.python-version` and `.node-version`.
-The production Dockerfile pins those same versions. This repository update does not
-change the running VPS until a new image is built and deployed.
+The production Dockerfile pins those same versions. The matching release was deployed on
+September 22; current readiness is in the
+[deployment record](deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md#september-22-current-deployment).
 
 Start these in **two separate terminals**, each at the repository root:
 

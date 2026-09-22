@@ -25,9 +25,10 @@ from Python. No Node installation on the Ubuntu host is required.
 
 Mac development continues to use `scripts/dev.sh backend` and `scripts/dev.sh web`
 natively. Host paths, credentials and venue endpoints remain environment-specific.
-This change updates the production build definition; the running VPS keeps its current
-image until the normal immutable rollout below. When upgrading toolchains again, update
-the version files and Dockerfile pins together, then pass both CI jobs before rollout.
+The matching image was deployed on September 22; see the current deployment record
+for current readiness. Future releases use the immutable rollout below. When upgrading
+toolchains again, update the version files and Dockerfile pins together, then pass both CI jobs
+before rollout.
 
 ## Safety state
 
@@ -66,7 +67,7 @@ IBKR_CALLBACK_SETTLE_SECONDS=2
 SHUTDOWN_DRAIN_SECONDS=20
 ```
 
-## October calendar upgrade (not deployed by the Mac setup)
+## October calendar upgrade
 
 The current example targets October 28, 2026 and requires explicit calendar settings:
 
@@ -87,7 +88,13 @@ Ledger identity now includes event ID, contract month and rate-effective date. E
 identities do not gain these fields automatically. Preserve old ledgers for inspection;
 reconcile any outstanding positions and orders before a separate October execution ledger
 is authorized. Do not initialize an empty ledger to ignore an existing obligation.
-The Mac setup created only a fresh local read-only database and did not change the VPS.
+The Mac setup created only a local read-only database. The owner subsequently authorized
+the September 22 production rollout and a fresh October ledger, and separately confirmed
+that the remaining manual September exposure is intentional. Identified foreign-client ZQ
+orders in other months do not block October reconciliation; October and unidentified orders
+remain guarded, and account-wide margin limits still apply. See the
+[current deployment record](CURRENT_DEPLOYMENT_AND_SECURITY.md#september-22-current-deployment)
+for the image, clean reconciliation evidence and preserved September history.
 
 ## Initial host preparation
 

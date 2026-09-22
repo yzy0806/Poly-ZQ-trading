@@ -1,9 +1,8 @@
 # ZQ Trading System — Current Deployment, Security and Production Readiness
 
-Documentation reviewed: 2026-09-21 for macOS workstation instructions.
-Last production runtime verification: 2026-09-14 at 13:17 UTC / 21:17 Taipei
+Documentation and production runtime reviewed: 2026-09-22 at 15:29 UTC / 23:29 Taipei
 
-Environment: Live Gateway / callback fix deployed / production engine disarmed at the recorded verification
+Environment: October release deployed / fresh October ledger / Gateway connected / engine disarmed / clean October reconciliation
 
 Active VPS: **78.142.195.87** (`s62219`)
 
@@ -15,7 +14,7 @@ Runtime status is a dated observation, not a continuously updated monitor. Cloud
 
 For routine Gateway login and desktop access, use [IBKR_GATEWAY_PASSLESS.md](IBKR_GATEWAY_PASSLESS.md). Passless and port 6090 start as VPS system services; workstation access still requires an SSH tunnel, and fresh authentication can require manual unlock and approval.
 
-Local toolchain, native dependency installation, and nonsynchronized runtime paths are covered in [macOS development](../docs/local-development-macos.md). This documentation review did not reconnect to or change the VPS.
+Local toolchain, native dependency installation, and nonsynchronized runtime paths are covered in [macOS development](../docs/local-development-macos.md). The September 22 deployment below was applied to this VPS after the owner pushed the release and authorized the update.
 
 ## 1. Executive Summary
 
@@ -25,7 +24,64 @@ GitHub is the source and build system. A push to `main` runs validation and crea
 
 The VPS runs the trading engine, the IB Gateway, Cloudflare Tunnel, and local SQLite storage. The application listens only on the VPS loopback interface. Cloudflare Tunnel makes the monitor reachable at `trade.cardiuscapital.com` without opening an application port to the Internet. Cloudflare Access requires Microsoft Entra authentication and authorizes only `leo_ying@lucentti.com`. The application then requires its own dashboard username and password, creating a second authentication layer.
 
-The callback deadline fix in `0c4718e` was deployed on September 14 at 13:15 UTC after the operator explicitly approved disarming and cancelling the working unfilled ZQ order. At 13:17 UTC, the updated engine was healthy, disarmed, unpaused and idle, with clean venue-ledger reconciliation, matching positions, no outstanding hedge obligations, and a qualified 5-contract margin preview. Its configured mode remains `LIVE_ARMED`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are unchanged. Gateway remains logged into live mode with `READ_ONLY_API=no`. No re-arm action was sent during this deployment. The earlier morning arming is recorded as historical evidence in Section 11.1.
+Historical September 14 verification: the callback deadline fix in `0c4718e` was deployed on September 14 at 13:15 UTC after the operator explicitly approved disarming and cancelling the working unfilled ZQ order. At 13:17 UTC, the updated engine was healthy, disarmed, unpaused and idle, with clean venue-ledger reconciliation, matching positions, no outstanding hedge obligations, and a qualified 5-contract margin preview. Its configured mode remains `LIVE_ARMED`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are unchanged. Gateway remains logged into live mode with `READ_ONLY_API=no`. No re-arm action was sent during this deployment. The earlier morning arming is recorded as historical evidence in Section 11.1.
+
+### September 22 current deployment
+
+Release `e404b1c38e582aad13f63bae3a790b352bcd95f7` is deployed using the immutable
+image `ghcr.io/yzy0806/poly-zq-trading@sha256:3cdbedfb3cb8942cf76bf3280d555f8daf2b320338a30d33cebcf7b99163d575`.
+[GitHub Actions](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35746933580)
+passed Ubuntu validation, macOS validation and image publication. The local backend suite
+passed all 441 tests with 87.74% coverage; Ruff and MyPy passed. Runtime Python is 3.14.7;
+the dashboard build uses the pinned Node 26.9.0 toolchain.
+
+The initial October rollout used `53c2d67`. The engine targets October ZQ (`202610`, ZQV6),
+Polymarket event `606422`, the October 28 statement and the configured October 29 rate-effective
+date. The owner authorized a clean October database, then confirmed that the remaining
+September position and manual order are intentional and must remain unchanged.
+`/var/lib/zq-arb/october-2026-live.sqlite3` is bound to the October strategy identity and still
+contains no batches, orders, executions, hedge obligations or adopted inventory. The scope
+correction reused that database; it did not reset it. The September ledger remains at
+`/var/lib/zq-arb/engine.sqlite3`.
+
+At 15:02 UTC, the first October release incorrectly reported
+`unexpected_ibkr_clients: ['0:0']` for the manual September order. Its foreign-client guard
+ran before contract-month classification. Release `e404b1c` excludes explicitly identified
+foreign-client ZQ futures orders in other months from the October order comparison. IBKR
+status callbacks inherit scope only from the exact client/order/permanent-ID combination;
+manual orders sharing client/order `0:0` cannot hide one another. Current-month orders,
+unidentified orders and strategy-identity conflicts retain their entry guards. Active fill
+faults still pause immediately. All exposure still participates in account-wide margin and
+excess-liquidity checks; see [execution safety](../docs/execution-safety.md).
+
+At 15:29 UTC, container health, `/healthz` and `/readyz` passed, authenticated venue-ledger
+reconciliation was **CLEAN**, and the engine was **disarmed, unpaused and idle**, with no
+unresolved alerts. All ten Polymarket books were synchronized, the October mapping/rule hash
+was verified, and current EFFR was valid. October, November and December ZQ quotes arrived.
+The BUY-5 October what-if preview at 96.1 was `AVAILABLE` and qualified `CURRENT`.
+No arming action was sent; passing readiness or reconciliation does not authorize trading.
+
+Independent broker reads before and after the correction returned the same **25-contract
+long September ZQU6 position** and submitted manual **SELL-27 September ZQU6 order** from
+client 0. The owner-confirmed position and order were left unchanged. The October ledger
+has zero trading records and venue reconciliation reports no unexplained October exposure.
+No live orders were placed, modified or cancelled by the deployment.
+
+Production credentials, secure origin/cookies, Gateway endpoint/client, existing live-mode
+switches and Section 1.2 risk limits were preserved. The initial October rollout updated
+maintenance/account-refresh/calendar fields and October market mappings. The scope correction
+changed only `SOFTWARE_VERSION` and `CONFIG_VERSION`; all other env values were verified
+unchanged, and file permissions remain `0600`. Private credentials stayed on the server.
+No manual env field is currently missing.
+
+The first October activation rolled back because Windows-origin deployment scripts lacked
+Unix execute permission. Server permissions were corrected, and the three shell entrypoints
+now have executable mode committed in `e404b1c`. Gateway and Passless containers/services were
+left running. Local Mac Docker remains unnecessary. The immediate rollback image and env,
+plus an integrity-checked October database backup, are in the root-only directory
+`/opt/zq-arb/releases/e404b1c38e582aad13f63bae3a790b352bcd95f7`. Initial September rollover backups remain in the
+`53c2d672f3fe89c0f5388d0c809fbad1355c3f6d` release directory.
+See the [sanitized validation snapshot](../docs/validation/production-october-2026-09-22.json).
 
 ### 1.1 Active VPS and approved resource settings
 
@@ -90,7 +146,7 @@ The relevant configuration locations are:
 | Saved Gateway session and GUI settings | `/opt/ib-gateway` | `tws_settings/` | Mounted at `/home/ibgateway/tws_settings` inside Gateway |
 | Passless service files and executable | `/opt/ib-passkey` | `passless`, `desktop.sh`, readiness helper | Host services; separate from the Gateway container |
 | Passless encrypted key material | `/var/lib/ib-passkey` | `.gnupg/`, `.password-store/` | Restricted service account; preserve together; never commit |
-| Application database | `/var/lib/zq-arb` | `engine.sqlite3` | Persistent across container replacements |
+| Current application database | `/var/lib/zq-arb` | `october-2026-live.sqlite3` | Fresh October ledger; September `engine.sqlite3` retained |
 
 The Gateway `.env`, application configuration, and tunnel token were verified as root-owned files with mode `0600`. No secrets belong in GitHub commits, GitHub Actions logs, container image layers, or this document. The migration preserved the existing credentials instead of running first-install credential generation again.
 
@@ -191,15 +247,17 @@ The important trust boundaries are:
 
 The deployment workflow is defined in `container.yml`. It runs for pull requests, pushes to `main`, and manual workflow dispatches.
 
-The September 21 repository update aligns native Mac development and the Ubuntu production build on Python 3.14.7, Node 26.9.0 and uv 0.12.17. CI reads `.python-version` and `.node-version` for both Ubuntu and macOS, installs the locked dependencies, and runs Ruff, MyPy, the backend suite with the coverage gate, dashboard lint/tests and the dashboard build. The Dockerfile pins the same runtime versions. This source change is pending publication and rollout; it does not replace the last observed production artifact in Section 4.2.
+The September 21 repository update aligns native Mac development and the Ubuntu production build on Python 3.14.7, Node 26.9.0 and uv 0.12.17. CI reads `.python-version` and `.node-version` for both Ubuntu and macOS, installs the locked dependencies, and runs Ruff, MyPy, the backend suite with the coverage gate, dashboard lint/tests and the dashboard build. The Dockerfile pins the same runtime versions. The matching release passed all three jobs and was deployed on September 22; see the current deployment above.
 
 For non-pull-request runs, GitHub Actions builds and publishes the application container to GHCR. The workflow uses Docker Buildx caching and emits provenance and an SBOM. Third-party GitHub Actions are pinned to full commit hashes. The workflow uses the repository-scoped `GITHUB_TOKEN`; read permission is the default, while package, attestation, and identity-token writes are limited to the image-publishing job.
 
 The image receives traceable tags, including the Git commit and a mutable staging label. The VPS deployment path does not accept a tag as the final release reference. It requires the immutable `@sha256:` digest, preventing a later tag move from silently changing what is deployed.
 
-### 4.2 Current deployed artifact
+### 4.2 Current artifact and rollback history
 
-The production engine artifact deployed on September 14 at 13:15 UTC was built from Git commit `0c4718e605950e97fa0c3660f1b9760899833897`. [GitHub validation and publishing](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/34846383394) passed. The packaged coordinator, repository, and state source matched the inspected checkout; the coordinator also imported successfully in an isolated container without network access. Its immutable deployed reference is:
+The current artifact is the September 22 `e404b1c` image recorded above. Its immediate rollback image is `53c2d67` with digest `sha256:4f550338f00f47921ef25b2675569111360d06dc7c1a1b6bfea9ec268062bf81`, using the saved prior env and the same October database. That image retains the September foreign-order block. The older `0c4718e` image below belongs to the September configuration and requires its corresponding env/database identity.
+
+The previous production engine artifact deployed on September 14 at 13:15 UTC was built from Git commit `0c4718e605950e97fa0c3660f1b9760899833897`. [GitHub validation and publishing](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/34846383394) passed. The packaged coordinator, repository, and state source matched the inspected checkout; the coordinator also imported successfully in an isolated container without network access. Its immutable deployed reference is:
 
 ```text
 ghcr.io/yzy0806/poly-zq-trading@sha256:8b4ee4929fa331a49d6ae287a189819d0ef10f2adfcfa323c7d7d244fdbb34ea
