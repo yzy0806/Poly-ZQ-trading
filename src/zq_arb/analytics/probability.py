@@ -8,6 +8,7 @@ from zq_arb.domain.calendar import MeetingCalendar, next_contract_month
 from zq_arb.domain.models import FedWatchDiagnostic, ProbabilitySnapshot
 
 ONE_HUNDRED = Decimal("100")
+CME_SETTLEMENT_RATE_INCREMENT = Decimal("0.001")
 TWENTY_FIVE_BPS = Decimal("25")
 MIN_MODELED_MOVE_BPS = Decimal("-50")
 MAX_MODELED_MOVE_BPS = Decimal("50")
@@ -30,13 +31,25 @@ def theoretical_settlement(
     *,
     calendar: MeetingCalendar,
 ) -> Decimal:
+    """Model CME Rule 22103 cash settlement, including rate rounding.
+
+    The monthly average rate is in percentage points. Round it to 0.001
+    percentage point (0.1 bp), with exact ties toward positive infinity,
+    before subtracting from 100. This is independent of the trading tick.
+    Quote-implied probabilities continue to use continuous average rates.
+    """
     total_days = Decimal(calendar.total_days)
     post_rate = pre_meeting_effr_percent + move_bps / ONE_HUNDRED
     average_rate = (
         Decimal(calendar.days_before) * pre_meeting_effr_percent
         + Decimal(calendar.days_after) * post_rate
     ) / total_days
-    return ONE_HUNDRED - average_rate
+    rounded_rate = (
+        (average_rate / CME_SETTLEMENT_RATE_INCREMENT + Decimal("0.5"))
+        .to_integral_value(rounding=ROUND_FLOOR)
+        * CME_SETTLEMENT_RATE_INCREMENT
+    )
+    return ONE_HUNDRED - rounded_rate
 
 
 def executable_probability(

@@ -152,6 +152,62 @@ def test_order_book_reports_aggregated_best_level_sizes() -> None:
     assert market.best_ask_size == Decimal("100")
 
 
+def test_october_cash_settlement_pnl_and_return_match_excel_inputs() -> None:
+    opportunity = build_three_state_opportunity(
+        contracts=5,
+        calendar=MeetingCalendar("202610", date(2026, 10, 29)),
+        zq_price=Decimal("96.1"),
+        pre_meeting_effr=Decimal("3.88"),
+        inc25_book=book("25", (("0.68", "10000"),)),
+        inc50_book=book("50", (("0.009", "10000"),)),
+        cost_inputs=CostInputs(
+            ibkr_commission=Decimal("18.20"), polymarket_fees=Decimal("5.9339748925"),
+        ),
+        incremental_margin=Decimal("2993.63"),
+        emergency_cash_reserve=Decimal("0"),
+        post_price_cap=Decimal("0.95"),
+        emergency_price_cap=Decimal("0.99"),
+    )
+    assert [row.settlement_price for row in opportunity.scenarios] == [
+        Decimal("96.120"), Decimal("96.096"), Decimal("96.072"),
+    ]
+    assert [row.futures_pnl for row in opportunity.scenarios] == [
+        Decimal("416.700"), Decimal("-83.340"), Decimal("-583.380"),
+    ]
+    assert [row.net_pnl for row in opportunity.scenarios] == [
+        Decimal("40.7182751075"), Decimal("44.7582751075"), Decimal("48.7882751075"),
+    ]
+    assert opportunity.emergency_scenarios == opportunity.scenarios
+    assert opportunity.minimum_net_profit == Decimal("40.7182751075")
+    assert opportunity.committed_capital == Decimal("3345.47775")
+    assert opportunity.return_on_capital_bps == (
+        Decimal("40.7182751075") / Decimal("3345.47775") * Decimal("10000")
+    )
+
+
+def test_rounding_residual_can_make_hike_the_worst_case() -> None:
+    opportunity = build_three_state_opportunity(
+        contracts=10,
+        calendar=MeetingCalendar("202609", date(2026, 9, 17)),
+        zq_price=Decimal("96.30"),
+        pre_meeting_effr=Decimal("3.625"),
+        inc25_book=book("25", (("0.30", "6000"),)),
+        inc50_book=book("50", (("0.10", "12000"),)),
+        cost_inputs=CostInputs(),
+        incremental_margin=Decimal("5000"),
+        emergency_cash_reserve=Decimal("0"),
+        post_price_cap=Decimal("0.95"),
+        emergency_price_cap=Decimal("0.99"),
+    )
+    zero, hike25, hike50 = opportunity.scenarios
+    assert hike25.net_pnl - zero.net_pnl == Decimal("-13.890")
+    assert hike50.net_pnl - zero.net_pnl == Decimal("13.890")
+    assert opportunity.minimum_net_profit == hike25.net_pnl
+    assert opportunity.return_on_capital_bps == (
+        hike25.net_pnl / opportunity.committed_capital * Decimal("10000")
+    )
+
+
 def test_empty_book_fails_closed() -> None:
     opportunity = build_three_state_opportunity(
         contracts=10,

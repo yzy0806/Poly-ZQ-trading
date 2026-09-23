@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -27,7 +28,38 @@ def test_settlement_uses_all_calendar_days() -> None:
     result = theoretical_settlement(
         Decimal("3.625"), Decimal("25"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
     )
-    assert result == Decimal("96.25833333333333333333333333")
+    assert result == Decimal("96.258")
+
+
+@pytest.mark.parametrize(
+    ("rate", "expected"),
+    [
+        ("2.5915", "97.408"),  # CME Rule 22103 worked example, off the trading grid.
+        ("2.591499999", "97.409"),
+        ("2.591500001", "97.408"),
+        ("3.88", "96.120"),
+        ("-0.0005", "100.000"),  # Ties go up, including negative average rates.
+        ("-0.0015", "100.001"),
+        ("-0.000500001", "100.001"),
+    ],
+)
+def test_cme_rounds_the_average_rate_before_subtracting_from_100(rate, expected):
+    assert theoretical_settlement(
+        Decimal(rate), Decimal("0"),
+        calendar=MeetingCalendar("202610", date(2026, 10, 29)),
+    ) == Decimal(expected)
+
+
+@pytest.mark.parametrize(
+    ("move", "expected"),
+    [(-50, "96.168"), (-25, "96.144"), (0, "96.120"),
+     (25, "96.096"), (50, "96.072"), (75, "96.047")],
+)
+def test_october_final_settlements_use_three_post_decision_calendar_days(move, expected):
+    assert theoretical_settlement(
+        Decimal("3.88"), Decimal(move),
+        calendar=MeetingCalendar("202610", date(2026, 10, 29)),
+    ) == Decimal(expected)
 
 
 def test_executable_binary_probability_endpoints() -> None:
@@ -58,9 +90,8 @@ def test_reference_tree_exposes_all_intermediates() -> None:
 
 def test_direct_september_model_uses_calendar_weight_and_adjacent_states() -> None:
     pre_meeting_effr = Decimal("3.625")
-    midpoint = theoretical_settlement(
-        pre_meeting_effr, Decimal("12.5"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
-    )
+    # A probability-weighted quote is continuous, unlike a final cash settlement.
+    midpoint = Decimal("100") - (pre_meeting_effr + Decimal("0.125") * 14 / 30)
     snapshot = direct_zq_probability(
         target_contract_month="202609",
         target_bid=midpoint,
@@ -99,9 +130,7 @@ def test_authorizing_long_entry_measure_uses_the_best_bid() -> None:
 
 def test_direct_model_normalizes_polymarket_expected_move() -> None:
     pre_meeting_effr = Decimal("3.625")
-    midpoint = theoretical_settlement(
-        pre_meeting_effr, Decimal("12.5"), calendar=MeetingCalendar("202609", date(2026, 9, 17))
-    )
+    midpoint = Decimal("100") - (pre_meeting_effr + Decimal("0.125") * 14 / 30)
     direct = direct_zq_probability(
         target_contract_month="202609",
         target_bid=midpoint,

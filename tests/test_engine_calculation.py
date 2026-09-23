@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from zq_arb.analytics.probability import theoretical_settlement
 from zq_arb.config import Settings
 from zq_arb.domain.enums import (
     ConnectionStatus,
@@ -77,9 +76,7 @@ async def test_october_runtime_uses_calendar_for_signal_and_hedge_size(settings:
     runtime = EngineRuntime(october)
     try:
         snapshot = await runtime.state.get()
-        mid = theoretical_settlement(
-            snapshot.effr.rate_percent, Decimal("12.5"), calendar=october.meeting_calendar
-        )
+        mid = Decimal("100") - (snapshot.effr.rate_percent + Decimal("0.125") * 3 / 31)
         books = {
             leg.yes_token_id: book(leg.yes_token_id, "0.01", "0.02", leg.code)
             for leg in october.market_legs

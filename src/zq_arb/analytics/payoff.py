@@ -76,6 +76,12 @@ def conservative_ibkr_round_trip_commission(
 
 
 def hedge_shares_per_contract(move_bps: int, *, calendar: MeetingCalendar) -> Decimal:
+    """Calendar-weighted execution hedge; settlement rounding leaves a small residual.
+
+    Keep this ratio common to quotes, partial fills and persisted obligations.
+    Rounded cash-settlement prices determine each scenario's P&L and minimum
+    return, so this hedge is not assumed to make scenario profits identical.
+    """
     # Multiply before division, then round only the total obligation upward.
     return (
         Decimal(abs(move_bps))

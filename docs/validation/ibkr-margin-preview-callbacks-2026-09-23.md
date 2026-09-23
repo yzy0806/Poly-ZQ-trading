@@ -1,7 +1,8 @@
 # Margin-preview callback investigation — September 23, 2026
 
-Status: local changes only. No commit, push, deployment, restart, arming or pause override
-was performed for this investigation. Baseline: `4a63f59` (production code `e404b1c`).
+Status: deployed as `00d9368` after the owner committed, pushed and authorized deployment.
+The investigation itself was local; Codex did not commit or push the fix. Investigation
+baseline: `4a63f59` (production code `e404b1c`).
 
 ## Production evidence and its limits
 
@@ -39,7 +40,7 @@ The adapter defects failed focused tests against the original implementation. Th
 test also failed against a temporary read-only export of the original source after validating
 the October fixture configuration. The old result was AVAILABLE despite the preceding timeout.
 
-## Local correction
+## Correction
 
 - Record locally issued preview IDs for the adapter's lifetime, including reconnects. Only
   integer IDs remain after completion; the pending request context is released. This trades
@@ -74,5 +75,30 @@ same test injects a genuine unexpected live order. No broker connection is opene
 The suite ran with the native Python 3.14.7 environment. Temporary test databases and coverage
 output were kept outside the repository; test settings use fixture credentials and mocked venues.
 
-Production remains on the prior implementation. Publication and rollout require the owner's
-explicit approval; this local change does not clear the retained production safety pause.
+## Authorized production deployment
+
+The owner pushed `00d9368b61373ad66f5ba4efa8e14d6b0b0664b8` and authorized deployment.
+[GitHub Actions](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35753060635) passed
+Ubuntu validation, macOS validation and image publication. The immutable image is
+`ghcr.io/yzy0806/poly-zq-trading@sha256:1dc2488685aa0d631c65e0781bf5687ad9e378ff88cf15799f02aaafbad724a0`.
+The final container started September 22 at 16:23:37 UTC (September 23 at 00:23:37 UTC+8).
+
+Three consecutive automatic BUY-5 October margin previews at 96.10 completed and qualified
+CURRENT. Each request has a matching finish log. Throughout the sampled observation the
+engine remained disarmed and unpaused; routine account refreshes briefly entered UNKNOWN
+and returned to CLEAN. No safety pause or new executable strategy order occurred. Final
+health/readiness checks passed, all ten books were synchronized, and there were no current
+alerts, callback identity conflicts, event-consumer failures or log-level errors.
+
+The existing October database was preserved: one completed batch, cancelled order 4354,
+zero executions and zero hedge obligations. Trading-record fingerprints matched the
+original backup, excluding only the routinely refreshed `batches.updated_at` timestamp.
+An initial overly strict timestamp comparison triggered a rollback; row-by-row comparison
+confirmed that the timestamp was the sole difference before the successful retry. A prior
+pre-stop check also waited for reconciliation to return CLEAN before changing production.
+Only `SOFTWARE_VERSION` and `CONFIG_VERSION` changed in the production env. Gateway was
+not restarted and no arming or live order/cancellation command was sent.
+
+This short observation verifies ordinary production preview cycles. The deliberately late
+and reordered callback cases remain supported by the offline regression tests; the original
+4361 callback identity remains unproven. See the [sanitized deployment evidence](production-margin-preview-2026-09-23.json).

@@ -55,9 +55,9 @@ October regression cases, isolated databases and mocked venues. They need no bro
 Use a shell without exported trading settings, which override env-file values.
 The coverage threshold is 85%. CI validates both Ubuntu and macOS with Python 3.14.7
 and Node 26.9.0, reading the exact versions from `.python-version` and `.node-version`.
-The production Dockerfile pins those same versions. The matching release was deployed on
-September 22; current readiness is in the
-[deployment record](deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md#september-22-current-deployment).
+The production Dockerfile pins those same versions. The matching toolchain was deployed on
+September 22; the September 23 margin-preview update and current readiness are in the
+[deployment record](deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md#september-23-current-deployment).
 
 Start these in **two separate terminals**, each at the repository root:
 
@@ -97,7 +97,7 @@ owner-updated repo `.env`; see the [validation report](docs/validation/macos-oct
 
 9. `IBKR_COMMISSION_ESTIMATE` sets the per-contract round-trip ZQ cost floor (3.64 in the example environment). At that setting a five-contract batch deducts at least `$18.20`; twice a higher current IBKR entry what-if commission overrides that floor. This configured estimate is not a fresh verification of broker pricing.
 
-10. The cross-venue portfolio aggregates every durable strategy execution, compares the result with venue-reported quantities, and marks long ZQ and Polymarket Yes holdings to their executable best bids every 500 milliseconds. Its combined unrealized P&L is gross of commissions and fees and remains informational.
+10. The cross-venue portfolio aggregates every durable strategy execution, compares the result with venue-reported quantities, and marks long ZQ and Polymarket Yes holdings to their executable best bids on each analytics cycle. Its combined unrealized P&L is gross of commissions and fees and remains informational. The analytics cadence is described in Safety Invariant 4 below.
 
 ## Safety Invariants
 
@@ -107,9 +107,13 @@ owner-updated repo `.env`; see the [validation report](docs/validation/macos-oct
 
 3. `IBKR_ZQ_CHILD_ORDER_QUANTITY` sets the original child quantity, only one batch may be active, and `MAX_ZQ_POSITION` caps aggregate exposure (with a code ceiling of 100). The September 14 production record specifies five-contract children and a 60-contract cap; the bootstrap example uses 10 and 20. The aggregate ZQ position comes from authenticated IBKR portfolio callbacks and therefore includes both hedged and unhedged contracts. A new batch is prohibited whenever any durable hedge obligation remains below its required confirmed share quantity, even if that obligation is not part of the batch currently displayed.
 
-4. ZQ orders are `BUY LMT/DAY` at the qualified best bid and are never automatically repriced. If the still-resting quantity no longer passes the scaled profit, return, fee, and exact-ask hedge-size gates, only that unfilled remainder is cancelled. Once IBKR confirms the cancellation and every fill is hedged and reconciled, the still-armed engine may submit a fresh order for the configured child quantity when a later snapshot passes every gate.
+4. When no active batch exists, the engine calculates a new opportunity using the qualified current ZQ best bid and current Polymarket hedge costs. Minimum net profit must be at least `MIN_NET_PROFIT_USD`, and every other entry gate must pass before submission. The ZQ order is `BUY LMT/DAY` at that best bid and is never automatically repriced.
 
-5. Version 1 is structurally long-only: the engine can submit only `BUY` ZQ entries and may hedge confirmed fills only by buying the approved Polymarket Yes legs. Bid-side and No-token data are diagnostic and cannot create an order.
+   While a ZQ order rests, the engine recalculates profit for its unfilled quantity at the order's original fixed limit, using current Polymarket hedge costs and depth. The required dollar profit is `MIN_NET_PROFIT_USD × remaining quantity ÷ original quantity`. A result below that threshold, or unavailable profit, triggers a cancellation request for the unfilled remainder. Hedge-depth, fee, return and safety failures can also trigger cancellation. Once IBKR confirms cancellation and every fill is hedged and reconciled, the still-armed engine may submit a fresh batch when a later snapshot passes every gate.
+
+   Monitoring runs in the periodic analytics loop. After each calculation and execution cycle, the loop sleeps for `ENGINE_STATE_PUBLISH_INTERVAL_MS` (500 ms in the example configuration). Processing time adds to that interval; checks are not invoked directly for every market-data update and have no guaranteed 500 ms deadline.
+
+5. Version 1 is structurally long-only: the engine can submit only `BUY` ZQ entries and may hedge confirmed fills only by buying the approved Polymarket Yes legs. Polymarket bid-side and No-token data are used for valuation and diagnostics, not hedge entry pricing. The ZQ best bid is the price used to qualify and submit a new ZQ entry.
 
 6. Polymarket orders cannot precede a confirmed, unique IBKR `execId`. Each fill creates durable INC25 and INC50PLUS obligations. INC25 requires full size at the lowest ask. INC50PLUS can combine the lowest ask and exactly one tick above it, within the configured price cap. Each hedge is a non-post-only GTC BUY limit at the highest price needed for its available fill plan. Scenario P&L uses the actual quantity at each consumed price level; taker-fee estimates also use those quantities and prices. The dashboard shows the entry VWAP, total cash cost, and fill breakdown.
 

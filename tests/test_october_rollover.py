@@ -53,7 +53,7 @@ def test_calendar_rejects_invalid_or_zero_weight_periods(month, effective):
 
 def test_october_weights_drive_probabilities_and_scenario_hedges():
     rate = Decimal("3.88")
-    mid = theoretical_settlement(rate, Decimal("12.5"), calendar=OCTOBER)
+    mid = Decimal("100") - (rate + Decimal("0.125") * 3 / 31)
     direct = direct_zq_probability(
         target_contract_month="202610",
         target_bid=mid,
@@ -93,7 +93,9 @@ def test_october_weights_drive_probabilities_and_scenario_hedges():
     }
     assert result.calculation.inc25_shares_per_contract == Decimal("100.82")
     gross = [s.gross_pnl for s in result.scenarios]
-    assert max(gross) - min(gross) < Decimal(".01")
+    # Linear hedge quantities leave the CME settlement-rounding residual in P&L.
+    assert gross[1] - gross[0] == Decimal("4.040")
+    assert gross[2] - gross[0] == Decimal("8.070")
     assert result.scenarios[1].settlement_price == theoretical_settlement(
         rate, Decimal(25), calendar=OCTOBER
     )

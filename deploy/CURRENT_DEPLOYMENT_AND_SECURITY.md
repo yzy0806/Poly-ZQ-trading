@@ -1,8 +1,8 @@
 # ZQ Trading System — Current Deployment, Security and Production Readiness
 
-Documentation and production runtime reviewed: 2026-09-22 at 15:29 UTC / 23:29 Taipei
+Documentation and production runtime reviewed: 2026-09-22 at 16:26 UTC / September 23 at 00:26 Taipei
 
-Environment: October release deployed / fresh October ledger / Gateway connected / engine disarmed / clean October reconciliation
+Environment: margin-preview fix deployed / October ledger preserved / Gateway connected / engine disarmed and unpaused / clean October reconciliation
 
 Active VPS: **78.142.195.87** (`s62219`)
 
@@ -14,7 +14,7 @@ Runtime status is a dated observation, not a continuously updated monitor. Cloud
 
 For routine Gateway login and desktop access, use [IBKR_GATEWAY_PASSLESS.md](IBKR_GATEWAY_PASSLESS.md). Passless and port 6090 start as VPS system services; workstation access still requires an SSH tunnel, and fresh authentication can require manual unlock and approval.
 
-Local toolchain, native dependency installation, and nonsynchronized runtime paths are covered in [macOS development](../docs/local-development-macos.md). The September 22 deployment below was applied to this VPS after the owner pushed the release and authorized the update.
+Local toolchain, native dependency installation, and nonsynchronized runtime paths are covered in [macOS development](../docs/local-development-macos.md). The September 23 margin-preview update below was applied after the owner pushed the release and authorized deployment.
 
 ## 1. Executive Summary
 
@@ -26,9 +26,47 @@ The VPS runs the trading engine, the IB Gateway, Cloudflare Tunnel, and local SQ
 
 Historical September 14 verification: the callback deadline fix in `0c4718e` was deployed on September 14 at 13:15 UTC after the operator explicitly approved disarming and cancelling the working unfilled ZQ order. At 13:17 UTC, the updated engine was healthy, disarmed, unpaused and idle, with clean venue-ledger reconciliation, matching positions, no outstanding hedge obligations, and a qualified 5-contract margin preview. Its configured mode remains `LIVE_ARMED`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are unchanged. Gateway remains logged into live mode with `READ_ONLY_API=no`. No re-arm action was sent during this deployment. The earlier morning arming is recorded as historical evidence in Section 11.1.
 
-### September 22 current deployment
+### September 23 current deployment
 
-Release `e404b1c38e582aad13f63bae3a790b352bcd95f7` is deployed using the immutable
+Release `00d9368b61373ad66f5ba4efa8e14d6b0b0664b8` is deployed using immutable image
+`ghcr.io/yzy0806/poly-zq-trading@sha256:1dc2488685aa0d631c65e0781bf5687ad9e378ff88cf15799f02aaafbad724a0`.
+[GitHub Actions](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35753060635) passed
+Ubuntu validation, macOS validation and image publication. The owner committed and pushed
+this fix; Codex deployed it with explicit approval and made no commit or push. The final
+container started September 22 at 16:23:37 UTC / September 23 at 00:23:37 Taipei.
+
+The release isolates completed what-if callbacks from live-order reconciliation, preserves
+preview identity across cleanup/reconnect, rejects late results for failed requests, and
+finishes what-if requests locally without sending broker cancellations. The original
+unexpected order 4361 was not retained in callback logs, so its identity remains unproven;
+see the [investigation and 463-test validation](../docs/validation/ibkr-margin-preview-callbacks-2026-09-23.md).
+
+Post-deployment checks passed for container health, `/healthz` and `/readyz`. The engine is
+**disarmed, unpaused and idle**, with authenticated reconciliation **CLEAN**, no current
+alerts, ten synchronized Polymarket books, verified October mapping and valid EFFR. Three
+consecutive BUY-5 October previews at 96.10 qualified CURRENT and each produced request/finish
+logs. Routine account reads temporarily entered UNKNOWN before returning CLEAN without
+pausing. No event-consumer failures, callback identity conflicts or log-level errors were
+observed. This is a short runtime observation, supplemented by offline delayed-callback tests.
+
+The same `/var/lib/zq-arb/october-2026-live.sqlite3` ledger retains its completed batch and
+cancelled order 4354, with zero executions, hedge obligations and opening inventory. Record
+fingerprints match the pre-update backup, excluding only the routinely refreshed batch
+`updated_at` timestamp. The initial timestamp-inclusive comparison caused an automatic
+rollback; the sole timestamp difference was confirmed before the successful retry. The
+September position and manual order were left untouched; no executable order, cancellation
+or ARM command was sent by the deployment. Gateway has remained running since September 14.
+
+Only `SOFTWARE_VERSION` and `CONFIG_VERSION` changed in the application env; credentials,
+October mappings, existing risk limits and submission settings remain unchanged. Env mode
+is `0600`; no manual env update is needed. The private rollback env/image reference and
+integrity-checked database backups are retained in
+`/opt/zq-arb/releases/00d9368b61373ad66f5ba4efa8e14d6b0b0664b8`.
+See the [sanitized runtime evidence](../docs/validation/production-margin-preview-2026-09-23.json).
+
+### September 22 previous deployment
+
+Release `e404b1c38e582aad13f63bae3a790b352bcd95f7` was deployed using the immutable
 image `ghcr.io/yzy0806/poly-zq-trading@sha256:3cdbedfb3cb8942cf76bf3280d555f8daf2b320338a30d33cebcf7b99163d575`.
 [GitHub Actions](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35746933580)
 passed Ubuntu validation, macOS validation and image publication. The local backend suite
@@ -39,8 +77,8 @@ The initial October rollout used `53c2d67`. The engine targets October ZQ (`2026
 Polymarket event `606422`, the October 28 statement and the configured October 29 rate-effective
 date. The owner authorized a clean October database, then confirmed that the remaining
 September position and manual order are intentional and must remain unchanged.
-`/var/lib/zq-arb/october-2026-live.sqlite3` is bound to the October strategy identity and still
-contains no batches, orders, executions, hedge obligations or adopted inventory. The scope
+`/var/lib/zq-arb/october-2026-live.sqlite3` was bound to the October strategy identity and,
+at that deployment check, contained no batches, orders, executions, hedge obligations or adopted inventory. The scope
 correction reused that database; it did not reset it. The September ledger remains at
 `/var/lib/zq-arb/engine.sqlite3`.
 

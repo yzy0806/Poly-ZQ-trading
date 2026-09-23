@@ -1,0 +1,339 @@
+{
+  "release": {
+    "revision": "00d9368b61373ad66f5ba4efa8e14d6b0b0664b8",
+    "image": "ghcr.io/yzy0806/poly-zq-trading@sha256:1dc2488685aa0d631c65e0781bf5687ad9e378ff88cf15799f02aaafbad724a0",
+    "started_at": "2026-09-22T16:23:37.505169316Z",
+    "health": "healthy",
+    "read_only_root": true,
+    "cap_drop": [
+      "ALL"
+    ],
+    "changed_env_keys": [
+      "CONFIG_VERSION",
+      "SOFTWARE_VERSION"
+    ],
+    "env_mode": "0o600",
+    "ledger_preserved": true,
+    "fingerprint_excludes": [
+      "batches.updated_at"
+    ],
+    "ledger": {
+      "counts": {
+        "batches": 1,
+        "orders": 1,
+        "executions": 0,
+        "hedge_obligations": 0,
+        "opening_inventory": 0
+      },
+      "sha256": "0e9ebd6c0209c082e3474b1ff797671cb31063eeece3592e68009dcc85fa6973"
+    },
+    "database_integrity": "ok",
+    "order_states": [
+      [
+        "4354",
+        "CANCELLED"
+      ]
+    ],
+    "new_audit_actions": [
+      [
+        "EFFR_REFERENCE_UPDATED",
+        1
+      ],
+      [
+        "ENGINE_START",
+        1
+      ]
+    ],
+    "margin_lifecycle": [
+      {
+        "event": "ibkr_margin_preview_requested",
+        "timestamp": "2026-09-22T16:24:19.551005Z",
+        "order_id": 4391,
+        "contract_month": "202610",
+        "side": "BUY",
+        "quantity": 5,
+        "limit_price": "96.1"
+      },
+      {
+        "event": "ibkr_margin_preview_finished",
+        "timestamp": "2026-09-22T16:24:22.744989Z",
+        "order_id": 4391
+      },
+      {
+        "event": "ibkr_margin_preview_requested",
+        "timestamp": "2026-09-22T16:25:19.561480Z",
+        "order_id": 4392,
+        "contract_month": "202610",
+        "side": "BUY",
+        "quantity": 5,
+        "limit_price": "96.1"
+      },
+      {
+        "event": "ibkr_margin_preview_finished",
+        "timestamp": "2026-09-22T16:25:20.355568Z",
+        "order_id": 4392
+      },
+      {
+        "event": "ibkr_margin_preview_requested",
+        "timestamp": "2026-09-22T16:26:19.704903Z",
+        "order_id": 4393,
+        "contract_month": "202610",
+        "side": "BUY",
+        "quantity": 5,
+        "limit_price": "96.1"
+      },
+      {
+        "event": "ibkr_margin_preview_finished",
+        "timestamp": "2026-09-22T16:26:20.161270Z",
+        "order_id": 4393
+      }
+    ],
+    "error_event_counts": {},
+    "rollback_directory": "/opt/zq-arb/releases/00d9368b61373ad66f5ba4efa8e14d6b0b0664b8",
+    "gateway": "2026-09-14T07:39:57.626050422Z"
+  },
+  "runtime": {
+    "checked_at": "2026-09-22T16:26:44.854259+00:00",
+    "python": "3.14.7",
+    "software_version": "00d9368b61373ad66f5ba4efa8e14d6b0b0664b8",
+    "contract": "202610",
+    "event_id": "606422",
+    "child_quantity": 5,
+    "max_zq_position": 60,
+    "database": "sqlite+aiosqlite:////var/lib/zq-arb/october-2026-live.sqlite3",
+    "/healthz": {
+      "http_status": 200,
+      "data": {
+        "status": "ok",
+        "run_mode": "LIVE_ARMED"
+      }
+    },
+    "/readyz": {
+      "http_status": 200,
+      "data": {
+        "ready": true,
+        "snapshot_id": 1602,
+        "reasons": []
+      }
+    },
+    "state": {
+      "armed": false,
+      "paused": false,
+      "kill_switch": false,
+      "ibkr": {
+        "status": "CONNECTED",
+        "authenticated": true,
+        "message": "TWS connected",
+        "reconnect_count": 0,
+        "last_message_at": "2026-09-22T16:23:48.486235Z"
+      },
+      "polymarket": {
+        "status": "CONNECTED",
+        "authenticated": false,
+        "message": "market WebSocket: price_change",
+        "reconnect_count": 0,
+        "last_message_at": "2026-09-22T16:26:40.954884Z"
+      },
+      "mapping": {
+        "verified": true,
+        "rule_hash_match": true,
+        "market_count_match": true,
+        "checked_at": "2026-09-22T16:23:42.655579Z",
+        "errors": []
+      },
+      "effr": {
+        "source": "NYFED_API",
+        "rate_percent": "3.88",
+        "effective_date": "2026-09-21",
+        "fetched_at": "2026-09-22T16:23:46.196166Z",
+        "target_rate_from": "3.75",
+        "target_rate_to": "4.0",
+        "revision_indicator": "",
+        "valid": true,
+        "reason": "New York Fed official EFFR effective 2026-09-21 (1 calendar days old)"
+      },
+      "margin_preview": {
+        "status": "AVAILABLE",
+        "order_id": 4393,
+        "contract_month": "202610",
+        "side": "BUY",
+        "quantity": 5,
+        "limit_price": "96.1",
+        "init_margin_change": "3003.17",
+        "maintenance_margin_change": "2574.86",
+        "commission": null,
+        "commission_currency": null,
+        "warning_text": null,
+        "error": null,
+        "requested_at": "2026-09-22T16:26:19.704540Z",
+        "received_at": "2026-09-22T16:26:19.989625Z",
+        "qualification_status": "CURRENT",
+        "qualified_for_next_batch": true,
+        "qualification_detail": "matching BUY-5 ZQ what-if preview is available and current; limit=96.1, age=25s",
+        "qualification_age_seconds": 25,
+        "available": true,
+        "next_batch_initial_margin": "3003.17"
+      },
+      "reconciliation": {
+        "clean": true,
+        "status": "CLEAN",
+        "method": "AUTHENTICATED_VENUE_LEDGER",
+        "confirmed_by": "SYSTEM",
+        "confirmed_at": "2026-09-22T16:26:24.262727Z",
+        "confirmed_snapshot_id": 1465,
+        "reason": "venue ledger reconciliation 42e17d02-27c7-4bda-889b-4624b1db9dbf is clean",
+        "invalidated_at": null
+      },
+      "active_batch": {
+        "batch_id": null,
+        "state": "IDLE",
+        "zq_order_id": null,
+        "original_quantity": 10,
+        "filled_quantity": "0",
+        "remaining_quantity": "0",
+        "limit_price": null,
+        "zq_order_status": null,
+        "cancel_reason": null,
+        "residual_minimum_net_profit": null,
+        "residual_required_profit": null,
+        "residual_return_on_capital_bps": null,
+        "obligations": [],
+        "updated_at": "2026-09-22T16:26:44.425739Z"
+      },
+      "synchronized_books": 10,
+      "quotes": {
+        "202610": {
+          "symbol": null,
+          "bid": "96.1",
+          "ask": "96.105",
+          "analytics_qualified": true,
+          "validation_reason": "current-generation live subscription qualified"
+        },
+        "202611": {
+          "symbol": null,
+          "bid": "95.975",
+          "ask": "95.98",
+          "analytics_qualified": true,
+          "validation_reason": "diagnostic live subscription qualified; never execution-authorizing"
+        },
+        "202612": {
+          "symbol": null,
+          "bid": "95.835",
+          "ask": "95.84",
+          "analytics_qualified": true,
+          "validation_reason": "diagnostic live subscription qualified; never execution-authorizing"
+        }
+      },
+      "position_count": 0,
+      "unresolved_alerts": []
+    },
+    "/api/v1/diagnostics/events": {
+      "http_status": 200,
+      "data": {
+        "queue_depth": 0,
+        "queue_capacity": 10000,
+        "queue_high_water": 67,
+        "maximum_event_wait_ms": 4809.158,
+        "maximum_handler_ms": 1345.0,
+        "maximum_event_loop_lag_ms": 2341.0,
+        "processed": {
+          "IBKR": 589,
+          "POLYMARKET": 240
+        },
+        "skipped": {},
+        "failed": {},
+        "ibkr_ingress": {
+          "received": 589,
+          "enqueued": 589,
+          "filtered_quote_ticks": 32,
+          "pending": 0,
+          "capacity": 10000,
+          "high_water": 15,
+          "overflowed": false
+        },
+        "consumer_running": true
+      }
+    },
+    "database_integrity": "ok",
+    "foreign_key_errors": 0,
+    "ledger_counts": {
+      "batches": 1,
+      "orders": 1,
+      "executions": 0,
+      "hedge_obligations": 0,
+      "opening_inventory": 0
+    },
+    "ledger_strategy_identity": {
+      "strategy_contract_month": "202610",
+      "strategy_event_id": "606422",
+      "strategy_rate_effective_date": "2026-10-29"
+    }
+  },
+  "margin_observation": {
+    "result": "passed",
+    "checked_at": "2026-09-22T16:26:26.276900+00:00",
+    "samples": 61,
+    "duration_seconds": 121.9,
+    "observed_previews": [
+      {
+        "order_id": 4391,
+        "contract_month": "202610",
+        "side": "BUY",
+        "quantity": 5,
+        "limit_price": "96.1",
+        "init_margin_change": "3003.17",
+        "maintenance_margin_change": "2574.87",
+        "requested_at": "2026-09-22T16:24:19.550830Z",
+        "received_at": "2026-09-22T16:24:21.077260Z",
+        "qualification_status": "CURRENT",
+        "error": null
+      },
+      {
+        "order_id": 4392,
+        "contract_month": "202610",
+        "side": "BUY",
+        "quantity": 5,
+        "limit_price": "96.1",
+        "init_margin_change": "3003.17",
+        "maintenance_margin_change": "2574.87",
+        "requested_at": "2026-09-22T16:25:19.561327Z",
+        "received_at": "2026-09-22T16:25:19.840674Z",
+        "qualification_status": "CURRENT",
+        "error": null
+      },
+      {
+        "order_id": 4393,
+        "contract_month": "202610",
+        "side": "BUY",
+        "quantity": 5,
+        "limit_price": "96.1",
+        "init_margin_change": "3003.17",
+        "maintenance_margin_change": "2574.86",
+        "requested_at": "2026-09-22T16:26:19.704540Z",
+        "received_at": "2026-09-22T16:26:19.989625Z",
+        "qualification_status": "CURRENT",
+        "error": null
+      }
+    ]
+  },
+  "workflow": {
+    "url": "https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35753060635",
+    "conclusion": "success",
+    "jobs": {
+      "ubuntu_validation": "success",
+      "macos_validation": "success",
+      "publish": "success"
+    }
+  },
+  "limitations": [
+    "Observation used non-routing what-if requests; no executable test order was placed.",
+    "Delayed callback sequences are covered by offline regression tests; their recurrence is not guaranteed during this short production observation.",
+    "The original production callback for ID 4361 was not retained, so its exact identity remains unproven."
+  ],
+  "deployment_notes": [
+    "The first pre-stop check caught temporarily unclean reconciliation and aborted without changing the running engine.",
+    "The first activation rolled back because a strict comparison included the routinely refreshed batches.updated_at timestamp. Backup comparison verified that this was the only change.",
+    "The retry excluded only batches.updated_at from the fingerprint and verified all trading records against the original backup.",
+    "No executable order, cancellation, arming action, or September position change was requested by this deployment."
+  ]
+}
