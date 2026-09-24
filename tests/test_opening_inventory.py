@@ -87,6 +87,22 @@ async def opening(tmp_path, settings):
         await db.close()
 
 
+@pytest.mark.parametrize("rate", ["3.625", "NaN", "not-a-rate"])
+async def test_adoption_validates_explicit_settlement_sizing_basis(opening, rate):
+    repo, original, _ = opening
+    snapshot = deepcopy(original)
+    snapshot["hedge_pre_meeting_effr_percent"] = rate
+    if rate != "3.625":
+        with pytest.raises(RuntimeError, match="invalid hedge EFFR"):
+            await adopt_opening_inventory(repo, snapshot, reason="invalid sizing basis")
+        return
+    # These existing legacy shares are insufficient for the rounded +25 scenario.
+    with pytest.raises(RuntimeError, match="not fully hedged"):
+        await adopt_opening_inventory(repo, snapshot, reason="rounded basis")
+    snapshot["positions"][1]["quantity"] = "11213.40"
+    assert await adopt_opening_inventory(repo, snapshot, reason="rounded hedge evidenced")
+
+
 async def test_opening_inventory_counts_positions_and_preserves_execution_history(opening):
     repo, snapshot, _ = opening
     assert await adopt_opening_inventory(repo, snapshot, reason="verified manual holdings")

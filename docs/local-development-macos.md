@@ -121,9 +121,14 @@ POLYMARKET_EVENT_TITLE="Fed Decision in October?"
 The October 29 effective date is an explicit modeling assumption pending the actual FOMC
 implementation notice. October has 31 calendar days, including weekends: 28 before and
 3 after the assumed change. The model, payoff matrix, actual-fill hedge obligations,
-opening-inventory checks and dashboard use this calendar. Per-contract hedge amounts are
-100.82 INC25 and 201.63 INC50PLUS shares when individually rounded up; a five-contract
-fill needs 504.08 and 1008.15 shares, calculated from unrounded quantities then rounded once.
+opening-inventory checks and dashboard use this calendar. New orders size each hedge from
+the difference between CME-rounded no-change and hike settlements, multiplied by $4,167.
+At 3.88% EFFR the exact per-contract ratios are 100.008 INC25 and 200.016 INC50PLUS;
+a five-contract batch needs 500.04 and 1000.08 shares. Ratios are saved with each order.
+Partial-fill obligations use differences of cumulative rounded quantities, so splitting
+a batch or restarting does not add extra rounding or change its sizing basis. Pre-upgrade
+orders and historical opening-inventory evidence retain their original calendar sizing.
+New inventory evidence can specify `hedge_pre_meeting_effr_percent` for settlement-based validation.
 The implemented terminal states remain 0, +25 and +50 bp, as in the approved strategy.
 
 November is the non-meeting FedWatch anchor. December has its own scheduled FOMC meeting

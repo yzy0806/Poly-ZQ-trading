@@ -53,4 +53,13 @@ Seven broken comparison links were reconnected to the main worksheet.
   PM Depth is absent. Formula-error and unavailable-result scans pass for
   the complete saved inputs.
 
-Changes are local and uncommitted. No production deployment or restart was performed.
+The initial validation above preceded publication. The owner subsequently committed
+and pushed `2f903038e69a1a07c20a8cf1789b844d21c674c2` and authorized deployment.
+That exact release was deployed September 24 at 00:55 Taipei / September 23 at
+16:55 UTC. Source hashes, rounding boundaries and all six October settlements passed
+again inside the running production container. Health, readiness, authenticated
+reconciliation and margin qualification passed; the engine was left disarmed.
+The existing ledger, Gateway and trading settings were preserved. See the
+[deployment record](../../deploy/CURRENT_DEPLOYMENT_AND_SECURITY.md#september-24-current-deployment)
+and [sanitized evidence](production-cme-settlement-2026-09-24.json). Codex made no
+commit or push; these deployment-documentation updates remain local.

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from zq_arb.analytics.payoff import hedge_shares_per_contract, round_shares_up
+from zq_arb.analytics.payoff import hedge_shares_per_contract, incremental_hedge_shares
 from zq_arb.domain.calendar import MeetingCalendar
 from zq_arb.domain.enums import BatchState
 
@@ -80,6 +80,7 @@ class HedgeObligation:
 @dataclass(slots=True)
 class BatchMachine:
     calendar: MeetingCalendar
+    pre_meeting_effr: Decimal
     batch_id: str = field(default_factory=lambda: str(uuid4()))
     state: BatchState = BatchState.IDLE
     original_quantity: int = 10
@@ -111,9 +112,10 @@ class BatchMachine:
 
         obligations: list[HedgeObligation] = []
         for token_code, move in (("INC25", 25), ("INC50PLUS", 50)):
-            due = round_shares_up(
-                hedge_shares_per_contract(move, calendar=self.calendar) * fill_delta
+            ratio = hedge_shares_per_contract(
+                move, pre_meeting_effr=self.pre_meeting_effr, calendar=self.calendar
             )
+            due = incremental_hedge_shares(ratio, self.filled_quantity - fill_delta, fill_delta)
             obligation = HedgeObligation(
                 obligation_id=f"{self.batch_id}:{exec_id}:{token_code}",
                 batch_id=self.batch_id,

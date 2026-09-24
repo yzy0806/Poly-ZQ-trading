@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
 
@@ -75,14 +76,21 @@ def conservative_ibkr_round_trip_commission(
     return max(configured_total, entry_preview_commission * Decimal("2"))
 
 
-def hedge_shares_per_contract(move_bps: int, *, calendar: MeetingCalendar) -> Decimal:
-    """Calendar-weighted execution hedge; settlement rounding leaves a small residual.
+def hedge_shares_per_contract(
+    move_bps: int, *, pre_meeting_effr: Decimal, calendar: MeetingCalendar
+) -> Decimal:
+    """Offset the loss between CME-rounded scenario settlements for one ZQ.
 
-    Keep this ratio common to quotes, partial fills and persisted obligations.
-    Rounded cash-settlement prices determine each scenario's P&L and minimum
-    return, so this hedge is not assumed to make scenario profits identical.
+    Keep the exact ratio until multiplying by the total contract quantity.
+    The final share order is rounded upward to 0.01 shares only once.
     """
-    # Multiply before division, then round only the total obligation upward.
+    base = theoretical_settlement(pre_meeting_effr, Decimal(0), calendar=calendar)
+    scenario = theoretical_settlement(pre_meeting_effr, Decimal(move_bps), calendar=calendar)
+    return abs(base - scenario) * FUTURES_POINT_VALUE
+
+
+def legacy_hedge_shares_per_contract(move_bps: int, *, calendar: MeetingCalendar) -> Decimal:
+    """Preserve the original sizing of orders/inventory saved before ratio snapshots."""
     return (
         Decimal(abs(move_bps))
         * Decimal(calendar.days_after)
@@ -93,6 +101,11 @@ def hedge_shares_per_contract(move_bps: int, *, calendar: MeetingCalendar) -> De
 
 def round_shares_up(shares: Decimal, precision: Decimal = Decimal("0.01")) -> Decimal:
     return shares.quantize(precision, rounding=ROUND_CEILING)
+
+
+def incremental_hedge_shares(ratio: Decimal, filled: Decimal, additional: Decimal) -> Decimal:
+    """Allocate a batch's rounded shares across fills without rounding each fill up."""
+    return round_shares_up(ratio * (filled + additional)) - round_shares_up(ratio * filled)
 
 
 def walk_asks(
@@ -194,11 +207,22 @@ def build_three_state_opportunity(
     emergency_cash_reserve: Decimal,
     post_price_cap: Decimal,
     emergency_price_cap: Decimal,
+    hedge_ratios: Mapping[int, Decimal] | None = None,
+    previously_filled_contracts: Decimal = Decimal("0"),
 ) -> Opportunity:
     if contracts <= 0:
         raise ValueError("contracts must be positive")
-    q25 = round_shares_up(hedge_shares_per_contract(25, calendar=calendar) * Decimal(contracts))
-    q50 = round_shares_up(hedge_shares_per_contract(50, calendar=calendar) * Decimal(contracts))
+    ratios = {
+        move: (
+            hedge_ratios[move] if hedge_ratios is not None else
+            hedge_shares_per_contract(move, pre_meeting_effr=pre_meeting_effr, calendar=calendar)
+        )
+        for move in (25, 50)
+    }
+    if any(not value.is_finite() or value <= 0 for value in ratios.values()):
+        raise ValueError("hedge ratios must be finite and positive")
+    q25 = incremental_hedge_shares(ratios[25], previously_filled_contracts, Decimal(contracts))
+    q50 = incremental_hedge_shares(ratios[50], previously_filled_contracts, Decimal(contracts))
     entry25 = plan_hedge_entry(inc25_book, q25, post_price_cap)
     entry50 = plan_hedge_entry(inc50_book, q50, post_price_cap, allow_one_tick=True)
     post25 = entry25.limit_price
@@ -383,10 +407,8 @@ def build_three_state_opportunity(
         else None
     )
     calculation = OpportunityCalculation(
-        inc25_shares_per_contract=round_shares_up(hedge_shares_per_contract(25, calendar=calendar)),
-        inc50plus_shares_per_contract=round_shares_up(
-            hedge_shares_per_contract(50, calendar=calendar)
-        ),
+        inc25_shares_per_contract=ratios[25],
+        inc50plus_shares_per_contract=ratios[50],
         inc25_emergency_hedge_cash=depth25.total_cost,
         inc50plus_emergency_hedge_cash=depth50.total_cost,
         emergency_hedge_cash=emergency_hedge_cash,

@@ -4,12 +4,13 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import func, select
 
+from zq_arb.analytics.payoff import incremental_hedge_shares
 from zq_arb.config import Settings
 from zq_arb.domain.enums import BatchState
 from zq_arb.domain.models import (
@@ -34,6 +35,24 @@ from zq_arb.persistence.models import (
 def canonical_hash(value: dict[str, Any]) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def saved_hedge_ratios(details: dict[str, Any]) -> dict[str, Decimal] | None:
+    """Missing means a legacy batch; malformed saved sizing must never fall back."""
+    if "hedge_ratios" not in details and "hedge_sizing_method" not in details:
+        return None
+    raw = details.get("hedge_ratios")
+    try:
+        if details.get("hedge_sizing_method") != "CME_ROUNDED_SETTLEMENT_V1":
+            raise ValueError("unknown hedge sizing method")
+        if not isinstance(raw, dict) or len(raw) != 2:
+            raise ValueError("two hedge legs are required")
+        ratios = {str(token): Decimal(str(value)) for token, value in raw.items()}
+        if any(not token or not value.is_finite() or value <= 0 for token, value in ratios.items()):
+            raise ValueError("invalid hedge ratio")
+        return ratios
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("invalid persisted settlement hedge ratios") from exc
 
 
 def json_safe(value: Any) -> Any:
@@ -99,9 +118,16 @@ class Repository(HedgeLedger):
         limit_price: Decimal,
         strategy_version: str,
         snapshot_id: int,
+        hedge_ratios: dict[str, Decimal] | None = None,
     ) -> None:
         """Atomically persist the batch and reserved IBKR id before placeOrder."""
 
+        sizing = (
+            {"hedge_ratios": {token: str(ratio) for token, ratio in hedge_ratios.items()},
+             "hedge_sizing_method": "CME_ROUNDED_SETTLEMENT_V1"}
+            if hedge_ratios is not None else {}
+        )
+        saved_hedge_ratios(sizing)
         await self.database.validate_execution_environment()
         idempotency_key = f"{batch_id}:IBKR:ENTRY"
         async with self.database.session() as session:
@@ -124,6 +150,7 @@ class Repository(HedgeLedger):
                         "limit_price": str(limit_price),
                         "remaining_quantity": str(quantity),
                         "entry_snapshot_id": snapshot_id,
+                        **sizing,
                     },
                 )
             )
@@ -145,6 +172,15 @@ class Repository(HedgeLedger):
                     },
                 )
             )
+
+    async def batch_hedge_ratios(self, batch_id: str) -> dict[str, Decimal] | None:
+        async with self.database.session() as session:
+            batch = await session.scalar(
+                select(BatchRecord).where(BatchRecord.batch_id == batch_id)
+            )
+            if batch is None:
+                raise ValueError("missing batch hedge sizing")
+            return saved_hedge_ratios(batch.details)
 
     async def strategy_zq_quantity(self, contract_month: str) -> Decimal:
         """Return the signed ZQ quantity attributable to the durable strategy ledger."""
@@ -353,6 +389,14 @@ class Repository(HedgeLedger):
                 raise RuntimeError("execution references a missing batch")
             if quantity <= 0 or batch.filled_quantity + quantity > batch.zq_quantity:
                 raise ValueError("IBKR execution quantity is outside the batch")
+            ratios = saved_hedge_ratios(batch.details)
+            if ratios is not None:
+                # The order's frozen ratios survive restarts and EFFR refreshes.
+                # Cumulative rounding makes split fills equal a single batch fill.
+                token_shares = {
+                    token: incremental_hedge_shares(ratio, batch.filled_quantity, quantity)
+                    for token, ratio in ratios.items()
+                }
             session.add(
                 ExecutionRecord(
                     batch_id=batch.batch_id,

@@ -1,0 +1,193 @@
+{
+  "verified_at": "2026-09-23T16:57:11.226893+00:00",
+  "passed": true,
+  "deployed_at": "2026-09-23T16:55:39.715432+00:00",
+  "revision": "2f903038e69a1a07c20a8cf1789b844d21c674c2",
+  "image": "ghcr.io/yzy0806/poly-zq-trading@sha256:00716dbb17c0786422562ebec6f62a024dbdca8e5839b667ef4300c644e12d37",
+  "previous_image": "ghcr.io/yzy0806/poly-zq-trading@sha256:1dc2488685aa0d631c65e0781bf5687ad9e378ff88cf15799f02aaafbad724a0",
+  "backup": "/opt/zq-arb/releases/2f903038e69a1a07c20a8cf1789b844d21c674c2/october-before-cme-rounding.sqlite3",
+  "backup_integrity_ok": true,
+  "reconciled_shutdown": true,
+  "ledger_preserved": true,
+  "gateway_preserved": true,
+  "config_changed_keys": [
+    "SOFTWARE_VERSION",
+    "CONFIG_VERSION"
+  ],
+  "started_at": "2026-09-23T16:55:23.944510861Z",
+  "arm_action_sent": false,
+  "container_health": "healthy",
+  "container_restarts": 0,
+  "state": {
+    "armed": false,
+    "paused": false,
+    "kill_switch": false,
+    "active_batch": {
+      "batch_id": null,
+      "state": "IDLE",
+      "zq_order_id": null,
+      "original_quantity": 10,
+      "filled_quantity": "0",
+      "remaining_quantity": "0",
+      "limit_price": null,
+      "zq_order_status": null,
+      "cancel_reason": null,
+      "residual_minimum_net_profit": null,
+      "residual_required_profit": null,
+      "residual_return_on_capital_bps": null,
+      "obligations": [],
+      "updated_at": "2026-09-23T16:57:10.891679Z"
+    },
+    "reconciliation": {
+      "clean": true,
+      "status": "CLEAN",
+      "method": "AUTHENTICATED_VENUE_LEDGER",
+      "confirmed_by": "SYSTEM",
+      "confirmed_at": "2026-09-23T16:57:08.486869Z",
+      "confirmed_snapshot_id": 1198,
+      "reason": "venue ledger reconciliation e974862b-9d2a-410e-ad82-c6af924dedc1 is clean",
+      "invalidated_at": null
+    },
+    "health_status": 200,
+    "readiness_status": 200,
+    "readiness_reasons": [],
+    "ibkr_status": "CONNECTED",
+    "polymarket_status": "CONNECTED",
+    "polymarket_authenticated": false,
+    "unresolved_hedges": 0,
+    "positions_reconciled": true,
+    "positions_count": 0,
+    "margin_preview": {
+      "status": "AVAILABLE",
+      "quantity": 5,
+      "qualified_for_next_batch": true,
+      "qualification": null,
+      "reason": null
+    },
+    "consumer_running": true,
+    "failed_events": {},
+    "queue_depth": 0,
+    "effr_valid": true,
+    "mapping_verified": true,
+    "rule_hash_match": true,
+    "synchronized_books": 10,
+    "book_count": 10,
+    "eligible_for_live": true,
+    "alerts": [],
+    "software_version": "2f903038e69a1a07c20a8cf1789b844d21c674c2",
+    "config_version": "oct-2026-prod-20260924-2f90303",
+    "database_url": "sqlite+aiosqlite:////var/lib/zq-arb/october-2026-live.sqlite3",
+    "run_mode": "LIVE_ARMED",
+    "submission_settings": {
+      "live": true,
+      "ibkr": true,
+      "pm": true
+    }
+  },
+  "error_log_events": [],
+  "source_matches": {
+    "analytics/probability.py": true,
+    "analytics/payoff.py": true
+  },
+  "rounding_checks": [
+    {
+      "rate_percent": "2.5914",
+      "settlement": "97.409"
+    },
+    {
+      "rate_percent": "2.5915",
+      "settlement": "97.408"
+    },
+    {
+      "rate_percent": "2.5916",
+      "settlement": "97.408"
+    },
+    {
+      "rate_percent": "2.591499999",
+      "settlement": "97.409"
+    },
+    {
+      "rate_percent": "2.591500001",
+      "settlement": "97.408"
+    },
+    {
+      "rate_percent": "-0.0005",
+      "settlement": "100.000"
+    }
+  ],
+  "october_settlements": {
+    "-50": "96.168",
+    "-25": "96.144",
+    "0": "96.120",
+    "25": "96.096",
+    "50": "96.072",
+    "75": "96.047"
+  },
+  "ci": {
+    "id": 35887444977,
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "2f903038e69a1a07c20a8cf1789b844d21c674c2",
+    "html_url": "https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35887444977",
+    "run_attempt": 2,
+    "jobs": [
+      {
+        "name": "validate (macos-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "active_steps": []
+      },
+      {
+        "name": "validate (ubuntu-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "active_steps": []
+      },
+      {
+        "name": "publish",
+        "status": "completed",
+        "conclusion": "success",
+        "active_steps": []
+      }
+    ]
+  },
+  "ledger_fingerprints": {
+    "execution_environment": {
+      "count": 1,
+      "sha256": "a49fb8cc0410a5920c63b5a59dd82f7dc819d50f665d0169b2b91d60bb134521"
+    },
+    "opening_inventory": {
+      "count": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "batches": {
+      "count": 7,
+      "sha256": "f070f28ba1aed62ffab118fcb5fe6a520ff5cbf951c3ea09fa586d9e40fc0d1a"
+    },
+    "orders": {
+      "count": 7,
+      "sha256": "076a870c99f6f86c102ca59c203a64c8305260a1ca49373d0f4ebe74c5cc585f"
+    },
+    "executions": {
+      "count": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "hedge_obligations": {
+      "count": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    }
+  },
+  "local_checks": {
+    "settlement_payoff_october_engine_tests": 71,
+    "callback_reconciliation_tests": 53
+  },
+  "notes": [
+    "Owner committed and pushed the release and explicitly authorized deployment; no commit or push was performed by Codex.",
+    "The first CI attempt failed the missing-position callback deadline assertion on macOS (477 passed, 1 failed). The unchanged retry passed validation and publication.",
+    "The engine was armed but idle before deployment, explicitly disarmed for the restart, and left disarmed afterward.",
+    "Only software/config version identifiers changed; existing credentials, mappings, limits and submission settings were preserved.",
+    "The authenticated venue-ledger reconciliation is CLEAN. The polymarket_authenticated display field is overwritten false by public book events; it is not the authenticated reconciliation result.",
+    "No ARM or explicit order-submission/cancellation request was sent. No database reset or trading-ledger migration occurred.",
+    "Verification is a short post-deployment observation, not a claim of unattended operational reliability."
+  ]
+}

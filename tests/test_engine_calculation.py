@@ -90,7 +90,7 @@ async def test_october_runtime_uses_calendar_for_signal_and_hedge_size(settings:
         probability = calculated.probabilities.upper_probability
         assert probability.quantize(Decimal(".000001")) == Decimal(".5")
         assert calculated.opportunities[0].token_requirements == {
-            "INC25": Decimal("504.08"), "INC50PLUS": Decimal("1008.15"),
+            "INC25": Decimal("500.04"), "INC50PLUS": Decimal("1000.08"),
         }
         assert not calculated.opportunities[0].tradeable
     finally:
@@ -212,13 +212,13 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(
     assert long.emergency_token_prices["INC25"] == Decimal("0.28")
     assert len(long.scenarios) == len(long.emergency_scenarios) == 3
     if split_inc50:
-        assert long.hedge_depth[1].entry_cash_cost == Decimal("48.515")
-        assert long.scenarios[0].inc50plus_pnl == Decimal("-48.515")
+        assert long.hedge_depth[1].entry_cash_cost == Decimal("48.44555")
+        assert long.scenarios[0].inc50plus_pnl == Decimal("-48.44555")
         assert long.calculation is not None
         assert long.calculation.costs.polymarket_fees == Decimal("0.05") * (
-            Decimal("4861.5") * Decimal("0.28") * Decimal("0.72")
+            Decimal("4875.39") * Decimal("0.28") * Decimal("0.72")
             + Decimal("100") * Decimal("0.004") * Decimal("0.996")
-            + Decimal("9623") * Decimal("0.005") * Decimal("0.995")
+            + Decimal("9609.11") * Decimal("0.005") * Decimal("0.995")
         )
     model_check = next(
         check
@@ -227,6 +227,30 @@ async def test_engine_builds_comparisons_and_long_only_profit_path(
     )
     assert model_check.passed
     assert model_check.required_value == "move [-50, 50] bp and probabilities [0, 1]"
+
+
+@pytest.mark.asyncio
+async def test_missing_effr_with_live_books_withholds_sizing_instead_of_raising(settings):
+    runtime = EngineRuntime(settings)
+    try:
+        snapshot = await runtime.state.get()
+        runtime._polymarket_fee_parameters = {
+            code: {"rate": Decimal(".05"), "exponent": Decimal(1)}
+            for code in ("INC25", "INC50PLUS")
+        }
+        runtime._polymarket_fee_parameters_at = utc_now()
+        calculated = runtime._calculate(snapshot.model_copy(update={
+            "effr": EffrObservation(rate_percent=None, valid=False, reason="unavailable"),
+            "books": {
+                leg.yes_token_id: book(leg.yes_token_id, ".01", ".02", leg.code)
+                for leg in settings.market_legs
+            },
+            "quotes": {settings.ibkr_zq_contract_month: quote("202609", "96.325")},
+        }))
+        assert not any(opportunity.tradeable for opportunity in calculated.opportunities)
+    finally:
+        await runtime.polymarket.close()
+        await runtime.database.close()
 
 
 @pytest.mark.asyncio

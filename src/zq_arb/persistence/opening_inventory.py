@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from zq_arb.analytics.payoff import hedge_shares_per_contract
+from zq_arb.analytics.payoff import hedge_shares_per_contract, legacy_hedge_shares_per_contract
 from zq_arb.config import Settings
 from zq_arb.persistence.models import (
     BatchRecord,
@@ -99,12 +99,27 @@ def validate_opening_inventory(
     zq = quantities[("IBKR", settings.ibkr_zq_contract_month)]
     if zq != zq.to_integral_value():
         raise RuntimeError("Opening ZQ quantity must be an integer")
+    rate_value = snapshot.get("hedge_pre_meeting_effr_percent")
+    try:
+        rate = Decimal(str(rate_value)) if rate_value is not None else None
+        if rate is not None and not rate.is_finite():
+            raise ValueError("non-finite rate")
+    except (InvalidOperation, ValueError) as exc:
+        raise RuntimeError("Opening inventory has an invalid hedge EFFR basis") from exc
     for leg in settings.market_legs:
         if leg.code in {"INC25", "INC50PLUS"}:
             bps = 25 if leg.code == "INC25" else 50
+            # Historical evidence has no rate basis and retains its original model.
+            # New settlement-based adoptions may explicitly include the evidenced rate.
+            ratio = (
+                hedge_shares_per_contract(
+                    bps, pre_meeting_effr=rate, calendar=settings.meeting_calendar
+                ) if rate is not None else
+                legacy_hedge_shares_per_contract(bps, calendar=settings.meeting_calendar)
+            )
             if (
                 quantities[("POLYMARKET", leg.yes_token_id)]
-                < hedge_shares_per_contract(bps, calendar=settings.meeting_calendar) * zq
+                < ratio * zq
             ):
                 raise RuntimeError("Opening inventory is not fully hedged under the strategy model")
     receipts = snapshot.get("receipts")

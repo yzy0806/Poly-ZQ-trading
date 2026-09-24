@@ -16,7 +16,56 @@ from zq_arb.persistence.models import (
     ConfigVersion,
     HedgeObligationRecord,
 )
-from zq_arb.persistence.repository import Repository
+from zq_arb.persistence.repository import Repository, saved_hedge_ratios
+
+
+@pytest.mark.parametrize("value", [None, {}, {"a": "1"}, {"a": "NaN", "b": "1"},
+                                 {"a": "-1", "b": "2"}, {"a": "bad", "b": "1"}])
+def test_corrupt_saved_sizing_cannot_use_legacy_fallback(value) -> None:
+    assert saved_hedge_ratios({}) is None
+    with pytest.raises(ValueError, match="invalid persisted"):
+        saved_hedge_ratios({"hedge_ratios": value,
+                            "hedge_sizing_method": "CME_ROUNDED_SETTLEMENT_V1"})
+
+
+def test_versioned_batch_missing_ratios_cannot_use_legacy_sizing() -> None:
+    with pytest.raises(ValueError, match="invalid persisted"):
+        saved_hedge_ratios({"hedge_sizing_method": "CME_ROUNDED_SETTLEMENT_V1"})
+
+
+@pytest.mark.asyncio
+async def test_saved_ratios_survive_restart_and_round_split_fills_once(tmp_path, settings):
+    isolated = settings.model_copy(update={
+        "database_url": f"sqlite+aiosqlite:///{tmp_path / 'split-fills.sqlite3'}",
+    })
+    database = Database(isolated)
+    await database.initialize()
+    repository = Repository(database)
+    ratios = {"asset-25": Decimal("100.008"), "asset-50": Decimal("200.016")}
+    await repository.create_zq_batch_intent(
+        batch_id="rounded", order_id=81, contract_month=isolated.ibkr_zq_contract_month,
+        quantity=5, limit_price=Decimal("96.1"), strategy_version=isolated.strategy_version,
+        snapshot_id=1, hedge_ratios=ratios,
+    )
+    totals = dict.fromkeys(ratios, Decimal(0))
+    for index, quantity in enumerate((1, 1, 3)):
+        # A restart or a later EFFR update must not change this order's sizing.
+        await database.close()
+        database = Database(isolated.model_copy(update={"pre_meeting_effr_percent": Decimal("4")}))
+        await database.initialize()
+        repository = Repository(database)
+        assert await repository.batch_hedge_ratios("rounded") == ratios
+        kwargs = dict(
+            order_id=81, execution_id=f"split-{index}", quantity=Decimal(quantity),
+            price=Decimal("96.1"), executed_at=datetime.now(UTC),
+            token_shares={"wrong-fallback": Decimal("9999")}, details={},
+        )
+        obligations = await repository.record_ibkr_execution_and_obligations(**kwargs)
+        assert await repository.record_ibkr_execution_and_obligations(**kwargs) == ()
+        for obligation in obligations:
+            totals[obligation.token_id] += obligation.due_shares
+    assert totals == {"asset-25": Decimal("500.04"), "asset-50": Decimal("1000.08")}
+    await database.close()
 
 
 @pytest.mark.asyncio

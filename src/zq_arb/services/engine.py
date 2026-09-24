@@ -950,15 +950,25 @@ class EngineRuntime:
         _, _, _, incremental_margin = self._margin_preview_qualification(snapshot, now)
         emergency_reserve = Decimal("0")
         q25 = round_shares_up(
-            hedge_shares_per_contract(25, calendar=self.settings.meeting_calendar)
+            hedge_shares_per_contract(
+                25, pre_meeting_effr=probabilities.pre_meeting_effr,
+                calendar=self.settings.meeting_calendar,
+            )
             * Decimal(self.settings.ibkr_zq_child_order_quantity)
-        )
+        ) if probabilities.pre_meeting_effr is not None else Decimal(0)
         q50 = round_shares_up(
-            hedge_shares_per_contract(50, calendar=self.settings.meeting_calendar)
+            hedge_shares_per_contract(
+                50, pre_meeting_effr=probabilities.pre_meeting_effr,
+                calendar=self.settings.meeting_calendar,
+            )
             * Decimal(self.settings.ibkr_zq_child_order_quantity)
-        )
+        ) if probabilities.pre_meeting_effr is not None else Decimal(0)
         fee_parameters_current, _ = self._polymarket_fee_parameter_status(now)
-        polymarket_fees: Decimal | None = Decimal("0") if fee_parameters_current else None
+        polymarket_fees: Decimal | None = (
+            Decimal("0")
+            if fee_parameters_current and probabilities.pre_meeting_effr is not None
+            else None
+        )
         if (
             polymarket_fees is not None
             and long_book_25 is not None

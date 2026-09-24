@@ -42,11 +42,13 @@ def book(token_id: str, prices: tuple[tuple[str, str], ...]) -> OrderBook:
 
 def test_approved_hedge_share_ratios() -> None:
     assert round_shares_up(
-        hedge_shares_per_contract(25, calendar=MeetingCalendar("202609", date(2026, 9, 17)))
-    ) == Decimal("486.15")
+        hedge_shares_per_contract(25, pre_meeting_effr=Decimal("3.625"),
+                                  calendar=MeetingCalendar("202609", date(2026, 9, 17)))
+    ) == Decimal("487.54")
     assert round_shares_up(
-        hedge_shares_per_contract(50, calendar=MeetingCalendar("202609", date(2026, 9, 17)))
-    ) == Decimal("972.30")
+        hedge_shares_per_contract(50, pre_meeting_effr=Decimal("3.625"),
+                                  calendar=MeetingCalendar("202609", date(2026, 9, 17)))
+    ) == Decimal("970.92")
 
 
 def test_commission_uses_configured_round_trip_floor_or_higher_live_preview() -> None:
@@ -102,8 +104,8 @@ def test_three_state_profit_contains_every_approved_state() -> None:
     )
     assert [row.move_bps for row in opportunity.scenarios] == [0, 25, 50]
     assert opportunity.token_requirements == {
-        "INC25": Decimal("4861.50"),
-        "INC50PLUS": Decimal("9723.00"),
+        "INC25": Decimal("4875.39"),
+        "INC50PLUS": Decimal("9709.11"),
     }
     assert opportunity.minimum_net_profit == min(
         *(row.net_pnl for row in opportunity.scenarios),
@@ -112,8 +114,8 @@ def test_three_state_profit_contains_every_approved_state() -> None:
     assert opportunity.committed_capital is not None
     assert opportunity.return_on_capital_bps is not None
     assert opportunity.calculation is not None
-    assert opportunity.calculation.inc25_shares_per_contract == Decimal("486.15")
-    assert opportunity.calculation.inc50plus_shares_per_contract == Decimal("972.30")
+    assert opportunity.calculation.inc25_shares_per_contract == Decimal("487.539")
+    assert opportunity.calculation.inc50plus_shares_per_contract == Decimal("970.911")
     assert opportunity.calculation.emergency_hedge_cash == (
         opportunity.calculation.inc25_emergency_hedge_cash
         + opportunity.calculation.inc50plus_emergency_hedge_cash
@@ -158,10 +160,10 @@ def test_october_cash_settlement_pnl_and_return_match_excel_inputs() -> None:
         calendar=MeetingCalendar("202610", date(2026, 10, 29)),
         zq_price=Decimal("96.1"),
         pre_meeting_effr=Decimal("3.88"),
-        inc25_book=book("25", (("0.68", "10000"),)),
+        inc25_book=book("25", (("0.54", "10000"),)),
         inc50_book=book("50", (("0.009", "10000"),)),
         cost_inputs=CostInputs(
-            ibkr_commission=Decimal("18.20"), polymarket_fees=Decimal("5.9339748925"),
+            ibkr_commission=Decimal("18.20"), polymarket_fees=Decimal("6.656482476"),
         ),
         incremental_margin=Decimal("2993.63"),
         emergency_cash_reserve=Decimal("0"),
@@ -175,19 +177,19 @@ def test_october_cash_settlement_pnl_and_return_match_excel_inputs() -> None:
         Decimal("416.700"), Decimal("-83.340"), Decimal("-583.380"),
     ]
     assert [row.net_pnl for row in opportunity.scenarios] == [
-        Decimal("40.7182751075"), Decimal("44.7582751075"), Decimal("48.7882751075"),
+        Decimal("112.821197524"), Decimal("112.821197524"), Decimal("112.821197524"),
     ]
     assert opportunity.emergency_scenarios == opportunity.scenarios
-    assert opportunity.minimum_net_profit == Decimal("40.7182751075")
-    assert opportunity.committed_capital == Decimal("3345.47775")
+    assert opportunity.minimum_net_profit == Decimal("112.821197524")
+    assert opportunity.committed_capital == Decimal("3272.65232")
     assert opportunity.return_on_capital_bps == (
-        Decimal("40.7182751075") / Decimal("3345.47775") * Decimal("10000")
+        Decimal("112.821197524") / Decimal("3272.65232") * Decimal("10000")
     )
 
 
-def test_rounding_residual_can_make_hike_the_worst_case() -> None:
+def test_share_rounding_residual_is_less_than_one_cent() -> None:
     opportunity = build_three_state_opportunity(
-        contracts=10,
+        contracts=1,
         calendar=MeetingCalendar("202609", date(2026, 9, 17)),
         zq_price=Decimal("96.30"),
         pre_meeting_effr=Decimal("3.625"),
@@ -200,12 +202,31 @@ def test_rounding_residual_can_make_hike_the_worst_case() -> None:
         emergency_price_cap=Decimal("0.99"),
     )
     zero, hike25, hike50 = opportunity.scenarios
-    assert hike25.net_pnl - zero.net_pnl == Decimal("-13.890")
-    assert hike50.net_pnl - zero.net_pnl == Decimal("13.890")
-    assert opportunity.minimum_net_profit == hike25.net_pnl
+    assert hike25.net_pnl - zero.net_pnl == Decimal("0.001")
+    assert hike50.net_pnl - zero.net_pnl == Decimal("0.009")
+    assert opportunity.minimum_net_profit == zero.net_pnl
     assert opportunity.return_on_capital_bps == (
-        hike25.net_pnl / opportunity.committed_capital * Decimal("10000")
+        zero.net_pnl / opportunity.committed_capital * Decimal("10000")
     )
+
+
+def test_residual_uses_frozen_ratios_and_cumulative_share_rounding() -> None:
+    opportunity = build_three_state_opportunity(
+        contracts=3, calendar=MeetingCalendar("202610", date(2026, 10, 29)),
+        zq_price=Decimal("96.1"), pre_meeting_effr=Decimal("3.8805"),
+        hedge_ratios={25: Decimal("100.008"), 50: Decimal("200.016")},
+        previously_filled_contracts=Decimal(2),
+        inc25_book=book("25", (("0.54", "10000"),)),
+        inc50_book=book("50", (("0.009", "10000"),)),
+        cost_inputs=CostInputs(), incremental_margin=Decimal("1800"),
+        emergency_cash_reserve=Decimal(0), post_price_cap=Decimal(".95"),
+        emergency_price_cap=Decimal(".99"),
+    )
+    assert opportunity.token_requirements == {
+        "INC25": Decimal("300.02"), "INC50PLUS": Decimal("600.04"),
+    }
+    assert opportunity.calculation.inc25_shares_per_contract == Decimal("100.008")
+    assert opportunity.scenarios[0].settlement_price == Decimal("96.119")
 
 
 def test_empty_book_fails_closed() -> None:
@@ -351,7 +372,7 @@ def test_inc50_scenarios_use_full_two_price_cost_only_within_one_tick(next_ask: 
     assert depth.best_ask_shares == Decimal("90.18")
     if next_ask == "0.011":
         assert not depth.sufficient
-        assert depth.shortfall_shares == Decimal("9632.82")
+        assert depth.shortfall_shares == Decimal("9618.93")
         assert opportunity.scenarios == ()
         assert any(
             check.code == "INC50PLUS_YES_ENTRY_DEPTH" and not check.passed
@@ -360,10 +381,10 @@ def test_inc50_scenarios_use_full_two_price_cost_only_within_one_tick(next_ask: 
         return
     assert depth.sufficient
     assert depth.shortfall_shares == 0
-    assert depth.entry_cash_cost == Decimal("97.13982")
-    assert depth.entry_vwap == Decimal("97.13982") / Decimal("9723")
+    assert depth.entry_cash_cost == Decimal("97.00092")
+    assert depth.entry_vwap == Decimal("97.00092") / Decimal("9709.11")
     assert opportunity.token_prices["INC50PLUS"] == depth.entry_vwap
     assert not opportunity.gate_reasons
     assert [row.move_bps for row in opportunity.scenarios] == [0, 25, 50]
-    assert opportunity.scenarios[0].inc50plus_pnl == Decimal("-97.13982")
-    assert opportunity.scenarios[2].inc50plus_pnl == Decimal("9625.86018")
+    assert opportunity.scenarios[0].inc50plus_pnl == Decimal("-97.00092")
+    assert opportunity.scenarios[2].inc50plus_pnl == Decimal("9612.10908")

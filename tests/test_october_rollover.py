@@ -65,8 +65,12 @@ def test_october_weights_drive_probabilities_and_scenario_hedges():
     assert direct.expected_move_bps.quantize(Decimal("0.000001")) == Decimal("12.500000")
     assert direct.upper_probability.quantize(Decimal("0.000001")) == Decimal("0.500000")
     assert "ZQV6" in direct.reason
-    assert round_shares_up(hedge_shares_per_contract(25, calendar=OCTOBER)) == Decimal("100.82")
-    assert round_shares_up(hedge_shares_per_contract(50, calendar=OCTOBER)) == Decimal("201.63")
+    assert round_shares_up(hedge_shares_per_contract(
+        25, pre_meeting_effr=rate, calendar=OCTOBER,
+    )) == Decimal("100.01")
+    assert round_shares_up(hedge_shares_per_contract(
+        50, pre_meeting_effr=rate, calendar=OCTOBER,
+    )) == Decimal("200.02")
     asset_id = "test-market-asset"
     book = OrderBook(
         token_id=asset_id,
@@ -88,14 +92,12 @@ def test_october_weights_drive_probabilities_and_scenario_hedges():
     )
     # Round the entire quantity once, rather than multiplying a rounded per-contract number.
     assert result.token_requirements == {
-        "INC25": Decimal("504.08"),
-        "INC50PLUS": Decimal("1008.15"),
+        "INC25": Decimal("500.04"),
+        "INC50PLUS": Decimal("1000.08"),
     }
-    assert result.calculation.inc25_shares_per_contract == Decimal("100.82")
+    assert result.calculation.inc25_shares_per_contract == Decimal("100.008")
     gross = [s.gross_pnl for s in result.scenarios]
-    # Linear hedge quantities leave the CME settlement-rounding residual in P&L.
-    assert gross[1] - gross[0] == Decimal("4.040")
-    assert gross[2] - gross[0] == Decimal("8.070")
+    assert gross[1] == gross[0] == gross[2]
     assert result.scenarios[1].settlement_price == theoretical_settlement(
         rate, Decimal(25), calendar=OCTOBER
     )

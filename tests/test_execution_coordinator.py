@@ -389,8 +389,8 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
         zq_price=Decimal("96.31"),
         tradeable=True,
         calculation=OpportunityCalculation(
-            inc25_shares_per_contract=Decimal("486.15"),
-            inc50plus_shares_per_contract=Decimal("972.30"),
+            inc25_shares_per_contract=Decimal("487.539"),
+            inc50plus_shares_per_contract=Decimal("970.911"),
             inc25_emergency_hedge_cash=Decimal("2041.83"),
             inc50plus_emergency_hedge_cash=Decimal("58.34"),
             emergency_hedge_cash=Decimal("2100.17"),
@@ -425,6 +425,10 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
     assert replacement.batch_id is not None
     assert replacement.original_quantity == 10
     assert replacement.limit_price == Decimal("96.31")
+    assert await repository.batch_hedge_ratios(replacement.batch_id) == {
+        inc25.yes_token_id: Decimal("487.539"),
+        inc50.yes_token_id: Decimal("970.911"),
+    }
     ibkr.submit_zq_limit_day.assert_called_once()
 
     await polymarket.close()
@@ -435,9 +439,11 @@ async def test_ibkr_fill_durably_triggers_incremental_lowest_ask_hedges_and_late
 async def test_pending_margin_refresh_defers_only_residual_return_gate(settings: Settings) -> None:
     state = StateStore(settings)
     ibkr = MagicMock()
+    repository = MagicMock()
+    repository.batch_hedge_ratios = AsyncMock(return_value=None)
     coordinator = ExecutionCoordinator(
         settings=settings,
-        repository=MagicMock(),
+        repository=repository,
         state=state,
         ibkr=ibkr,
         polymarket=MagicMock(),

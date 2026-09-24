@@ -18,7 +18,8 @@ from zq_arb.analytics.payoff import (
     CostInputs,
     build_three_state_opportunity,
     conservative_ibkr_round_trip_commission,
-    hedge_shares_per_contract,
+    incremental_hedge_shares,
+    legacy_hedge_shares_per_contract,
     plan_hedge_entry,
     round_shares_up,
     walk_asks,
@@ -662,6 +663,10 @@ class ExecutionCoordinator:
             limit_price=opportunity.zq_price,
             strategy_version=self.settings.strategy_version,
             snapshot_id=snapshot.snapshot_id,
+            hedge_ratios={
+                self._token_id("INC25"): opportunity.calculation.inc25_shares_per_contract,
+                self._token_id("INC50PLUS"): opportunity.calculation.inc50plus_shares_per_contract,
+            },
         )
         # No awaited operation may separate this final validation and sending.
         final = await self.state.get()
@@ -728,12 +733,16 @@ class ExecutionCoordinator:
         )
         if not known:
             return
+        # Only pre-upgrade orders use this fallback. The repository atomically
+        # computes new-order obligations from their persisted settlement ratios.
         token_shares = {
             self._token_id("INC25"): round_shares_up(
-                hedge_shares_per_contract(25, calendar=self.settings.meeting_calendar) * quantity
+                legacy_hedge_shares_per_contract(25, calendar=self.settings.meeting_calendar)
+                * quantity
             ),
             self._token_id("INC50PLUS"): round_shares_up(
-                hedge_shares_per_contract(50, calendar=self.settings.meeting_calendar) * quantity
+                legacy_hedge_shares_per_contract(50, calendar=self.settings.meeting_calendar)
+                * quantity
             ),
         }
         obligations = await self.repository.record_ibkr_execution_and_obligations(
@@ -1689,14 +1698,17 @@ class ExecutionCoordinator:
             return
         scale = batch.remaining_quantity / Decimal(batch.original_quantity)
         margin = snapshot.margin_preview.next_batch_initial_margin
-        q25 = round_shares_up(
-            hedge_shares_per_contract(25, calendar=self.settings.meeting_calendar)
-            * batch.remaining_quantity
-        )
-        q50 = round_shares_up(
-            hedge_shares_per_contract(50, calendar=self.settings.meeting_calendar)
-            * batch.remaining_quantity
-        )
+        saved_ratios = await self.repository.batch_hedge_ratios(batch.batch_id)
+        ratios = {
+            move: (
+                saved_ratios[self._token_id(code)] if saved_ratios is not None else
+                legacy_hedge_shares_per_contract(move, calendar=self.settings.meeting_calendar)
+            )
+            for move, code in ((25, "INC25"), (50, "INC50PLUS"))
+        }
+        previously_filled = batch.filled_quantity if saved_ratios is not None else Decimal(0)
+        q25 = incremental_hedge_shares(ratios[25], previously_filled, batch.remaining_quantity)
+        q50 = incremental_hedge_shares(ratios[50], previously_filled, batch.remaining_quantity)
         emergency25 = walk_asks(
             book25.asks, q25, price_cap=self.settings.polymarket_emergency_max_price
         )
@@ -1731,6 +1743,8 @@ class ExecutionCoordinator:
             contracts=contracts,
             zq_price=batch.limit_price,
             pre_meeting_effr=effr,
+            hedge_ratios=ratios,
+            previously_filled_contracts=previously_filled,
             inc25_book=book25,
             inc50_book=book50,
             cost_inputs=CostInputs(

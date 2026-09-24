@@ -1,8 +1,8 @@
 # ZQ Trading System — Current Deployment, Security and Production Readiness
 
-Documentation and production runtime reviewed: 2026-09-22 at 16:26 UTC / September 23 at 00:26 Taipei
+Documentation and production runtime reviewed: 2026-09-23 at 16:57 UTC / September 24 at 00:57 Taipei
 
-Environment: margin-preview fix deployed / October ledger preserved / Gateway connected / engine disarmed and unpaused / clean October reconciliation
+Environment: CME settlement-rounding fix deployed / October ledger preserved / Gateway connected / engine disarmed and unpaused / clean October reconciliation
 
 Active VPS: **78.142.195.87** (`s62219`)
 
@@ -26,7 +26,49 @@ The VPS runs the trading engine, the IB Gateway, Cloudflare Tunnel, and local SQ
 
 Historical September 14 verification: the callback deadline fix in `0c4718e` was deployed on September 14 at 13:15 UTC after the operator explicitly approved disarming and cancelling the working unfilled ZQ order. At 13:17 UTC, the updated engine was healthy, disarmed, unpaused and idle, with clean venue-ledger reconciliation, matching positions, no outstanding hedge obligations, and a qualified 5-contract margin preview. Its configured mode remains `LIVE_ARMED`; `LIVE_TRADING_ENABLED`, `POLYMARKET_ORDER_SUBMISSION_ENABLED`, and `IBKR_ORDER_SUBMISSION_ENABLED` are unchanged. Gateway remains logged into live mode with `READ_ONLY_API=no`. No re-arm action was sent during this deployment. The earlier morning arming is recorded as historical evidence in Section 11.1.
 
-### September 23 current deployment
+### September 24 current deployment
+
+Release `2f903038e69a1a07c20a8cf1789b844d21c674c2` is deployed using immutable image
+`ghcr.io/yzy0806/poly-zq-trading@sha256:00716dbb17c0786422562ebec6f62a024dbdca8e5839b667ef4300c644e12d37`.
+The owner committed and pushed the release, then explicitly authorized deployment.
+Codex made no commit or push. The container started September 23 at 16:55:23 UTC /
+September 24 at 00:55:23 Taipei.
+
+The code now rounds the modeled monthly average EFFR to 0.001 percentage point,
+with exact ties upward, before subtracting from 100. Scenario P&L and minimum return
+use those rounded settlements. Trading tick sizes do not determine final settlement.
+The source hashes in the isolated image and running container matched the committed
+probability/payoff modules. Six rounding cases (including both sides of a tie and a
+negative tie) and all six displayed October settlement scenarios passed inside both
+containers and agreed with the workbook's verified results.
+
+[GitHub Actions run 35887444977](https://github.com/yzy0806/Poly-ZQ-trading/actions/runs/35887444977)
+passed Ubuntu validation, macOS validation and image publication on attempt 2. The
+first attempt passed 477 tests but failed the missing-position callback-deadline
+assertion on macOS; the unchanged retry passed. The 71 relevant settlement/payoff/
+October/engine tests and all 53 callback-reconciliation tests also passed locally.
+No test or application source was modified for the retry.
+
+The engine was armed but idle before the deployment. It was disarmed through the
+authenticated control path, then stopped with a reconciled shutdown and backed up.
+The existing `/var/lib/zq-arb/october-2026-live.sqlite3` ledger was retained. Trading
+record fingerprints match the stopped backup, excluding the routinely updated batch
+timestamp. Gateway's container identity and start time are unchanged. Only
+`SOFTWARE_VERSION` and `CONFIG_VERSION` changed in the application env; credentials,
+market mappings, existing limits and submission settings were preserved. Env mode is
+`0600`. The rollback image reference, prior configuration and integrity-checked backup
+are retained under `/opt/zq-arb/releases/2f903038e69a1a07c20a8cf1789b844d21c674c2`.
+
+At 16:57 UTC, container health, `/healthz` and `/readyz` passed. The engine was
+**disarmed, unpaused and idle**, with fresh authenticated reconciliation **CLEAN**,
+no hedge obligations, no current alerts, a qualified margin preview, verified October
+mapping/rules, valid EFFR and all ten Polymarket books synchronized. The event consumer
+was running with an empty queue and no failed events or error-level log events in the
+checked post-start window. No ARM, explicit order or cancellation request was sent.
+This is a short runtime observation. See the
+[sanitized deployment evidence](../docs/validation/production-cme-settlement-2026-09-24.json).
+
+### September 23 previous deployment
 
 Release `00d9368b61373ad66f5ba4efa8e14d6b0b0664b8` is deployed using immutable image
 `ghcr.io/yzy0806/poly-zq-trading@sha256:1dc2488685aa0d631c65e0781bf5687ad9e378ff88cf15799f02aaafbad724a0`.
